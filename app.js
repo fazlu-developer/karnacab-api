@@ -1,19 +1,16 @@
 /**
- * WebDeluxe / cPanel → Setup Node.js App
+ * WebDeluxe / cPanel Node.js App — STARTUP FILE = app.js
  *
- * Node.js version: 20 or 22
- * Application mode: Production
- * Application root: folder that contains this file (package.json + dist/)
- * Application URL: https://api.karnacab.in  (or the subdomain you attached)
- * Application startup file: app.js
- *
- * Then: Run NPM Install → npm run build (if dist/ was not uploaded) → Restart
- * Copy .env.production to .env in this same folder.
+ * Binds process.env.PORT immediately so the PaaS proxy does not return
+ * the generic "Service Unavailable" text. Then boots Nest. If Nest fails,
+ * this same URL shows the real error (file, env, dist, stack).
  */
 'use strict';
 
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
+const { page, jsonPayload } = require('./hosting-status');
 
 process.chdir(__dirname);
 
@@ -53,18 +50,58 @@ loadEnvFile('.env.production');
 if (!process.env.NODE_ENV) {
   process.env.NODE_ENV = 'production';
 }
-
-// Passenger / CloudLinux injects PORT. Nest must use that, not a hardcoded 3000.
 if (process.env.PORT) {
   process.env.APP_PORT = process.env.PORT;
 }
 
-const distMain = path.join(__dirname, 'dist', 'main.js');
-if (!fs.existsSync(distMain)) {
-  console.error(
-    'KarnaCab API: dist/main.js is missing. Upload dist/ from a local npm run build, or in cPanel Terminal run: npm run build',
-  );
-  process.exit(1);
+const boot = { phase: 'starting', error: null };
+
+function sendPlaceholder(req, res) {
+  const url = String(req.url || '/');
+  const accept = String(req.headers.accept || '');
+  const asJson =
+    accept.includes('application/json') ||
+    url.startsWith('/api') ||
+    url.startsWith('/healthz');
+  const payload = jsonPayload(boot);
+  if (asJson) {
+    // 200 so the PaaS proxy does not replace our body with "Service Unavailable"
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(payload, null, 2));
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(page(boot));
 }
 
-require(distMain);
+const server = http.createServer(sendPlaceholder);
+
+global.__karnacabHttpServer = server;
+global.__karnacabSetError = (err) => {
+  boot.phase = 'failed';
+  boot.error =
+    err instanceof Error ? err.stack || err.message : String(err);
+  console.error('KarnaCab API startup failed');
+  console.error(boot.error);
+};
+
+const listenPort = Number(process.env.PORT || process.env.APP_PORT || 3000);
+const listenHost = process.env.HOST || '0.0.0.0';
+const distMain = path.join(__dirname, 'dist', 'main.js');
+
+server.listen(listenPort, listenHost, () => {
+  console.log(`KarnaCab API bound ${listenHost}:${listenPort} (startup file app.js)`);
+  if (!fs.existsSync(distMain)) {
+    global.__karnacabSetError(
+      new Error(
+        'dist/main.js is missing. Upload the dist/ folder from your PC (npm run build) or run npm run build in cPanel Terminal.',
+      ),
+    );
+    return;
+  }
+  try {
+    require(distMain);
+  } catch (error) {
+    global.__karnacabSetError(error);
+  }
+});
