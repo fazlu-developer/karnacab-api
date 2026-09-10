@@ -44,7 +44,7 @@ import { CmsModule } from './cms/cms.module';
       isGlobal: true,
       cache: true,
       expandVariables: true,
-      envFilePath: ['.env', '.env.local'],
+      envFilePath: ['.env', '.env.production', '.env.local'],
       load: [configuration],
       validate: validateEnv,
     }),

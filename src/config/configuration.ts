@@ -2,7 +2,7 @@ export default () => ({
   app: {
     name: process.env.APP_NAME ?? 'KarnaCab API',
     env: process.env.NODE_ENV ?? 'development',
-    port: parseInt(process.env.APP_PORT ?? '3000', 10),
+    port: parseInt(process.env.PORT || process.env.APP_PORT || '3000', 10),
     url: process.env.APP_URL ?? 'http://localhost:3000',
     prefix: process.env.API_PREFIX ?? 'api',
     version: process.env.API_VERSION ?? '1',

@@ -4,6 +4,7 @@ coverage
 storage
 .env
 .env.local
+.env.production
 *.log
 .DS_Store
 firebase-service-account.json

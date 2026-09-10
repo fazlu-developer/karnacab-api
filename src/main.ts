@@ -12,12 +12,19 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter({ logger: false, bodyLimit: 10 * 1024 * 1024 }),
+    new FastifyAdapter({
+      logger: false,
+      bodyLimit: 10 * 1024 * 1024,
+      trustProxy: true,
+    }),
     { bufferLogs: true },
   );
 
   const config = app.get(ConfigService);
-  const port = config.get<number>('app.port') ?? 3000;
+  const port =
+    parseInt(String(process.env.PORT || ''), 10) ||
+    config.get<number>('app.port') ||
+    3000;
   const origins = config.get<string[]>('cors.origins') ?? [];
 
   app.useLogger(app.get(Logger));
@@ -62,4 +69,8 @@ async function bootstrap() {
   return this.toString();
 };
 
-void bootstrap();
+void bootstrap().catch((error) => {
+  console.error('KarnaCab API failed to start');
+  console.error(error);
+  process.exit(1);
+});

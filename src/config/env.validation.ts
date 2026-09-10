@@ -34,6 +34,14 @@ class EnvironmentVariables {
   @IsOptional()
   APP_PORT?: number = 3000;
 
+  /** cPanel / WebDeluxe Node.js App injects this. Do not hard-code 3000. */
+  @Transform(toInt)
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  @IsOptional()
+  PORT?: number;
+
   @IsString()
   @IsOptional()
   APP_NAME?: string = 'KarnaCab API';
