@@ -8,7 +8,6 @@ use App\Support\Permissions;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
 use Symfony\Component\HttpKernel\Exception\UnauthorizedHttpException;
 
@@ -68,43 +67,82 @@ class AuthService
 
     public function requestOtp(string $phone): array
     {
-        $code = app()->environment('production') ? (string) random_int(100000, 999999) : '123456';
+        $phone = $this->normalizePhone($phone);
+        $demo = $this->isDemoPhone($phone);
+        $code = $demo ? '123456' : (string) random_int(100000, 999999);
         Cache::put('otp:'.$phone, hash('sha256', $phone.':'.$code), 300);
 
-        return ['ok' => true, 'expiresInSeconds' => 300, 'demo' => ! app()->environment('production')];
+        $payload = [
+            'ok' => true,
+            'expiresInSeconds' => 300,
+            'demo' => $demo,
+        ];
+        if ($demo || config('app.debug')) {
+            $payload['devCode'] = $code;
+        }
+
+        return $payload;
     }
 
     public function verifyOtp(string $phone, string $code, string $role = 'CUSTOMER'): array
     {
-        $demo = ! app()->environment('production') && in_array($phone, ['9999999999', '9888888888'], true) && $code === '123456';
+        $phone = $this->normalizePhone($phone);
+        $code = preg_replace('/\D+/', '', $code) ?? '';
+        $demo = $this->isDemoPhone($phone) && $code === '123456';
         $hash = Cache::get('otp:'.$phone);
-        if (! $demo && $hash !== hash('sha256', $phone.':'.$code)) {
-            throw ValidationException::withMessages(['code' => 'Invalid OTP']);
+        $matches = is_string($hash) && hash_equals($hash, hash('sha256', $phone.':'.$code));
+        if (! $demo && ! $matches) {
+            abort(422, 'Invalid OTP');
         }
+
         $user = User::query()->where('phone', $phone)->first();
         if (! $user) {
-            $email = $phone.'@otp.karnacab.local';
             $user = User::query()->create([
                 'role' => $role,
                 'status' => $role === 'DRIVER' ? 'PENDING' : 'ACTIVE',
                 'name' => 'KarnaCab user',
-                'email' => $email,
+                'email' => $phone.'@otp.karnacab.local',
                 'phone' => $phone,
                 'password_hash' => Hash::make(bin2hex(random_bytes(8))),
             ]);
-            if ($role === 'DRIVER' && ! $user->driver) {
-                DB::table('drivers')->insert([
-                    'user_id' => $user->id,
-                    'license_no' => 'PENDING',
-                    'kyc_status' => 'pending',
-                    'duty_status' => 'offline',
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-            }
+        } elseif ($role === 'DRIVER' && $user->role !== 'DRIVER' && $this->isDemoPhone($phone)) {
+            $user->update(['role' => 'DRIVER', 'status' => 'PENDING']);
+            $user->refresh();
+        } elseif ($role === 'DRIVER' && $user->role !== 'DRIVER') {
+            abort(403, 'Use the customer app for this number');
+        } elseif ($role === 'CUSTOMER' && $user->role === 'DRIVER') {
+            abort(403, 'Use the driver app for this number');
         }
 
-        return $this->issue($user);
+        if ($role === 'DRIVER' && ! DB::table('drivers')->where('user_id', $user->id)->exists()) {
+            DB::table('drivers')->insert([
+                'user_id' => $user->id,
+                'license_no' => 'PENDING',
+                'kyc_status' => 'pending',
+                'duty_status' => 'offline',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        return $this->issue($user->fresh());
+    }
+
+    private function normalizePhone(string $phone): string
+    {
+        $digits = preg_replace('/\D+/', '', $phone) ?? '';
+        if (strlen($digits) >= 12 && str_starts_with($digits, '91')) {
+            $digits = substr($digits, -10);
+        } elseif (strlen($digits) === 11 && str_starts_with($digits, '0')) {
+            $digits = substr($digits, 1);
+        }
+
+        return $digits;
+    }
+
+    private function isDemoPhone(string $phone): bool
+    {
+        return in_array($phone, ['9999999999', '9888888888'], true);
     }
 
     public function present(User $user): array
