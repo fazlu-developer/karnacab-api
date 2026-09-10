@@ -1,0 +1,19 @@
+# KarnaCab Laravel 12 API — cPanel
+# Point api.karnacab.in at this folder. Requests go to public/.
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^\.env - [F,L]
+    RewriteRule ^\.env\.production - [F,L]
+    RewriteCond %{HTTPS} !=on
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+    RewriteCond %{REQUEST_URI} ^/public/ [NC]
+    RewriteRule .* - [L]
+    RewriteRule ^(.*)$ public/$1 [L]
+</IfModule>
+
+<FilesMatch "^\.env">
+    Require all denied
+</FilesMatch>
+
+DirectoryIndex public/index.php index.php
