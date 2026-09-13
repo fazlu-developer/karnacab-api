@@ -2,35 +2,20 @@
 
 namespace App\Providers;
 
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
 {
-    /**
-     * Register any application services.
-     */
     public function register(): void
     {
         //
     }
 
-    /**
-     * Bootstrap any application services.
-     */
     public function boot(): void
     {
-        if (app()->environment('local')) {
-            config([
-                'cors.paths' => ['api/*', '*'],
-                'cors.allowed_origins' => ['*'],
-                'cors.supports_credentials' => false,
-            ]);
-        } else {
-            config([
-                'cors.paths' => ['api/*', '*'],
-                'cors.allowed_origins' => config('karnacab.cors_origins'),
-                'cors.supports_credentials' => true,
-            ]);
+        if (str_starts_with((string) config('app.url'), 'https://')) {
+            URL::forceScheme('https');
         }
     }
 }

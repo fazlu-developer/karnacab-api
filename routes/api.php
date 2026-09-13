@@ -48,7 +48,10 @@ Route::post('/v1/auth/driver/otp/verify', [AuthController::class, 'verifyDriverO
 Route::middleware('jwt')->group(function () {
     Route::get('/v1/auth/me', [AuthController::class, 'me']);
     Route::patch('/v1/auth/profile', [AuthController::class, 'profile']);
+    Route::post('/v1/auth/avatar', [AuthController::class, 'avatar']);
     Route::patch('/v1/auth/location', [AuthController::class, 'location']);
+    Route::post('/v1/auth/heartbeat', [AuthController::class, 'heartbeat']);
+    Route::post('/v1/notifications/devices', [AuthController::class, 'saveDevice']);
     Route::get('/v1/platform/session', [PlatformController::class, 'session']);
     Route::get('/v1/platform/roles', fn () => ['roles' => ['CUSTOMER', 'DRIVER', 'ADMIN', 'SUPER_ADMIN', 'FLEET_OWNER', 'DISTRICT_HEAD', 'STATE_HEAD', 'FRANCHISE', 'CORPORATE', 'ADVERTISER']]);
 
@@ -76,6 +79,13 @@ Route::middleware('jwt')->group(function () {
     Route::get('/v1/bookings/{id}', [PlatformController::class, 'bookingsOne']);
     Route::post('/v1/bookings/{id}/accept', [PlatformController::class, 'bookingsAccept']);
     Route::post('/v1/bookings/{id}/reject', [PlatformController::class, 'bookingsReject']);
+    Route::post('/v1/bookings/{id}/cancel', [PlatformController::class, 'bookingsCancel']);
+    Route::post('/v1/bookings/{id}/verify-otp', [PlatformController::class, 'bookingsVerifyOtp']);
+    Route::post('/v1/bookings/{id}/start', [PlatformController::class, 'bookingsStart']);
+    Route::post('/v1/bookings/{id}/complete', [PlatformController::class, 'bookingsComplete']);
+    Route::post('/v1/bookings/{id}/arrive', function (\Illuminate\Http\Request $request, string $id) {
+        return app(\App\Services\BookingService::class)->lifecycle($request->user(), $id, 'arrive');
+    });
     Route::post('/v1/bookings/{id}/reschedule', [PlatformController::class, 'bookingsReschedule']);
     Route::post('/v1/bookings/{id}/rate', [PlatformController::class, 'bookingsRate']);
     Route::post('/v1/bookings/{id}/lifecycle', [PlatformController::class, 'bookingsLifecycle']);
@@ -97,6 +107,8 @@ Route::middleware('jwt')->group(function () {
     Route::patch('/v1/drivers/me/duty', [PlatformController::class, 'driversOnline']);
     Route::post('/v1/drivers/me/location', [PlatformController::class, 'driversLocation']);
     Route::get('/v1/drivers/me/location', [PlatformController::class, 'driversLocation']);
+    Route::get('/v1/drivers/nearby', [PlatformController::class, 'driversNearby']);
+    Route::get('/v1/settings/ride', [PlatformController::class, 'rideSettings']);
     Route::get('/v1/drivers/offers', [PlatformController::class, 'driversOffers']);
     Route::get('/v1/drivers/{id}', [PlatformController::class, 'driversMe']);
 
@@ -104,7 +116,7 @@ Route::middleware('jwt')->group(function () {
     Route::patch('/v1/drivers/me/profile', [PlatformController::class, 'kycProfile']);
     Route::patch('/v1/drivers/me/vehicle', [PlatformController::class, 'kycProfile']);
     Route::patch('/v1/drivers/me/bank', [PlatformController::class, 'kycProfile']);
-    Route::post('/v1/drivers/me/documents', fn () => ['ok' => true, 'module' => 'kyc']);
+    Route::post('/v1/drivers/me/documents', [PlatformController::class, 'kycUpload']);
     Route::post('/v1/drivers/me/kyc/submit', [PlatformController::class, 'kycSubmit']);
     Route::get('/v1/ops/kyc', [PlatformController::class, 'driversList']);
     Route::patch('/v1/ops/kyc/{driverId}', [PlatformController::class, 'kycReview']);

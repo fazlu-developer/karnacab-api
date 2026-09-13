@@ -14,6 +14,16 @@ class User extends Model
 
     protected $hidden = ['password_hash'];
 
+    protected $casts = [
+        'last_lat' => 'float',
+        'last_lng' => 'float',
+        'last_heading' => 'float',
+        'date_of_birth' => 'date',
+        'last_seen_at' => 'datetime',
+        'location_updated_at' => 'datetime',
+        'profile_completed_at' => 'datetime',
+    ];
+
     public function driver(): HasOne
     {
         return $this->hasOne(Driver::class, 'user_id');

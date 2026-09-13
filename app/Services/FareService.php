@@ -10,8 +10,11 @@ class FareService
 {
     public function quote(array $input): array
     {
-        $product = $input['product'];
-        $category = $input['category'];
+        $product = strtoupper((string) ($input['product'] ?? 'LOCAL_CAB'));
+        if (in_array($product, ['LOCAL', 'TRIP', 'CAB'], true)) {
+            $product = 'LOCAL_CAB';
+        }
+        $category = strtoupper((string) ($input['category'] ?? 'BIKE'));
         $hours = ($product === 'RENTAL') ? ($input['hours'] ?? 8) : ($input['hours'] ?? null);
         $query = DB::table('fare_rules')->where('product', $product)->where('category', $category)->where('active', 1);
         if (! empty($input['districtId'])) {
@@ -23,6 +26,11 @@ class FareService
             $query->where('rental_hours', $hours);
         }
         $rule = $query->orderByDesc('district_id')->first();
+        if (! $rule) {
+            $fallback = DB::table('fare_rules')->where('active', 1)->where('product', $product);
+            $rule = $fallback->orderByDesc('district_id')->first()
+                ?: DB::table('fare_rules')->where('active', 1)->orderBy('id')->first();
+        }
         if (! $rule) {
             throw new NotFoundHttpException('No fare rule for that product and vehicle');
         }

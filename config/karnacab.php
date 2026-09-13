@@ -2,6 +2,7 @@
 
 return [
     'jwt_ttl' => 60 * 60 * 24 * 7,
+    'api_public_url' => rtrim((string) env('API_PUBLIC_URL', env('APP_URL', 'https://api.karnacab.in')), '/'),
     'cors_origins' => array_values(array_filter(array_map('trim', explode(',', (string) env(
         'CORS_ORIGINS',
         'http://localhost:8000,https://karnacab.jodoocorp.in',

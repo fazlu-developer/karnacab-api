@@ -27,6 +27,15 @@ class AuthenticateJwt
         if (! $user) {
             return response()->json(['message' => 'Invalid token', 'statusCode' => 401], 401);
         }
+        $tokenEpoch = (int) ($payload->sev ?? 0);
+        $userEpoch = (int) ($user->session_epoch ?? 0);
+        if ($userEpoch > 0 && $tokenEpoch !== $userEpoch) {
+            return response()->json([
+                'message' => 'Session expired. Please sign in again.',
+                'statusCode' => 401,
+                'code' => 'SESSION_REVOKED',
+            ], 401);
+        }
         $request->attributes->set('jwt', $payload);
         $request->attributes->set('actor', $user);
         $request->setUserResolver(fn () => $user);

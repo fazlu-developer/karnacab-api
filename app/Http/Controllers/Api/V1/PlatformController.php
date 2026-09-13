@@ -13,6 +13,7 @@ use App\Services\DriverOpsService;
 use App\Services\FareService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class PlatformController extends Controller
 {
@@ -107,20 +108,53 @@ class PlatformController extends Controller
 
     public function quoteOptions(Request $request)
     {
+        $requested = strtoupper((string) $request->input('category', 'BIKE'));
         $options = [];
         foreach (config('karnacab.vehicle_types') as $vehicle) {
             try {
-                $quote = $this->fares->quote(array_merge($request->all(), ['category' => $vehicle['key']]));
+                $quote = $this->fares->quote(array_merge($request->all(), [
+                    'product' => $request->input('product', 'LOCAL_CAB'),
+                    'category' => $vehicle['key'],
+                ]));
                 $options[] = array_merge($quote, [
                     'label' => $vehicle['label'],
                     'seats' => $vehicle['seats'],
+                    'icon' => $vehicle['key'],
                 ]);
-            } catch (\Throwable) {
-                continue;
+            } catch (\Throwable $e) {
+                Log::notice('quote.option_skipped', ['category' => $vehicle['key'], 'message' => $e->getMessage()]);
             }
         }
+        usort($options, function ($a, $b) use ($requested) {
+            $ak = strtoupper((string) ($a['category'] ?? ''));
+            $bk = strtoupper((string) ($b['category'] ?? ''));
+            if ($ak === $requested) {
+                return -1;
+            }
+            if ($bk === $requested) {
+                return 1;
+            }
+            return 0;
+        });
+        $lat = $request->input('pickupLat', $request->input('lat'));
+        $lng = $request->input('pickupLng', $request->input('lng'));
+        $category = $requested ?: (string) ($options[0]['category'] ?? 'BIKE');
+        $markers = [];
+        if (is_numeric($lat) && is_numeric($lng)) {
+            $markers = app(\App\Services\NearbyDriverService::class)
+                ->publicMarkers((float) $lat, (float) $lng, $category)
+                ->all();
+        }
+        $settings = app(\App\Services\RideSettingsService::class)->present();
 
-        return ['options' => $options, 'billedKm' => $request->input('distanceKm')];
+        return [
+            'options' => $options,
+            'billedKm' => $request->input('distanceKm'),
+            'nearbyDrivers' => $markers,
+            'nearbyDriverCount' => count($markers),
+            'searchRadiusKm' => $settings['driverSearchRadiusKm'],
+            'nearbyDriver' => $markers[0] ?? null,
+        ];
     }
 
     public function rideEngineCatalog()
@@ -156,7 +190,12 @@ class PlatformController extends Controller
     public function placesList(Request $request, string $kind)
     {
         $kind = strtoupper($kind) === 'SAVED' ? 'SAVED' : 'RECENT';
-        $places = UserPlace::query()->where('user_id', $request->user()->id)->where('kind', $kind)->orderByDesc('id')->get();
+        $places = UserPlace::query()
+            ->where('user_id', $request->user()->id)
+            ->where('kind', $kind)
+            ->orderByDesc('id')
+            ->when($kind === 'RECENT', fn ($q) => $q->limit(5))
+            ->get();
         $key = $kind === 'SAVED' ? 'saved' : 'recents';
 
         return [$key => $places->map(fn ($row) => $this->surface->presentPlace($row))->all()];
@@ -171,16 +210,52 @@ class PlatformController extends Controller
             'lng' => 'required|numeric',
             'subtitle' => 'nullable|string',
         ]);
-        $place = UserPlace::query()->create([
+        $kind = strtoupper($kind) === 'SAVED' ? 'SAVED' : 'RECENT';
+        $title = $data['title'];
+        $existing = null;
+        if ($kind === 'SAVED' && in_array($title, ['Home', 'Work'], true)) {
+            $existing = UserPlace::query()
+                ->where('user_id', $request->user()->id)
+                ->where('kind', 'SAVED')
+                ->where('title', $title)
+                ->first();
+        }
+        $payload = [
             'user_id' => $request->user()->id,
-            'kind' => strtoupper($kind) === 'SAVED' ? 'SAVED' : 'RECENT',
-            'title' => $data['title'],
+            'kind' => $kind,
+            'title' => $title,
             'subtitle' => $data['subtitle'] ?? null,
             'address' => $data['address'],
             'lat' => $data['lat'],
             'lng' => $data['lng'],
-            'created_at' => now(),
-        ]);
+        ];
+        if ($existing) {
+            $existing->update($payload);
+
+            return $existing->fresh();
+        }
+        $payload['created_at'] = now();
+        if ($kind === 'RECENT') {
+            UserPlace::query()
+                ->where('user_id', $request->user()->id)
+                ->where('kind', 'RECENT')
+                ->where('title', $title)
+                ->delete();
+        }
+        $place = UserPlace::query()->create($payload);
+        if ($kind === 'RECENT') {
+            $keepIds = UserPlace::query()
+                ->where('user_id', $request->user()->id)
+                ->where('kind', 'RECENT')
+                ->orderByDesc('id')
+                ->limit(5)
+                ->pluck('id');
+            UserPlace::query()
+                ->where('user_id', $request->user()->id)
+                ->where('kind', 'RECENT')
+                ->whereNotIn('id', $keepIds)
+                ->delete();
+        }
 
         return $place;
     }
@@ -209,9 +284,7 @@ class PlatformController extends Controller
 
     public function bookingsLive(Request $request, string $id)
     {
-        $booking = $this->bookings->one($request->user(), $id);
-
-        return ['booking' => $booking, 'driver' => $booking['driverId']];
+        return $this->bookings->live($request->user(), $id);
     }
 
     public function bookingsAccept(Request $request, string $id)
@@ -224,12 +297,37 @@ class PlatformController extends Controller
         return $this->bookings->reject($request->user(), $id);
     }
 
+    public function bookingsCancel(Request $request, string $id)
+    {
+        return $this->bookings->cancel($request->user(), $id);
+    }
+
+    public function bookingsVerifyOtp(Request $request, string $id)
+    {
+        $data = $request->validate(['otp' => 'required|string']);
+
+        return $this->bookings->verifyOtp($request->user(), $id, $data['otp']);
+    }
+
+    public function bookingsStart(Request $request, string $id)
+    {
+        $data = $request->validate(['otp' => 'required|string']);
+
+        return $this->bookings->verifyOtp($request->user(), $id, $data['otp']);
+    }
+
+    public function bookingsComplete(Request $request, string $id)
+    {
+        return $this->bookings->complete($request->user(), $id);
+    }
+
     public function bookingsLifecycle(Request $request, string $id)
     {
         return $this->bookings->lifecycle(
             $request->user(),
             $id,
             (string) ($request->input('action') ?? $request->input('status', 'CANCELLED')),
+            $request->input('otp') !== null ? (string) $request->input('otp') : null,
         );
     }
 
@@ -268,7 +366,56 @@ class PlatformController extends Controller
 
     public function driversLocation(Request $request)
     {
-        return $this->drivers->pingLocation($request->user(), (float) $request->input('lat'), (float) $request->input('lng'));
+        if ($request->isMethod('get')) {
+            $user = $request->user();
+
+            return [
+                'lat' => $user->last_lat,
+                'lng' => $user->last_lng,
+                'heading' => $user->last_heading ?? null,
+                'recordedAt' => optional($user->location_updated_at)?->toIso8601String(),
+            ];
+        }
+        $data = $request->validate([
+            'lat' => 'required|numeric',
+            'lng' => 'required|numeric',
+            'heading' => 'nullable|numeric',
+            'bookingId' => 'nullable|string',
+        ]);
+
+        return $this->drivers->pingLocation(
+            $request->user(),
+            (float) $data['lat'],
+            (float) $data['lng'],
+            isset($data['heading']) ? (float) $data['heading'] : null,
+            $data['bookingId'] ?? null,
+        );
+    }
+
+    public function driversNearby(Request $request)
+    {
+        $data = $request->validate([
+            'lat' => 'required|numeric',
+            'lng' => 'required|numeric',
+            'category' => 'nullable|string',
+        ]);
+        $category = strtoupper((string) ($data['category'] ?? 'BIKE'));
+        $settings = app(\App\Services\RideSettingsService::class)->present();
+        $markers = app(\App\Services\NearbyDriverService::class)
+            ->publicMarkers((float) $data['lat'], (float) $data['lng'], $category)
+            ->all();
+
+        return [
+            'radiusKm' => $settings['driverSearchRadiusKm'],
+            'category' => $category,
+            'count' => count($markers),
+            'drivers' => $markers,
+        ];
+    }
+
+    public function rideSettings()
+    {
+        return app(\App\Services\RideSettingsService::class)->present();
     }
 
     public function driversOffers(Request $request)
@@ -314,6 +461,15 @@ class PlatformController extends Controller
     public function kycProfile(Request $request)
     {
         return $this->drivers->patchProfile($request->user(), $request->all());
+    }
+
+    public function kycUpload(\Illuminate\Http\Request $request)
+    {
+        return app(\App\Services\KycDocumentService::class)->upload(
+            $request->user(),
+            $request->all(),
+            $request->file('file'),
+        );
     }
 
     public function kycSubmit(Request $request)

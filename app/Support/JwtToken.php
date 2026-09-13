@@ -8,13 +8,14 @@ use UnexpectedValueException;
 
 class JwtToken
 {
-    public static function encode(string $sub, string $role): string
+    public static function encode(string $sub, string $role, int $sessionEpoch = 0): string
     {
         $now = time();
 
         return JWT::encode([
             'sub' => $sub,
             'role' => $role,
+            'sev' => $sessionEpoch,
             'iat' => $now,
             'exp' => $now + (int) config('karnacab.jwt_ttl'),
         ], (string) config('app.jwt_secret'), 'HS256');

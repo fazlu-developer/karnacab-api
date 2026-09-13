@@ -101,21 +101,39 @@ class AuthController extends Controller
 
     public function profile(Request $request)
     {
-        $request->user()->update($request->only('name', 'phone', 'emergency_name', 'emergency_phone'));
+        return $this->auth->patchProfile($request->user(), $request->all());
+    }
 
-        return $this->auth->present($request->user()->fresh());
+    public function avatar(Request $request)
+    {
+        return $this->auth->uploadAvatar($request->user(), $request->all(), $request->file('file'));
     }
 
     public function location(Request $request)
     {
-        $data = $request->validate(['lat' => 'required|numeric', 'lng' => 'required|numeric', 'address' => 'nullable|string']);
-        $request->user()->update([
-            'last_lat' => $data['lat'],
-            'last_lng' => $data['lng'],
-            'last_address' => $data['address'] ?? null,
-            'location_updated_at' => now(),
+        return $this->auth->heartbeat($request->user(), $request->validate([
+            'lat' => 'required|numeric',
+            'lng' => 'required|numeric',
+            'address' => 'nullable|string',
+        ]));
+    }
+
+    public function heartbeat(Request $request)
+    {
+        return $this->auth->heartbeat($request->user(), $request->validate([
+            'lat' => 'nullable|numeric',
+            'lng' => 'nullable|numeric',
+            'address' => 'nullable|string',
+        ]));
+    }
+
+    public function saveDevice(Request $request)
+    {
+        $data = $request->validate([
+            'token' => 'required|string|min:20',
+            'platform' => 'nullable|string',
         ]);
 
-        return ['ok' => true];
+        return $this->auth->saveDevice($request->user(), $data['token'], $data['platform'] ?? 'android');
     }
 }

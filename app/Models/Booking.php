@@ -16,6 +16,11 @@ class Booking extends Model
         'quote_snapshot' => 'array',
         'scheduled_at' => 'datetime',
         'return_at' => 'datetime',
+        'search_expires_at' => 'datetime',
+        'trip_started_at' => 'datetime',
+        'trip_ended_at' => 'datetime',
+        'arrived_at' => 'datetime',
+        'otp_verified_at' => 'datetime',
     ];
 
     public function customer(): BelongsTo

@@ -68,17 +68,12 @@ class CmsCatalogService
             ])->all(),
             'rideTypes' => collect(config('karnacab.ride_types'))->map(fn ($row) => ['key' => $row['key'], 'title' => $row['label']])->all(),
             'vehicleTypes' => collect(config('karnacab.vehicle_types'))->map(fn ($row) => ['key' => $row['key'], 'title' => $row['label']])->all(),
-            'dummyAccounts' => [
-                'customer' => ['phone' => '9999999999', 'otp' => '123456', 'name' => 'Fazlu'],
-                'driver' => ['phone' => '9888888888', 'otp' => '123456', 'name' => 'Rakesh Kumar'],
-            ],
         ];
     }
 
     public function catalogPublic(): array
     {
         $payload = $this->catalog();
-        unset($payload['dummyAccounts']);
 
         return $payload;
     }
