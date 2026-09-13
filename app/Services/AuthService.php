@@ -73,15 +73,17 @@ class AuthService
     {
         $phone = $this->normalizePhone($phone);
         abort_unless(preg_match('/^[6-9]\d{9}$/', $phone), 422, 'Enter a valid Indian mobile number');
-        $code = (string) random_int(100000, 999999);
+        $demo = $this->otpDemoMode();
+        $code = $demo ? '123456' : (string) random_int(100000, 999999);
         Cache::put('otp:'.$phone, hash('sha256', $phone.':'.$code), 300);
         $payload = [
             'ok' => true,
             'expiresInSeconds' => 300,
         ];
-        if (config('app.debug')) {
+        if ($demo) {
             $payload['otp'] = $code;
             $payload['devCode'] = $code;
+            $payload['demo'] = true;
         }
 
         return $payload;
@@ -93,6 +95,9 @@ class AuthService
         $code = preg_replace('/\D+/', '', $code) ?? '';
         $hash = Cache::get('otp:'.$phone);
         $matches = is_string($hash) && hash_equals($hash, hash('sha256', $phone.':'.$code));
+        if (! $matches && $this->otpDemoMode() && hash_equals('123456', $code)) {
+            $matches = true;
+        }
         if (! $matches) {
             abort(422, 'Invalid OTP');
         }
@@ -393,6 +398,18 @@ class AuthService
                 $table->timestamp('last_seen_at')->nullable();
             });
         }
+    }
+
+    private function otpDemoMode(): bool
+    {
+        if (filter_var(env('OTP_SHOW_IN_APP', false), FILTER_VALIDATE_BOOL)) {
+            return true;
+        }
+        if (config('app.debug')) {
+            return true;
+        }
+
+        return strtolower((string) env('PAYMENT_GATEWAY', '')) === 'demo';
     }
 
     private function ensureDeviceTable(): void
