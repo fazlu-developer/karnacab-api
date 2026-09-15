@@ -3,6 +3,8 @@
 return [
     'jwt_ttl' => 60 * 60 * 24 * 7,
     'api_public_url' => rtrim((string) env('API_PUBLIC_URL', env('APP_URL', 'https://api.karnacab.in')), '/'),
+    // Cached via config — do not read env() in AuthService after php artisan config:cache.
+    'otp_show_in_app' => filter_var(env('OTP_SHOW_IN_APP', true), FILTER_VALIDATE_BOOL),
     'cors_origins' => array_values(array_filter(array_map('trim', explode(',', (string) env(
         'CORS_ORIGINS',
         'http://localhost:8000,https://karnacab.jodoocorp.in',
