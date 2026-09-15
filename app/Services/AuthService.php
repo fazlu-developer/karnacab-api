@@ -79,10 +79,14 @@ class AuthService
             'ok' => true,
             'expiresInSeconds' => 300,
         ];
-        if ($this->shouldShowOtpInApp()) {
+        if ($this->isDemoOtpPhone($phone)) {
             $payload['otp'] = $code;
             $payload['devCode'] = $code;
+
+            return $payload;
         }
+
+        app(Fast2SmsService::class)->sendOtp($phone, $code);
 
         return $payload;
     }
@@ -259,7 +263,18 @@ class AuthService
             $user->last_lng !== null ? (float) $user->last_lng : null,
         );
         $next = 'HOME';
-        if ($needsProfile) {
+        if ($user->role === 'DRIVER') {
+            $kyc = strtolower((string) ($user->driver?->kyc_status ?? 'pending'));
+            if (in_array($kyc, ['verified', 'approved', 'active'], true)) {
+                $next = 'HOME';
+            } elseif ($kyc === 'under_review') {
+                $next = 'KYC_REVIEW';
+            } elseif (in_array($kyc, ['rejected', 'suspended'], true)) {
+                $next = 'KYC_BLOCKED';
+            } else {
+                $next = 'KYC';
+            }
+        } elseif ($needsProfile) {
             $next = 'PROFILE';
         } elseif ($needsLocation) {
             $next = 'LOCATION';
@@ -395,9 +410,14 @@ class AuthService
         }
     }
 
-    private function shouldShowOtpInApp(): bool
+    private function isDemoOtpPhone(string $phone): bool
     {
-        return (bool) config('karnacab.otp_show_in_app', true);
+        $phones = array_map(
+            fn ($value) => $this->normalizePhone((string) $value),
+            (array) config('karnacab.demo_otp_phones', []),
+        );
+
+        return in_array($phone, $phones, true);
     }
 
     private function ensureDeviceTable(): void

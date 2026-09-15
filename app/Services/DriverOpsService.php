@@ -20,8 +20,10 @@ class DriverOpsService
     {
         $driver = Driver::query()->where('user_id', $actor->id)->with('vehicles', 'documents', 'user')->firstOrFail();
         $kycStatus = (string) ($driver->kyc_status ?? 'pending');
-        $blocked = in_array(strtolower($kycStatus), ['rejected', 'suspended'], true);
-        $canGoOnline = ! $blocked;
+        $kyc = strtolower($kycStatus);
+        $blocked = in_array($kyc, ['rejected', 'suspended'], true);
+        $approved = in_array($kyc, ['verified', 'approved', 'active'], true);
+        $canGoOnline = $approved && ! $blocked;
         $online = (bool) $driver->online;
         $duty = $driver->duty_status ?: ($online ? 'online' : 'offline');
         $canReceive = $canGoOnline && $online && in_array(strtolower((string) $duty), ['online'], true);
@@ -81,8 +83,8 @@ class DriverOpsService
             'kycStatus' => $kycStatus,
             'canGoOnline' => $canGoOnline,
             'canReceiveOffers' => $canReceive,
-            'offerBlockReason' => $canReceive ? null : ($blocked ? 'Account is blocked' : 'Tap Go online when you are ready.'),
-            'nextStep' => $blocked ? 'Contact support' : null,
+            'offerBlockReason' => $canReceive ? null : ($blocked ? 'Account is blocked' : ($approved ? 'Tap Go online when you are ready.' : 'Complete KYC onboarding to go online.')),
+            'nextStep' => $approved ? 'HOME' : ($kyc === 'under_review' ? 'KYC_REVIEW' : ($blocked ? 'KYC_BLOCKED' : 'KYC')),
             'ratingAvg' => (float) $driver->rating_avg,
             'vehicles' => $driver->vehicles,
             'documents' => $documents,
