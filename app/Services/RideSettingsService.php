@@ -19,7 +19,7 @@ class RideSettingsService
             $value = $this->get(self::LEGACY_RADIUS_KEY);
         }
 
-        $km = is_numeric($value) ? (float) $value : 10.0;
+        $km = is_numeric($value) ? (float) $value : 20.0;
 
         return max(1, min(100, $km));
     }
@@ -72,7 +72,7 @@ class RideSettingsService
     {
         if ($this->get(self::RADIUS_KEY) === null) {
             $legacy = $this->get(self::LEGACY_RADIUS_KEY);
-            $this->put(self::RADIUS_KEY, $legacy !== null && $legacy !== '' ? (string) $legacy : '10');
+            $this->put(self::RADIUS_KEY, $legacy !== null && $legacy !== '' ? (string) $legacy : '20');
         }
         if ($this->get(self::TIMEOUT_KEY) === null) {
             $this->put(self::TIMEOUT_KEY, '30');

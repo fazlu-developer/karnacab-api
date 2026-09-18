@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\OperatorController;
 use App\Http\Controllers\Api\V1\PlatformController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -161,6 +162,36 @@ Route::middleware('jwt')->group(function () {
     Route::post('/v1/travel/bookings/{id}/pay', [PlatformController::class, 'travelPay']);
     Route::post('/v1/bulk/quote', [PlatformController::class, 'bulkQuote']);
     Route::post('/v1/bulk', [PlatformController::class, 'bulkCreate']);
+
+    Route::get('/v1/operator/dashboard', [OperatorController::class, 'dashboard']);
+    Route::get('/v1/operator/vehicles', [OperatorController::class, 'vehicles']);
+    Route::post('/v1/operator/vehicles', [OperatorController::class, 'storeVehicle']);
+    Route::get('/v1/operator/vehicles/{id}', [OperatorController::class, 'vehicle']);
+    Route::put('/v1/operator/vehicles/{id}', [OperatorController::class, 'updateVehicle']);
+    Route::patch('/v1/operator/vehicles/{id}', [OperatorController::class, 'updateVehicle']);
+    Route::post('/v1/operator/vehicles/{vehicleId}/assign-driver', [OperatorController::class, 'assign']);
+    Route::post('/v1/operator/vehicles/{vehicleId}/unassign-driver', [OperatorController::class, 'unassign']);
+    Route::post('/v1/operator/vehicles/{vehicleId}/replace-driver', [OperatorController::class, 'replace']);
+    Route::get('/v1/operator/vehicles/{vehicleId}/eligible-drivers', [OperatorController::class, 'eligible']);
+    Route::get('/v1/operator/drivers', [OperatorController::class, 'drivers']);
+    Route::post('/v1/operator/drivers', [OperatorController::class, 'storeDriver']);
+    Route::get('/v1/operator/drivers/{id}', [OperatorController::class, 'driver']);
+    Route::get('/v1/operator/assignments', [OperatorController::class, 'assignments']);
+    Route::get('/v1/operator/leave', [OperatorController::class, 'leave']);
+    Route::post('/v1/operator/leave', [OperatorController::class, 'storeLeave']);
+    Route::post('/v1/operator/leave/{id}/approve', [OperatorController::class, 'approveLeave']);
+    Route::post('/v1/operator/leave/{id}/reject', [OperatorController::class, 'rejectLeave']);
+    Route::get('/v1/operator/bookings', [OperatorController::class, 'bookings']);
+    Route::post('/v1/operator/bookings/manual', [OperatorController::class, 'manualBooking']);
+    Route::get('/v1/operator/bookings/{id}', [OperatorController::class, 'booking']);
+    Route::get('/v1/operator/tracking', [OperatorController::class, 'tracking']);
+    Route::get('/v1/operator/earnings', [OperatorController::class, 'earnings']);
+    Route::get('/v1/operator/reports', [OperatorController::class, 'reports']);
+    Route::get('/v1/operator/documents', [OperatorController::class, 'documents']);
+    Route::get('/v1/operator/notifications', [OperatorController::class, 'notifications']);
+    Route::get('/v1/operator/profile', [OperatorController::class, 'profile']);
+    Route::put('/v1/operator/profile', [OperatorController::class, 'updateProfile']);
+    Route::patch('/v1/operator/profile', [OperatorController::class, 'updateProfile']);
 
     $modules = [
         'corporate' => 'corporate_accounts',

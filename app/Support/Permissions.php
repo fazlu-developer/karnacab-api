@@ -24,6 +24,15 @@ class Permissions
                 'parcels.read', 'parcels.write', 'travel.read', 'travel.write',
             ],
             'DRIVER' => ['drivers.read', 'bookings.read', 'bookings.write', 'wallets.read', 'vehicles.read'],
+            'FLEET_OWNER' => [
+                'fleet.dashboard.view', 'fleet.vehicle.view', 'fleet.vehicle.create', 'fleet.vehicle.update',
+                'fleet.driver.view', 'fleet.driver.create', 'fleet.driver.update', 'fleet.driver.assign',
+                'fleet.driver.unassign', 'fleet.driver.replace', 'fleet.leave.view', 'fleet.leave.manage',
+                'fleet.booking.view', 'fleet.booking.create', 'fleet.trip.view', 'fleet.tracking.view',
+                'fleet.earnings.view', 'fleet.reports.view', 'fleet.documents.view', 'fleet.notifications.view',
+                'fleet.profile.update', 'fleet.support.view',
+                'drivers.read', 'vehicles.read', 'bookings.read', 'payments.read', 'wallets.read',
+            ],
             'ADVERTISER' => ['advertising.read', 'advertising.write'],
             default => ['users.read', 'drivers.read', 'vehicles.read', 'bookings.read', 'payments.read', 'wallets.read'],
         };

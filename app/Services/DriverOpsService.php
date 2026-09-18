@@ -2,11 +2,13 @@
 
 namespace App\Services;
 
+use App\Mail\WelcomeCustomerMail;
 use App\Models\Driver;
 use App\Models\User;
 use App\Models\Vehicle;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Schema;
 
 class DriverOpsService
@@ -72,6 +74,11 @@ class DriverOpsService
             'city' => $driver->city,
             'stateId' => $driver->user?->state_id,
             'districtId' => $driver->user?->district_id,
+            'driverType' => $driver->fleet_owner_id ? 'fleet_driver' : 'individual_driver',
+            'fleetOwnerId' => $driver->fleet_owner_id,
+            'fleet' => $driver->fleet_owner_id && Schema::hasTable('fleet_owners')
+                ? DB::table('fleet_owners')->where('id', $driver->fleet_owner_id)->first()
+                : null,
             'vehicleFamily' => $driver->vehicle_family,
             'aadhaarLast4' => $driver->aadhaar_last4,
             'panLast4' => $driver->pan_last4,
@@ -230,7 +237,7 @@ class DriverOpsService
                 'last_fix_at' => now(),
             ]);
         }
-        $allowed = \App\Support\ServiceArea::allows($lat, $lng);
+        $allowed = \App\Support\ServiceArea::resolve($lat, $lng, $data['stateName'] ?? $data['state'] ?? null, $data['address'] ?? null);
         $live = null;
         if ($bookingId) {
             try {
@@ -246,10 +253,11 @@ class DriverOpsService
             'lng' => $lng,
             'heading' => $heading,
             'bookingId' => $bookingId,
-            'allowed' => $allowed,
-            'comingSoon' => ! $allowed,
-            'serviceArea' => \App\Support\ServiceArea::label($lat, $lng),
-            'message' => $allowed ? null : \App\Support\ServiceArea::comingSoonMessage(),
+            'allowed' => $allowed['allowed'],
+            'comingSoon' => $allowed['comingSoon'],
+            'serviceArea' => $allowed['state'],
+            'detectedState' => $allowed['state'],
+            'message' => $allowed['message'] ?? ($allowed['allowed'] ? null : \App\Support\ServiceArea::comingSoonMessage($allowed['state'])),
             'live' => $live,
         ];
     }
@@ -303,6 +311,12 @@ class DriverOpsService
             'gender' => isset($data['gender']) ? strtoupper((string) $data['gender']) : null,
             'date_of_birth' => $data['dateOfBirth'] ?? $data['date_of_birth'] ?? null,
         ], fn ($v) => $v !== null && $v !== ''));
+        if (! empty($data['email']) && filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
+            try {
+                Mail::to(strtolower((string) $data['email']))->send(new WelcomeCustomerMail($actor->fresh()));
+            } catch (\Throwable) {
+            }
+        }
 
         $driver = Driver::query()->where('user_id', $actor->id)->first();
         if ($driver) {

@@ -18,6 +18,7 @@ class BookingService
         private readonly FareService $fares,
         private readonly NearbyDriverService $nearby,
         private readonly RideSettingsService $settings,
+        private readonly FcmPushService $push,
     ) {}
 
     public function create(User $actor, array $dto): array
@@ -52,7 +53,15 @@ class BookingService
         $scheduled = ! empty($dto['scheduledAt']);
         $status = $scheduled ? 'CONFIRMED' : BookingStatus::SEARCHING;
 
-        $matches = $scheduled ? [] : $this->nearby->search($pickupLat, $pickupLng, (string) $dto['category'], $radius);
+        $matches = $scheduled ? [] : $this->nearby->search(
+            $pickupLat,
+            $pickupLng,
+            (string) $dto['category'],
+            $radius,
+            false,
+            isset($dto['districtId']) ? (int) $dto['districtId'] : ($actor->district_id ? (int) $actor->district_id : null),
+            (string) ($dto['product'] ?? 'LOCAL_CAB'),
+        );
         abort_if(! $scheduled && $matches === [], 422, 'No nearby drivers found.');
 
         $booking = Booking::query()->create($this->filterColumns([
@@ -87,6 +96,15 @@ class BookingService
 
         if (! $scheduled) {
             $this->writeOffers($booking, $matches);
+            $this->push->notifyUsers(
+                array_map(fn ($row) => (int) ($row['userId'] ?? 0), $matches),
+                'New KarnaCab booking',
+                trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
+                [
+                    'type' => 'booking',
+                    'bookingId' => (string) $booking->id,
+                ],
+            );
         }
 
         Log::info('booking.created', [
@@ -198,6 +216,12 @@ class BookingService
         abort_unless($assigned, 409, 'Booking has already been accepted by another driver.');
         $booking = Booking::query()->findOrFail($id);
         Log::info('booking.accepted', ['bookingId' => $booking->id, 'driverId' => $driver->id]);
+        $this->push->notifyUsers(
+            [(int) $booking->customer_id],
+            'Driver assigned',
+            ($actor->name ?: 'Your driver').' is on the way.',
+            ['type' => 'trip', 'bookingId' => (string) $booking->id],
+        );
 
         return $this->present($booking, $actor);
     }
@@ -255,7 +279,7 @@ class BookingService
             return $this->present($booking->fresh(), $actor);
         }
 
-        if (in_array($action, ['arrive', 'driver_arrived'], true)) {
+        if (in_array($action, ['arrive', 'driver_arrived', 'arrived'], true)) {
             $booking = $this->assignedToDriver($actor, $id);
             abort_unless(BookingStatus::canTransition((string) $booking->status, BookingStatus::DRIVER_ARRIVED), 422, 'Invalid booking status');
             $booking->update($this->filterColumns([

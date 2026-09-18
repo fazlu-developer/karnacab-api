@@ -73,7 +73,9 @@ class AuthService
     {
         $phone = $this->normalizePhone($phone);
         abort_unless(preg_match('/^[6-9]\d{9}$/', $phone), 422, 'Enter a valid Indian mobile number');
-        $code = (string) random_int(100000, 999999);
+        $code = $this->isDemoOtpPhone($phone)
+            ? (string) config('karnacab.demo_otp_code', '123456')
+            : (string) random_int(100000, 999999);
         Cache::put('otp:'.$phone, hash('sha256', $phone.':'.$code), 300);
         $payload = [
             'ok' => true,
@@ -169,10 +171,7 @@ class AuthService
         $user->update($payload);
         $user->refresh();
         $this->touchSeen($user);
-        try {
-            Mail::to($email)->send(new WelcomeCustomerMail($user));
-        } catch (\Throwable) {
-        }
+        $this->sendWelcomeMail($user);
 
         return $this->present($user);
     }
@@ -181,7 +180,12 @@ class AuthService
     {
         $lat = isset($data['lat']) ? (float) $data['lat'] : null;
         $lng = isset($data['lng']) ? (float) $data['lng'] : null;
-        $allowed = $lat === null || $lng === null ? null : ServiceArea::allows($lat, $lng);
+        $area = ServiceArea::resolve(
+            $lat,
+            $lng,
+            $data['stateName'] ?? $data['state'] ?? null,
+            $data['address'] ?? null,
+        );
         $patch = [];
         if ($lat !== null) {
             $patch['last_lat'] = $lat;
@@ -195,21 +199,25 @@ class AuthService
         if ($lat !== null || $lng !== null) {
             $patch['location_updated_at'] = now();
         }
+        if (! empty($area['stateId']) && Schema::hasColumn('users', 'state_id')) {
+            $patch['state_id'] = $area['stateId'];
+        }
+        if (! empty($area['districtId']) && Schema::hasColumn('users', 'district_id')) {
+            $patch['district_id'] = $area['districtId'];
+        }
         if ($patch) {
             $user->update($patch);
         }
         $this->touchSeen($user->fresh());
-        $comingSoon = $allowed === false;
 
         return [
             'ok' => true,
-            'allowed' => $allowed !== false,
-            'comingSoon' => $comingSoon,
-            'serviceArea' => ServiceArea::label($lat, $lng),
+            'allowed' => $area['allowed'],
+            'comingSoon' => $area['comingSoon'],
+            'serviceArea' => $area['state'],
+            'detectedState' => $area['state'],
             'serviceStates' => ServiceArea::states(),
-            'message' => $comingSoon
-                ? 'KarnaCab is coming soon in your city. We currently operate in Bihar and Delhi.'
-                : null,
+            'message' => $area['message'],
         ];
     }
 
@@ -258,15 +266,18 @@ class AuthService
             || empty($user->date_of_birth)
         );
         $needsLocation = empty($user->last_lat) || empty($user->last_lng);
-        $inArea = ServiceArea::allows(
+        $area = ServiceArea::resolve(
             $user->last_lat !== null ? (float) $user->last_lat : null,
             $user->last_lng !== null ? (float) $user->last_lng : null,
+            null,
+            $user->last_address,
         );
+        $inArea = $area['allowed'];
         $next = 'HOME';
         if ($user->role === 'DRIVER') {
             $kyc = strtolower((string) ($user->driver?->kyc_status ?? 'pending'));
             if (in_array($kyc, ['verified', 'approved', 'active'], true)) {
-                $next = 'HOME';
+                $next = (! $needsLocation && ! $inArea) ? 'COMING_SOON' : 'HOME';
             } elseif ($kyc === 'under_review') {
                 $next = 'KYC_REVIEW';
             } elseif (in_array($kyc, ['rejected', 'suspended'], true)) {
@@ -295,15 +306,27 @@ class AuthService
                 ? app(KycDocumentService::class)->previewUrl($user->avatar_path ?? null)
                 : null,
             'permissions' => Permissions::forRole($user->role),
+            'canOperatorMode' => $user->role === 'FLEET_OWNER'
+                || (Schema::hasTable('fleet_owners') && DB::table('fleet_owners')->where('user_id', $user->id)->exists()),
+            'canDriverMode' => (bool) $user->driver,
+            'fleetOwnerId' => Schema::hasTable('fleet_owners')
+                ? DB::table('fleet_owners')->where('user_id', $user->id)->value('id')
+                : null,
             'districtId' => $user->district_id,
             'stateId' => $user->state_id,
+            'driverType' => $user->driver
+                ? ($user->driver->fleet_owner_id ? 'fleet_driver' : 'individual_driver')
+                : null,
+            'assignedFleetOwnerId' => $user->driver?->fleet_owner_id,
             'kycStatus' => $user->driver?->kyc_status,
             'lastLat' => $user->last_lat !== null ? (float) $user->last_lat : null,
             'lastLng' => $user->last_lng !== null ? (float) $user->last_lng : null,
             'lastAddress' => $user->last_address,
             'nextStep' => $next,
             'serviceStates' => ServiceArea::states(),
-            'comingSoon' => $user->role === 'CUSTOMER' && ! $needsProfile && ! $needsLocation && ! $inArea,
+            'comingSoon' => ! $needsProfile && ! $needsLocation && ! $inArea,
+            'detectedState' => $area['state'],
+            'message' => $area['message'],
         ];
     }
 
@@ -360,11 +383,27 @@ class AuthService
             abort_if($taken, 409, 'Email already registered');
             $payload['email'] = $email;
         }
+        $emailChanged = isset($payload['email']) && $payload['email'] !== $user->email;
         if ($payload) {
             $user->update($payload);
         }
+        if ($emailChanged || (isset($payload['email']) && $user->wasChanged('email'))) {
+            $this->sendWelcomeMail($user->fresh());
+        }
 
         return $this->present($user->fresh());
+    }
+
+    private function sendWelcomeMail(User $user): void
+    {
+        $email = (string) $user->email;
+        if ($email === '' || str_ends_with($email, '@otp.karnacab.local')) {
+            return;
+        }
+        try {
+            Mail::to($email)->send(new WelcomeCustomerMail($user));
+        } catch (\Throwable) {
+        }
     }
 
     private function touchSeen(User $user): void

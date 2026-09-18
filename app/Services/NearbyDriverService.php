@@ -21,12 +21,14 @@ class NearbyDriverService
         string $category,
         ?float $radiusKm = null,
         bool $includeOutside = false,
+        ?int $districtId = null,
+        ?string $product = null,
     ): array {
         $radius = $radiusKm ?? $this->settings->radiusKm();
         $staleAfter = now()->subSeconds($this->settings->locationStaleSeconds());
         $busyStatuses = BookingStatus::openForDriver();
 
-        $rows = DB::table('drivers as d')
+        $rowsQuery = DB::table('drivers as d')
             ->join('users as u', 'u.id', '=', 'd.user_id')
             ->leftJoin('vehicles as v', function ($join) {
                 $join->on('v.driver_id', '=', 'd.id')
@@ -55,7 +57,15 @@ class NearbyDriverService
                     ->from('bookings as b')
                     ->whereColumn('b.driver_id', 'd.id')
                     ->whereIn('b.status', $busyStatuses);
-            })
+            });
+        $localOnly = ! $includeOutside && $districtId && strtoupper((string) $product) === 'LOCAL_CAB';
+        if ($localOnly) {
+            $rowsQuery = $rowsQuery->where(function ($q) use ($districtId) {
+                $q->where('u.district_id', $districtId)
+                    ->orWhereNull('u.district_id');
+            });
+        }
+        $rows = $rowsQuery
             ->select(array_values(array_filter([
                 'd.id as driver_id',
                 'd.user_id',

@@ -72,7 +72,7 @@ class AuthController extends Controller
         return $this->auth->login($request->validate([
             'email' => 'required|email',
             'password' => 'required|string',
-        ]), ['FLEET_OWNER', 'DISTRICT_HEAD', 'STATE_HEAD', 'FRANCHISE', 'CORPORATE', 'ADMIN', 'SUPER_ADMIN']);
+        ]), ['FLEET_OWNER']);
     }
 
     public function requestOtp(Request $request)
@@ -115,6 +115,8 @@ class AuthController extends Controller
             'lat' => 'required|numeric',
             'lng' => 'required|numeric',
             'address' => 'nullable|string',
+            'stateName' => 'nullable|string',
+            'state' => 'nullable|string',
         ]));
     }
 
@@ -124,6 +126,8 @@ class AuthController extends Controller
             'lat' => 'nullable|numeric',
             'lng' => 'nullable|numeric',
             'address' => 'nullable|string',
+            'stateName' => 'nullable|string',
+            'state' => 'nullable|string',
         ]));
     }
 

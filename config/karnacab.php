@@ -7,11 +7,13 @@ return [
     'otp_show_in_app' => filter_var(env('OTP_SHOW_IN_APP', false), FILTER_VALIDATE_BOOL),
     'demo_otp_phones' => array_values(array_filter(array_map('trim', explode(',', (string) env(
         'DEMO_OTP_PHONES',
-        '7428059960,7065876175',
+        '7428059960,7065876175,9100000001,9100000002,9100000003,9100000004',
     ))))),
+    'demo_otp_code' => (string) env('DEMO_OTP_CODE', '123456'),
     'fast2sms_api_key' => (string) env('FAST2SMS_API_KEY', ''),
     'fast2sms_template_id' => (string) env('FAST2SMS_TEMPLATE_ID', '201877'),
     'fast2sms_sender_id' => (string) env('FAST2SMS_SENDER_ID', 'KARCAB'),
+    'google_maps_key' => (string) env('GOOGLE_MAPS_API', ''),
     'cors_origins' => array_values(array_filter(array_map('trim', explode(',', (string) env(
         'CORS_ORIGINS',
         'http://localhost:8000,https://karnacab.jodoocorp.in',

@@ -65,7 +65,7 @@ return new class extends Migration
         if (Schema::hasTable('system_settings')) {
             $now = now();
             foreach ([
-                ['key' => 'driver_search_radius_km', 'value' => '10'],
+                ['key' => 'driver_search_radius_km', 'value' => '20'],
                 ['key' => 'ride_request_timeout_seconds', 'value' => '30'],
             ] as $row) {
                 $exists = DB::table('system_settings')->where('key', $row['key'])->exists();
