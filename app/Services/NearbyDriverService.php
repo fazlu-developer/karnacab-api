@@ -58,11 +58,20 @@ class NearbyDriverService
                     ->whereColumn('b.driver_id', 'd.id')
                     ->whereIn('b.status', $busyStatuses);
             });
-        $localOnly = ! $includeOutside && $districtId && strtoupper((string) $product) === 'LOCAL_CAB';
-        if ($localOnly) {
-            $rowsQuery = $rowsQuery->where(function ($q) use ($districtId) {
-                $q->where('u.district_id', $districtId)
-                    ->orWhereNull('u.district_id');
+        $stateId = null;
+        if ($districtId && Schema::hasTable('districts')) {
+            $stateId = DB::table('districts')->where('id', $districtId)->value('state_id');
+        }
+        if ($stateId && Schema::hasColumn('drivers', 'state_id')) {
+            $rowsQuery->where(function ($q) use ($stateId, $districtId) {
+                $q->where('d.state_id', $stateId)->orWhere('u.state_id', $stateId);
+                if ($districtId) {
+                    $q->orWhere('d.district_id', $districtId)->orWhere('u.district_id', $districtId);
+                }
+            });
+        } elseif ($districtId && Schema::hasColumn('drivers', 'district_id')) {
+            $rowsQuery->where(function ($q) use ($districtId) {
+                $q->where('d.district_id', $districtId)->orWhere('u.district_id', $districtId);
             });
         }
         $rows = $rowsQuery

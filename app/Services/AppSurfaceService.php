@@ -416,8 +416,14 @@ class AppSurfaceService
         $map = [
             'cancel' => 'cancelled',
             'pickup' => 'picked_up',
+            'picked_up' => 'picked_up',
             'transit' => 'in_transit',
+            'in_transit' => 'in_transit',
+            'arrive' => 'destination',
+            'destination' => 'destination',
+            'out_for_delivery' => 'out_for_delivery',
             'deliver' => 'delivered',
+            'delivered' => 'delivered',
         ];
         $status = $map[strtolower($action)] ?? strtolower($action);
         DB::table('parcel_shipments')->where('id', $id)->update(['status' => $status, 'updated_at' => now()]);
@@ -609,6 +615,21 @@ class AppSurfaceService
     public function presentParcel(object $row): array
     {
         $total = (int) ($row->quote_paise ?? 0);
+        $status = strtolower((string) $row->status);
+        $pickupUrl = ($row->pickup_lat && $row->pickup_lng)
+            ? 'https://www.google.com/maps/dir/?api=1&destination='.$row->pickup_lat.','.$row->pickup_lng.'&travelmode=driving'
+            : null;
+        $dropUrl = ($row->drop_lat && $row->drop_lng)
+            ? 'https://www.google.com/maps/dir/?api=1&destination='.$row->drop_lat.','.$row->drop_lng.'&travelmode=driving'
+            : null;
+        $actions = match ($status) {
+            'assigned' => ['pickup', 'cancel'],
+            'picked_up' => ['transit'],
+            'in_transit' => ['arrive', 'out_for_delivery'],
+            'destination', 'out_for_delivery' => ['deliver'],
+            'created', 'paid' => ['accept', 'reject'],
+            default => [],
+        };
 
         return [
             'id' => (string) $row->id,
@@ -616,6 +637,9 @@ class AppSurfaceService
             'publicRef' => $row->public_ref,
             'customerId' => (string) $row->customer_id,
             'status' => $row->status,
+            'statusLabel' => str_replace('_', ' ', $status),
+            'lifecycle' => $status,
+            'lane' => ! empty($row->bihar_lane) ? 'BIHAR' : 'LOCAL',
             'biharLane' => (bool) $row->bihar_lane,
             'parcelType' => $row->parcel_type,
             'category' => $row->category,
@@ -623,6 +647,10 @@ class AppSurfaceService
             'dropText' => $row->drop_text,
             'pickup' => $row->pickup_text,
             'destination' => $row->drop_text,
+            'pickupLat' => $row->pickup_lat !== null ? (float) $row->pickup_lat : null,
+            'pickupLng' => $row->pickup_lng !== null ? (float) $row->pickup_lng : null,
+            'dropLat' => $row->drop_lat !== null ? (float) $row->drop_lat : null,
+            'dropLng' => $row->drop_lng !== null ? (float) $row->drop_lng : null,
             'quotePaise' => $total,
             'quoteRupees' => $total / 100,
             'paymentStatus' => $row->payment_status,
@@ -631,6 +659,13 @@ class AppSurfaceService
             'driverId' => $row->driver_id ? (string) $row->driver_id : null,
             'fare' => ['totalPaise' => $total, 'totalRupees' => $total / 100, 'currency' => 'INR'],
             'billedKm' => (float) ($row->distance_km ?? 0),
+            'allowedActions' => $actions,
+            'navigation' => [
+                'pickupUrl' => $pickupUrl,
+                'dropUrl' => $dropUrl,
+                'currentUrl' => in_array($status, ['in_transit', 'destination', 'out_for_delivery'], true) ? $dropUrl : $pickupUrl,
+            ],
+            'tracking' => ['Created', 'Assigned', 'Picked Up', 'In Transit', 'Destination', 'Out for Delivery', 'Delivered'],
         ];
     }
 

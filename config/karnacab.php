@@ -3,11 +3,12 @@
 return [
     'jwt_ttl' => 60 * 60 * 24 * 7,
     'api_public_url' => rtrim((string) env('API_PUBLIC_URL', env('APP_URL', 'https://api.karnacab.in')), '/'),
+    'leads_notify_email' => (string) env('LEADS_NOTIFY_EMAIL', env('MAIL_FROM_ADDRESS', 'website.fazlu@gmail.com')),
     // Cached via config — do not read env() in AuthService after php artisan config:cache.
     'otp_show_in_app' => filter_var(env('OTP_SHOW_IN_APP', false), FILTER_VALIDATE_BOOL),
     'demo_otp_phones' => array_values(array_filter(array_map('trim', explode(',', (string) env(
         'DEMO_OTP_PHONES',
-        '7428059960,7065876175,9100000001,9100000002,9100000003,9100000004',
+        '7428059960,7065876175',
     ))))),
     'demo_otp_code' => (string) env('DEMO_OTP_CODE', '123456'),
     'fast2sms_api_key' => (string) env('FAST2SMS_API_KEY', ''),

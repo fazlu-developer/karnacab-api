@@ -14,6 +14,15 @@ class DemoSampleDataSeeder extends Seeder
 {
     private const PASSWORD = 'ChangeMe@123';
 
+    private const CUSTOMER_PHONE = '7428059960';
+
+    private const DRIVER_PHONE = '7065876175';
+
+    /** Connaught Place / Rajiv Chowk — matches the emulator test pin. */
+    private const TEST_LAT = 28.6327;
+
+    private const TEST_LNG = 77.2198;
+
     private const KEEP = [
         '_prisma_migrations',
         'migrations',
@@ -41,20 +50,25 @@ class DemoSampleDataSeeder extends Seeder
         $patna = (int) (DB::table('districts')->where('name', 'Patna')->value('id') ?: 26);
         $gaya = (int) (DB::table('districts')->where('name', 'Gaya')->value('id') ?: 11);
         $northEast = (int) (DB::table('districts')->where('name', 'North East Delhi')->value('id') ?: 45);
+        $newDelhi = (int) (
+            DB::table('districts')->where('name', 'New Delhi')->value('id')
+            ?: DB::table('districts')->where('name', 'like', '%New Delhi%')->value('id')
+            ?: $northEast
+        );
 
         $this->truncateTransactional();
 
         $customerId = $this->user([
             'role' => 'CUSTOMER',
             'name' => 'Demo Customer',
-            'email' => 'customer@karnacab.local',
-            'phone' => '9100000001',
+            'email' => self::CUSTOMER_PHONE.'@otp.karnacab.local',
+            'phone' => self::CUSTOMER_PHONE,
             'password_hash' => $password,
             'state_id' => $delhi,
-            'district_id' => $northEast,
-            'last_lat' => 28.7113000,
-            'last_lng' => 77.2706000,
-            'last_address' => 'Mustafabad, North East Delhi',
+            'district_id' => $newDelhi,
+            'last_lat' => self::TEST_LAT,
+            'last_lng' => self::TEST_LNG,
+            'last_address' => 'Rajiv Chowk, Connaught Place, New Delhi',
             'gender' => 'MALE',
             'date_of_birth' => '1994-04-12',
             'profile_completed_at' => $now,
@@ -64,33 +78,16 @@ class DemoSampleDataSeeder extends Seeder
         $indDriverUser = $this->user([
             'role' => 'DRIVER',
             'name' => 'Demo Individual Driver',
-            'email' => 'driver@karnacab.local',
-            'phone' => '9100000002',
+            'email' => self::DRIVER_PHONE.'@otp.karnacab.local',
+            'phone' => self::DRIVER_PHONE,
             'password_hash' => $password,
             'state_id' => $delhi,
-            'district_id' => $northEast,
-            'last_lat' => 28.7121000,
-            'last_lng' => 77.2714000,
-            'last_address' => 'Near Mustafabad Metro',
+            'district_id' => $newDelhi,
+            'last_lat' => self::TEST_LAT,
+            'last_lng' => self::TEST_LNG,
+            'last_address' => 'Rajiv Chowk, Connaught Place, New Delhi',
             'gender' => 'MALE',
             'date_of_birth' => '1990-08-21',
-            'profile_completed_at' => $now,
-            'location_updated_at' => $now,
-        ]);
-
-        $fleetDriverUser = $this->user([
-            'role' => 'DRIVER',
-            'name' => 'Demo Fleet Driver',
-            'email' => 'fleetdriver@karnacab.local',
-            'phone' => '9100000003',
-            'password_hash' => $password,
-            'state_id' => $bihar,
-            'district_id' => $patna,
-            'last_lat' => 25.5941000,
-            'last_lng' => 85.1376000,
-            'last_address' => 'Patna Junction',
-            'gender' => 'MALE',
-            'date_of_birth' => '1992-01-15',
             'profile_completed_at' => $now,
             'location_updated_at' => $now,
         ]);
@@ -238,33 +235,13 @@ class DemoSampleDataSeeder extends Seeder
             'vehicle_family' => 'CAB',
             'driver_type' => 'individual_driver',
             'state_id' => $delhi,
-            'district_id' => $northEast,
-            'created_at' => $now,
-            'updated_at' => $now,
-        ]);
-
-        $fleetDriverId = DB::table('drivers')->insertGetId([
-            'user_id' => $fleetDriverUser,
-            'fleet_owner_id' => $fleetId,
-            'license_no' => 'BR-DEMO-FLT-01',
-            'online' => 1,
-            'duty_status' => 'online',
-            'parcel_enabled' => 1,
-            'rating_avg' => 4.60,
-            'kyc_status' => 'approved',
-            'city' => 'Patna',
-            'application_submitted_at' => $now,
-            'terms_accepted_at' => $now,
-            'vehicle_family' => 'CAB',
-            'driver_type' => 'fleet_driver',
-            'state_id' => $bihar,
-            'district_id' => $patna,
+            'district_id' => $newDelhi,
             'created_at' => $now,
             'updated_at' => $now,
         ]);
 
         $indVehicleId = DB::table('vehicles')->insertGetId([
-            'district_id' => $northEast,
+            'district_id' => $newDelhi,
             'state_id' => $delhi,
             'driver_id' => $indDriverId,
             'individual_driver_id' => $indDriverId,
@@ -276,47 +253,15 @@ class DemoSampleDataSeeder extends Seeder
             'year' => 2022,
             'color' => 'White',
             'fuel' => 'PETROL',
-            'last_lat' => 28.7121000,
-            'last_lng' => 77.2714000,
+            'last_lat' => self::TEST_LAT,
+            'last_lng' => self::TEST_LNG,
             'last_fix_at' => $now,
-            'created_at' => $now,
-            'updated_at' => $now,
-        ]);
-
-        $fleetVehicleId = DB::table('vehicles')->insertGetId([
-            'district_id' => $patna,
-            'state_id' => $bihar,
-            'fleet_owner_id' => $fleetId,
-            'driver_id' => $fleetDriverId,
-            'category' => 'SUV',
-            'registration_no' => 'BR01DEMO01',
-            'status' => 'ACTIVE',
-            'brand' => 'Hyundai',
-            'model' => 'Creta',
-            'year' => 2023,
-            'color' => 'Black',
-            'fuel' => 'DIESEL',
-            'last_lat' => 25.5941000,
-            'last_lng' => 85.1376000,
-            'last_fix_at' => $now,
-            'created_at' => $now,
-            'updated_at' => $now,
-        ]);
-
-        DB::table('vehicle_driver_assignments')->insert([
-            'fleet_owner_id' => $fleetId,
-            'vehicle_id' => $fleetVehicleId,
-            'driver_id' => $fleetDriverId,
-            'assigned_by' => $fleetOwnerUser,
-            'status' => 'ACTIVE',
-            'assigned_at' => $now,
             'created_at' => $now,
             'updated_at' => $now,
         ]);
 
         $this->wallet($customerId, 'CUSTOMER', 250000);
         $this->wallet($indDriverUser, 'DRIVER', 180000);
-        $this->wallet($fleetDriverUser, 'DRIVER', 90000);
         $this->wallet($fleetOwnerUser, 'FLEET_OWNER', 500000);
         $this->wallet($franchiseUser, 'FRANCHISE', 100000);
         $this->wallet($districtHeadUser, 'DISTRICT_HEAD', 75000);
@@ -373,14 +318,14 @@ class DemoSampleDataSeeder extends Seeder
         DB::table('bookings')->insert([
             'public_ref' => 'KCDEMO01',
             'customer_id' => $customerId,
-            'district_id' => $northEast,
+            'district_id' => $newDelhi,
             'product' => 'LOCAL_CAB',
             'category' => 'SEDAN',
             'status' => 'COMPLETED',
-            'pickup_text' => 'Mustafabad, North East Delhi',
+            'pickup_text' => 'Rajiv Chowk, Connaught Place, New Delhi',
             'drop_text' => 'Kashmere Gate ISBT, Delhi',
-            'pickup_lat' => 28.7113000,
-            'pickup_lng' => 77.2706000,
+            'pickup_lat' => self::TEST_LAT,
+            'pickup_lng' => self::TEST_LNG,
             'drop_lat' => 28.6676000,
             'drop_lng' => 77.2264000,
             'distance_km' => 8.40,
@@ -393,7 +338,7 @@ class DemoSampleDataSeeder extends Seeder
             'start_otp' => '1111',
             'end_otp' => '2222',
             'passenger_name' => 'Demo Customer',
-            'passenger_phone' => '9100000001',
+            'passenger_phone' => self::CUSTOMER_PHONE,
             'trip_started_at' => $now->copy()->subHours(2),
             'trip_ended_at' => $now->copy()->subHour(),
             'created_at' => $now->copy()->subHours(3),
@@ -404,7 +349,7 @@ class DemoSampleDataSeeder extends Seeder
             [
                 'user_id' => $customerId,
                 'title' => 'Welcome to KarnaCab',
-                'body' => 'Demo customer account is ready. OTP for this number is 123456.',
+                'body' => 'On-screen OTP for this number is 123456.',
                 'kind' => 'info',
                 'created_at' => $now,
             ],
@@ -512,161 +457,11 @@ class DemoSampleDataSeeder extends Seeder
         ]);
 
         $this->command?->info('Demo sample data loaded. Admin password: '.self::PASSWORD);
-        $this->command?->info('Customer OTP login: 9100000001 / 123456');
-        $this->command?->info('Individual driver OTP: 9100000002 / 123456');
-        $this->command?->info('Fleet driver OTP: 9100000003 / 123456');
+        $this->command?->info('Customer OTP (on screen): '.self::CUSTOMER_PHONE.' / 123456');
+        $this->command?->info('Driver OTP (on screen): '.self::DRIVER_PHONE.' / 123456');
+        $this->command?->info('Other numbers receive SMS OTP and do not show the code in the app.');
         $this->command?->info('Fleet owner app: fleet@karnacab.local / '.self::PASSWORD);
         $this->command?->info('Admin panel: super@karnacab.local / '.self::PASSWORD);
-        $this->seedNetworkDuplicates($now, $password, $bihar, $delhi, $patna, $gaya, $northEast, $customerId, $indDriverId, $fleetDriverId, $indVehicleId, $fleetVehicleId, $franchiseUser, $districtHeadUser);
-    }
-
-    /**
-     * Extra customers, drivers, bookings and a Delhi state head so territory filters can be tested.
-     */
-    private function seedNetworkDuplicates(
-        $now,
-        string $password,
-        int $bihar,
-        int $delhi,
-        int $patna,
-        int $gaya,
-        int $northEast,
-        int $customerId,
-        int $indDriverId,
-        int $fleetDriverId,
-        int $indVehicleId,
-        int $fleetVehicleId,
-        int $franchiseUser,
-        int $districtHeadUser,
-    ): void {
-        $delhiHeadUser = $this->user([
-            'role' => 'STATE_HEAD',
-            'name' => 'Delhi State Head',
-            'email' => 'delhihead@karnacab.local',
-            'phone' => '9100000020',
-            'password_hash' => $password,
-            'state_id' => $delhi,
-            'profile_completed_at' => $now,
-        ]);
-        $this->opsUser([
-            'name' => 'Delhi State Head',
-            'email' => 'delhihead@karnacab.local',
-            'password' => $password,
-            'role' => 'STATE_HEAD',
-            'nest_user_id' => $delhiHeadUser,
-            'state_id' => $delhi,
-        ]);
-        $superOps = $this->opsId('super@karnacab.local');
-        DB::table('ops_state_head_assignments')->insert([
-            'user_id' => $this->opsId('delhihead@karnacab.local'),
-            'state_id' => $delhi,
-            'status' => 'ACTIVE',
-            'assigned_by' => $superOps,
-            'assigned_at' => $now,
-            'created_at' => $now,
-            'updated_at' => $now,
-        ]);
-
-        for ($i = 1; $i <= 8; $i++) {
-            $inDelhi = $i % 2 === 0;
-            $stateId = $inDelhi ? $delhi : $bihar;
-            $districtId = $inDelhi ? $northEast : ($i % 4 === 1 ? $gaya : $patna);
-            $lat = $inDelhi ? 28.71 + ($i * 0.002) : 25.59 + ($i * 0.003);
-            $lng = $inDelhi ? 77.27 + ($i * 0.002) : 85.13 + ($i * 0.003);
-            $cust = $this->user([
-                'role' => 'CUSTOMER',
-                'name' => 'Test Rider '.$i,
-                'email' => "rider{$i}@karnacab.local",
-                'phone' => '91000001'.str_pad((string) $i, 2, '0', STR_PAD_LEFT),
-                'password_hash' => $password,
-                'state_id' => $stateId,
-                'district_id' => $districtId,
-                'last_lat' => $lat,
-                'last_lng' => $lng,
-                'last_address' => $inDelhi ? 'North East Delhi' : ($districtId === $gaya ? 'Gaya' : 'Patna'),
-                'gender' => $i % 2 ? 'MALE' : 'FEMALE',
-                'date_of_birth' => '199'.($i % 9).'-0'.(($i % 8) + 1).'-12',
-                'profile_completed_at' => $now,
-                'location_updated_at' => $now,
-            ]);
-            $drvUser = $this->user([
-                'role' => 'DRIVER',
-                'name' => 'Test Driver '.$i,
-                'email' => "driver{$i}@karnacab.local",
-                'phone' => '91000002'.str_pad((string) $i, 2, '0', STR_PAD_LEFT),
-                'password_hash' => $password,
-                'state_id' => $stateId,
-                'district_id' => $districtId,
-                'last_lat' => $lat + 0.001,
-                'last_lng' => $lng + 0.001,
-                'last_address' => $inDelhi ? 'Delhi stand' : 'Bihar stand',
-                'gender' => 'MALE',
-                'date_of_birth' => '1988-0'.(($i % 8) + 1).'-05',
-                'profile_completed_at' => $now,
-                'location_updated_at' => $now,
-            ]);
-            $drv = DB::table('drivers')->insertGetId([
-                'user_id' => $drvUser,
-                'license_no' => ($inDelhi ? 'DL' : 'BR').'-TEST-'.$i,
-                'online' => $i <= 4 ? 1 : 0,
-                'duty_status' => $i <= 4 ? 'online' : 'offline',
-                'rating_avg' => 4.20 + ($i * 0.05),
-                'kyc_status' => 'approved',
-                'city' => $inDelhi ? 'Delhi' : ($districtId === $gaya ? 'Gaya' : 'Patna'),
-                'application_submitted_at' => $now,
-                'vehicle_family' => $i % 3 === 0 ? 'BIKE' : ($i % 3 === 1 ? 'AUTO' : 'CAR'),
-                'driver_type' => 'individual_driver',
-                'state_id' => $stateId,
-                'district_id' => $districtId,
-                'created_at' => $now,
-                'updated_at' => $now,
-            ]);
-            $cat = $i % 3 === 0 ? 'BIKE' : ($i % 3 === 1 ? 'AUTO' : 'SEDAN');
-            $veh = DB::table('vehicles')->insertGetId([
-                'district_id' => $districtId,
-                'state_id' => $stateId,
-                'driver_id' => $drv,
-                'individual_driver_id' => $drv,
-                'category' => $cat,
-                'registration_no' => ($inDelhi ? 'DL9C' : 'BR0'.$i).'TEST'.str_pad((string) $i, 2, '0', STR_PAD_LEFT),
-                'status' => 'ACTIVE',
-                'brand' => $cat === 'BIKE' ? 'Honda' : ($cat === 'AUTO' ? 'Bajaj' : 'Maruti'),
-                'model' => $cat === 'BIKE' ? 'Activa' : ($cat === 'AUTO' ? 'RE' : 'Swift'),
-                'year' => 2020 + ($i % 5),
-                'color' => 'White',
-                'fuel' => 'PETROL',
-                'last_lat' => $lat,
-                'last_lng' => $lng,
-                'last_fix_at' => $now,
-                'created_at' => $now,
-                'updated_at' => $now,
-            ]);
-            DB::table('bookings')->insert([
-                'public_ref' => 'KCTEST'.str_pad((string) $i, 2, '0', STR_PAD_LEFT),
-                'customer_id' => $cust,
-                'district_id' => $districtId,
-                'product' => 'LOCAL_CAB',
-                'category' => $cat,
-                'status' => $i % 3 === 0 ? 'COMPLETED' : ($i % 3 === 1 ? 'REQUESTED' : 'STARTED'),
-                'pickup_text' => $inDelhi ? 'Mustafabad' : 'Patna Junction',
-                'drop_text' => $inDelhi ? 'Kashmere Gate' : 'Gandhi Maidan',
-                'pickup_lat' => $lat,
-                'pickup_lng' => $lng,
-                'drop_lat' => $lat + 0.02,
-                'drop_lng' => $lng + 0.02,
-                'distance_km' => 4 + $i,
-                'quote_paise' => 8000 + ($i * 500),
-                'final_fare_paise' => $i % 3 === 0 ? 8000 + ($i * 500) : null,
-                'driver_id' => $drv,
-                'vehicle_id' => $veh,
-                'passenger_name' => 'Test Rider '.$i,
-                'passenger_phone' => '91000001'.str_pad((string) $i, 2, '0', STR_PAD_LEFT),
-                'created_at' => $now->copy()->subHours($i),
-                'updated_at' => $now,
-            ]);
-        }
-        $this->command?->info('Delhi state head: delhihead@karnacab.local / '.self::PASSWORD);
-        $this->command?->info('Extra test riders/drivers/bookings: rider1-8 and driver1-8 @karnacab.local');
     }
 
     /**

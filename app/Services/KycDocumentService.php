@@ -72,7 +72,14 @@ class KycDocumentService
             return $key;
         }
 
-        $base = rtrim((string) (config('app.url') ?: request()?->getSchemeAndHttpHost()), '/');
+        $base = rtrim((string) (config('app.url') ?: ''), '/');
+        $host = request()?->getSchemeAndHttpHost();
+        if ($host && (str_contains($base, '127.0.0.1') || str_contains($base, 'localhost') || $base === '')) {
+            $base = rtrim($host, '/');
+        }
+        if ($base === '') {
+            $base = 'https://api.karnacab.in';
+        }
 
         return $base.'/storage/'.ltrim($key, '/');
     }

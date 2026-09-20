@@ -267,8 +267,9 @@ class BookingService
 
         if (in_array($action, ['cancel', 'cancelled', 'customer_cancelled', 'driver_cancelled'], true)) {
             $target = $actor->role === 'DRIVER' ? BookingStatus::DRIVER_CANCELLED : BookingStatus::CUSTOMER_CANCELLED;
-            abort_unless(! BookingStatus::isTerminal((string) $booking->status), 422, 'This booking cannot be cancelled.');
-            abort_unless(BookingStatus::canTransition((string) $booking->status, $target), 422, 'This booking cannot be cancelled.');
+            if (BookingStatus::isTerminal((string) $booking->status)) {
+                return $this->present($booking, $actor);
+            }
             $booking->update(['status' => $target]);
             $this->closeAllOffers((int) $booking->id, 'CANCELLED');
             if ($booking->driver_id) {
@@ -409,6 +410,8 @@ class BookingService
             'name' => $driverUser?->name,
             'phone' => $isCustomer && ! BookingStatus::isSearching((string) $row->status) ? $driverUser?->phone : null,
             'rating' => (float) $driver->rating_avg,
+            'photoUrl' => app(KycDocumentService::class)->previewUrl($driverUser?->avatar_path ?? null),
+            'avatarUrl' => app(KycDocumentService::class)->previewUrl($driverUser?->avatar_path ?? null),
             'lat' => $driverUser?->last_lat !== null ? (float) $driverUser->last_lat : null,
             'lng' => $driverUser?->last_lng !== null ? (float) $driverUser->last_lng : null,
             'heading' => $driverUser->last_heading ?? null,
@@ -483,7 +486,33 @@ class BookingService
             'estimatedFareRupees' => $total / 100,
             'estimatedEarningsRupees' => isset($row->driver_earning_paise) ? $row->driver_earning_paise / 100 : round(($total * 0.9) / 100, 2),
             'kind' => 'ride',
+            'navigation' => $this->navigationPayload($row),
         ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function navigationPayload(Booking $row): array
+    {
+        $pickup = $this->mapsUrl($row->pickup_lat, $row->pickup_lng);
+        $drop = $this->mapsUrl($row->drop_lat, $row->drop_lng);
+        $started = in_array((string) $row->status, [BookingStatus::TRIP_STARTED, BookingStatus::OTP_VERIFIED, BookingStatus::LEGACY_STARTED], true);
+
+        return [
+            'pickupUrl' => $pickup,
+            'dropUrl' => $drop,
+            'currentUrl' => $started ? $drop : $pickup,
+        ];
+    }
+
+    private function mapsUrl(mixed $lat, mixed $lng): ?string
+    {
+        if ($lat === null || $lng === null) {
+            return null;
+        }
+
+        return 'https://www.google.com/maps/dir/?api=1&destination='.(float) $lat.','.(float) $lng.'&travelmode=driving';
     }
 
     /**
@@ -496,7 +525,16 @@ class BookingService
             return [];
         }
         if ($actor->role === 'CUSTOMER' && (int) $row->customer_id === (int) $actor->id && ! BookingStatus::isTerminal($status) && $status !== BookingStatus::COMPLETED) {
-            if (in_array($status, [BookingStatus::SEARCHING, BookingStatus::LEGACY_REQUESTED, BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED, BookingStatus::DRIVER_ARRIVED], true)) {
+            if (in_array($status, [
+                BookingStatus::SEARCHING,
+                BookingStatus::LEGACY_REQUESTED,
+                BookingStatus::PENDING,
+                BookingStatus::DRIVER_ACCEPTED,
+                BookingStatus::LEGACY_ASSIGNED,
+                BookingStatus::DRIVER_ARRIVED,
+                'DRIVER_SEARCHING',
+                'CONFIRMED',
+            ], true)) {
                 return ['cancel'];
             }
         }

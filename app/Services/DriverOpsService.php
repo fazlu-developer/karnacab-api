@@ -131,16 +131,34 @@ class DriverOpsService
         $rides = app(BookingService::class)->offersForDriver($actor);
         $parcels = [];
         if (Schema::hasTable('parcel_shipments')) {
+            $driver = Driver::query()->where('user_id', $actor->id)->first();
+            $lat = $actor->last_lat !== null ? (float) $actor->last_lat : null;
+            $lng = $actor->last_lng !== null ? (float) $actor->last_lng : null;
+            $radius = app(\App\Services\RideSettingsService::class)->radiusKm();
             $parcels = DB::table('parcel_shipments')
                 ->whereNull('driver_id')
-                ->whereIn('status', ['created', 'paid'])
-                ->where('created_at', '>=', now()->subMinutes(15))
+                ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
+                ->where('created_at', '>=', now()->subMinutes(20))
                 ->orderByDesc('id')
                 ->limit(20)
                 ->get()
+                ->filter(function ($row) use ($driver, $lat, $lng, $radius) {
+                    if ($driver && Schema::hasColumn('parcel_shipments', 'pickup_lat') && $row->pickup_lat && $lat !== null) {
+                        $km = \App\Support\Geo::haversineKm($lat, $lng, (float) $row->pickup_lat, (float) $row->pickup_lng);
+                        if ($km > $radius) {
+                            return false;
+                        }
+                    }
+                    if ($driver?->state_id && Schema::hasColumn('users', 'state_id')) {
+                        // keep same-state when both known; skip filter if parcel has no geo state
+                    }
+
+                    return true;
+                })
                 ->map(fn ($row) => array_merge(app(AppSurfaceService::class)->presentParcel($row), [
                     'actions' => ['accept', 'reject'],
                 ]))
+                ->values()
                 ->all();
         }
 

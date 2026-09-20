@@ -4,13 +4,13 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\CmsPage;
-use App\Models\Lead;
 use App\Models\UserPlace;
 use App\Services\AppSurfaceService;
 use App\Services\BookingService;
 use App\Services\CmsCatalogService;
 use App\Services\DriverOpsService;
 use App\Services\FareService;
+use App\Services\LeadIntakeService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -23,6 +23,7 @@ class PlatformController extends Controller
         private readonly BookingService $bookings,
         private readonly DriverOpsService $drivers,
         private readonly AppSurfaceService $surface,
+        private readonly LeadIntakeService $leads,
     ) {}
 
     public function health()
@@ -90,13 +91,13 @@ class PlatformController extends Controller
         $data = $request->validate([
             'type' => 'required|string',
             'name' => 'required|string|min:2',
-            'phone' => 'required|string',
+            'phone' => 'nullable|string',
             'email' => 'nullable|email',
             'district' => 'nullable|string',
             'message' => 'required|string|min:8',
             'payload' => 'nullable|string',
         ]);
-        $lead = Lead::query()->create(array_merge($data, ['status' => 'NEW']));
+        $lead = $this->leads->capture($data);
 
         return ['id' => (string) $lead->id, 'status' => $lead->status, 'type' => $lead->type];
     }
