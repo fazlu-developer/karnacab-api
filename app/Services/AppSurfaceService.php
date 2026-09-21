@@ -136,65 +136,216 @@ class AppSurfaceService
 
     public function invoices(User $actor): array
     {
+        $bookings = collect();
+        if (Schema::hasTable('bookings')) {
+            $q = DB::table('bookings')->whereIn('status', ['COMPLETED', 'TRIP_COMPLETED', 'completed']);
+            if ($actor->role === 'DRIVER') {
+                $driverId = Driver::query()->where('user_id', $actor->id)->value('id');
+                $q->where('driver_id', $driverId ?: 0);
+            } else {
+                $q->where('customer_id', $actor->id);
+            }
+            $bookings = $q->orderByDesc('id')->limit(50)->get();
+        }
+
+        $fromBookings = $bookings->map(fn ($row) => $this->presentInvoice($actor, $row))->all();
+        if ($fromBookings !== []) {
+            return ['invoices' => $fromBookings];
+        }
         if (! Schema::hasTable('invoices')) {
             return ['invoices' => []];
         }
-        $rows = DB::table('invoices')->where('customer_id', $actor->id)->orderByDesc('id')->limit(50)->get();
+        $rows = $actor->role === 'DRIVER'
+            ? collect()
+            : DB::table('invoices')->where('customer_id', $actor->id)->orderByDesc('id')->limit(50)->get();
 
-        return ['invoices' => $rows->map(fn ($row) => [
-            'id' => (string) $row->id,
-            'publicRef' => $row->public_ref,
-            'kind' => $row->kind,
-            'status' => $row->status,
-            'totalPaise' => (int) $row->total_paise,
-            'totalRupees' => ((int) $row->total_paise) / 100,
+        return ['invoices' => $rows->map(fn ($row) => $this->presentInvoice($actor, $row))->all()];
+    }
+
+    public function invoiceOne(User $actor, string $id): array
+    {
+        $rows = $this->invoices($actor)['invoices'];
+        foreach ($rows as $row) {
+            if ((string) ($row['id'] ?? '') === $id || (string) ($row['bookingId'] ?? '') === $id || (string) ($row['publicRef'] ?? '') === $id) {
+                return ['invoice' => $row];
+            }
+        }
+        abort(404, 'Invoice not found');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function presentInvoice(User $actor, object $row): array
+    {
+        $snapshot = $row->quote_snapshot ?? null;
+        if (is_string($snapshot)) {
+            $decoded = json_decode($snapshot, true);
+            $snapshot = is_array($decoded) ? $decoded : [];
+        }
+        if (! is_array($snapshot)) {
+            $snapshot = [];
+        }
+        $breakdown = $snapshot['final']['breakdown'] ?? $snapshot['breakdown'] ?? [];
+        $totalPaise = (int) ($row->total_paise ?? $row->final_fare_paise ?? $row->quote_paise ?? 0);
+        $gstPaise = (int) ($breakdown['gstPaise'] ?? $row->gst_paise ?? 0);
+        $basePaise = max(0, $totalPaise - $gstPaise);
+        $commissionPaise = (int) ($row->commission_paise ?? $snapshot['commissionPaise'] ?? 0);
+        $earningPaise = (int) ($row->driver_earning_paise ?? $snapshot['driverEarningPaise'] ?? max(0, $totalPaise - $commissionPaise));
+
+        return [
+            'id' => (string) ($row->id ?? ''),
+            'bookingId' => (string) ($row->booking_id ?? $row->id ?? ''),
+            'publicRef' => $row->public_ref ?? ('INV'.($row->id ?? '')),
+            'invoiceNumber' => $row->public_ref ?? ('INV'.($row->id ?? '')),
+            'kind' => $row->kind ?? $row->product ?? 'ride',
+            'product' => $row->product ?? 'RIDE',
+            'category' => $row->category ?? null,
+            'status' => $row->status ?? 'paid',
+            'paymentMode' => $row->payment_mode ?? 'CASH',
+            'paymentStatus' => $row->payment_status ?? $row->status ?? 'paid',
+            'totalPaise' => $totalPaise,
+            'totalRupees' => $totalPaise / 100,
+            'gstPaise' => $gstPaise,
+            'gstRupees' => $gstPaise / 100,
+            'subtotalPaise' => $basePaise,
+            'subtotalRupees' => $basePaise / 100,
+            'commissionPaise' => $commissionPaise,
+            'commissionRupees' => $commissionPaise / 100,
+            'driverEarningPaise' => $earningPaise,
+            'driverEarningRupees' => $earningPaise / 100,
             'currency' => $row->currency ?? 'INR',
-            'issuedAt' => $row->issued_at,
-        ])->all()];
+            'issuedAt' => $row->issued_at ?? $row->trip_ended_at ?? $row->updated_at ?? $row->created_at,
+            'pickup' => $row->pickup_text ?? $row->pickup ?? null,
+            'drop' => $row->drop_text ?? $row->drop ?? null,
+            'distanceKm' => $row->actual_distance_km ?? $row->distance_km ?? null,
+            'customerName' => $actor->role === 'DRIVER' ? ($row->passenger_name ?? 'Customer') : $actor->name,
+            'customerPhone' => $actor->role === 'DRIVER' ? ($row->passenger_phone ?? null) : $actor->phone,
+            'customerEmail' => $actor->role === 'DRIVER' ? null : $actor->email,
+            'driverName' => $actor->role === 'DRIVER' ? $actor->name : null,
+            'company' => 'KarnaCab',
+            'companyAddress' => 'KarnaCab Mobility Pvt Ltd, India',
+            'gstin' => 'GSTIN applied as per fare rules',
+        ];
     }
 
     public function supportFaqs(?string $audience = 'customer'): array
     {
+        $this->ensureFaqs();
         if (! Schema::hasTable('support_faqs')) {
-            return ['faqs' => []];
+            return ['faqs' => $this->defaultFaqs()];
         }
         $q = DB::table('support_faqs')->where('active', 1);
-        if ($audience) {
+        if ($audience && Schema::hasColumn('support_faqs', 'audience')) {
             $q->where(function ($inner) use ($audience) {
                 $inner->where('audience', $audience)->orWhere('audience', 'all');
             });
         }
+        $rows = $q->orderBy(Schema::hasColumn('support_faqs', 'sort_order') ? 'sort_order' : 'id')->limit(100)->get();
+        if ($rows->isEmpty()) {
+            return ['faqs' => $this->defaultFaqs()];
+        }
 
-        return ['faqs' => $q->orderBy('sort_order')->limit(100)->get()->map(fn ($row) => [
+        return ['faqs' => $rows->map(fn ($row) => [
             'id' => (string) $row->id,
             'question' => $row->question,
             'answer' => $row->answer,
-            'audience' => $row->audience,
+            'audience' => $row->audience ?? 'customer',
         ])->all()];
     }
 
     public function supportTickets(User $actor, Request $request)
     {
         if ($request->isMethod('post') && Schema::hasTable('support_tickets')) {
-            $id = DB::table('support_tickets')->insertGetId([
+            $kind = (string) ($request->input('kind') ?? $request->input('type') ?? 'support');
+            if ($kind === 'lost_found') {
+                $kind = 'complaint';
+            }
+            $subject = (string) ($request->input('subject') ?: match ($kind) {
+                'complaint' => 'Complaint',
+                'parcel' => 'Parcel',
+                default => 'Support',
+            });
+            if (($request->input('type') ?? '') === 'lost_found') {
+                $subject = 'Lost & found';
+            }
+            $description = (string) ($request->input('description') ?? $request->input('message') ?? '');
+            $payload = [
                 'public_ref' => strtoupper(Str::random(8)),
                 'user_id' => $actor->id,
-                'kind' => $request->input('kind', 'support'),
+                'kind' => $kind,
                 'status' => 'open',
-                'subject' => $request->input('subject', 'Support'),
-                'category' => $request->input('category', 'other'),
-                'description' => $request->input('description', ''),
+                'subject' => $subject,
+                'category' => $request->input('category') ?: (($request->input('type') === 'lost_found') ? 'lost_found' : 'other'),
+                'description' => $description,
+                'message' => $description,
+                'type' => $request->input('type') ?? $kind,
+                'booking_id' => $request->input('bookingId') ?? $request->input('booking_id'),
+                'priority' => 'medium',
                 'created_at' => now(),
                 'updated_at' => now(),
-            ]);
+            ];
+            $id = DB::table('support_tickets')->insertGetId(array_filter(
+                $payload,
+                fn ($key) => Schema::hasColumn('support_tickets', $key),
+                ARRAY_FILTER_USE_KEY,
+            ));
 
-            return ['id' => (string) $id, 'ok' => true];
+            return [
+                'id' => (string) $id,
+                'ok' => true,
+                'incidentId' => (string) $id,
+                'publicRef' => $payload['public_ref'],
+            ];
         }
         $tickets = Schema::hasTable('support_tickets')
             ? DB::table('support_tickets')->where('user_id', $actor->id)->orderByDesc('id')->limit(50)->get()
             : collect();
 
-        return ['tickets' => $tickets];
+        return ['tickets' => $tickets->map(fn ($row) => [
+            'id' => (string) $row->id,
+            'publicRef' => $row->public_ref ?? null,
+            'subject' => $row->subject ?? $row->type ?? 'Ticket',
+            'status' => $row->status ?? 'open',
+            'kind' => $row->kind ?? $row->type ?? 'support',
+            'description' => $row->description ?? $row->message ?? '',
+        ])->all()];
+    }
+
+    public function safetyIncidents(User $actor): array
+    {
+        if (! Schema::hasTable('support_tickets')) {
+            return ['incidents' => []];
+        }
+        $rows = DB::table('support_tickets')->where('user_id', $actor->id)->orderByDesc('id')->limit(40)->get();
+
+        return ['incidents' => $rows->map(fn ($row) => [
+            'incidentId' => $row->public_ref ?? (string) $row->id,
+            'id' => (string) $row->id,
+            'type' => $row->kind ?? $row->category ?? 'support',
+            'status' => $row->status ?? 'open',
+            'description' => $row->description ?? $row->message ?? $row->subject ?? '',
+        ])->all()];
+    }
+
+    public function markNotificationRead(User $actor, string $id): array
+    {
+        if (Schema::hasTable('user_notifications')) {
+            if (! Schema::hasColumn('user_notifications', 'read_at')) {
+                try {
+                    Schema::table('user_notifications', fn ($table) => $table->timestamp('read_at')->nullable());
+                } catch (\Throwable) {
+                }
+            }
+            $q = DB::table('user_notifications')->where('user_id', $actor->id)->where('id', $id);
+            if (Schema::hasColumn('user_notifications', 'read_at')) {
+                $q->update(['read_at' => now()]);
+            } elseif (Schema::hasColumn('user_notifications', 'is_read')) {
+                $q->update(['is_read' => 1]);
+            }
+        }
+
+        return $this->experienceOverview($actor);
     }
 
     public function adsServe(?string $placement = null): array
@@ -590,14 +741,103 @@ class AppSurfaceService
 
     public function walletMe(User $actor): array
     {
-        $row = DB::table('wallets')->where('owner_user_id', $actor->id)->first();
+        $ownerType = $actor->role === 'DRIVER' ? 'DRIVER' : 'CUSTOMER';
+        $row = null;
+        if (Schema::hasTable('wallets')) {
+            $q = DB::table('wallets')->where('owner_user_id', $actor->id);
+            if (Schema::hasColumn('wallets', 'owner_type')) {
+                $q->where(function ($inner) use ($ownerType) {
+                    $inner->where('owner_type', $ownerType)->orWhereNull('owner_type');
+                });
+            }
+            $row = $q->orderByDesc('id')->first();
+        }
+        if (! $row && Schema::hasTable('wallets')) {
+            $id = DB::table('wallets')->insertGetId(array_filter([
+                'owner_user_id' => $actor->id,
+                'owner_type' => $ownerType,
+                'balance_paise' => 0,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ], fn ($key) => Schema::hasColumn('wallets', $key), ARRAY_FILTER_USE_KEY));
+            $row = DB::table('wallets')->where('id', $id)->first();
+        }
         $balance = (int) ($row->balance_paise ?? 0);
+        $ledger = [];
+        if ($row && Schema::hasTable('wallet_ledger')) {
+            $ledger = DB::table('wallet_ledger')->where('wallet_id', $row->id)->orderByDesc('id')->limit(80)->get()->map(fn ($item) => [
+                'id' => (string) $item->id,
+                'transactionId' => $item->public_ref ?? ('WL'.$item->id),
+                'kind' => $item->kind ?? 'entry',
+                'type' => $item->kind ?? 'entry',
+                'direction' => $item->direction ?? '',
+                'amountPaise' => (int) ($item->amount_paise ?? 0),
+                'amountRupees' => ((int) ($item->amount_paise ?? 0)) / 100,
+                'commissionPaise' => (int) ($item->commission_paise ?? 0),
+                'commissionRupees' => ((int) ($item->commission_paise ?? 0)) / 100,
+                'balanceBeforeRupees' => ((int) ($item->balance_before_paise ?? 0)) / 100,
+                'balanceAfterRupees' => ((int) ($item->balance_after_paise ?? 0)) / 100,
+                'bookingId' => $item->booking_id ?? null,
+                'status' => $item->status ?? 'posted',
+                'note' => $item->note ?? '',
+                'description' => $item->note ?? ($item->kind ?? 'Entry'),
+                'createdAt' => $item->created_at ?? null,
+            ])->all();
+        }
 
         return [
             'balancePaise' => $balance,
             'balanceRupees' => $balance / 100,
-            'ownerType' => $row->owner_type ?? $actor->role,
+            'ownerType' => $row->owner_type ?? $ownerType,
+            'ledger' => $ledger,
         ];
+    }
+
+    /**
+     * @return list<array{id: string, question: string, answer: string, audience: string}>
+     */
+    private function defaultFaqs(): array
+    {
+        return [
+            ['id' => '1', 'question' => 'How do I book a ride?', 'answer' => 'Tap Where to, set drop, choose a vehicle, pick Cash or Wallet, then confirm.', 'audience' => 'customer'],
+            ['id' => '2', 'question' => 'How do I add wallet balance?', 'answer' => 'Open Account → Wallet, enter an amount, and pay with PayU.', 'audience' => 'customer'],
+            ['id' => '3', 'question' => 'How do I save Home and Work?', 'answer' => 'Open Where to and tap Add Home or Add Work, then pick the address.', 'audience' => 'customer'],
+            ['id' => '4', 'question' => 'How do I cancel a trip?', 'answer' => 'Open the live booking, tap Cancel, and choose a reason. Admin can see that reason.', 'audience' => 'customer'],
+            ['id' => '5', 'question' => 'Safety desk', 'answer' => 'Use Support → Safety desk for SOS, emergency contact, lost & found, and complaints.', 'audience' => 'customer'],
+        ];
+    }
+
+    private function ensureFaqs(): void
+    {
+        if (! Schema::hasTable('support_faqs')) {
+            try {
+                Schema::create('support_faqs', function ($table) {
+                    $table->id();
+                    $table->string('question');
+                    $table->text('answer');
+                    $table->string('audience', 24)->default('customer');
+                    $table->unsignedInteger('sort_order')->default(0);
+                    $table->boolean('active')->default(true);
+                    $table->timestamps();
+                });
+            } catch (\Throwable) {
+                return;
+            }
+        }
+        if (Schema::hasTable('support_faqs') && DB::table('support_faqs')->count() === 0) {
+            $i = 0;
+            foreach ($this->defaultFaqs() as $faq) {
+                DB::table('support_faqs')->insert([
+                    'question' => $faq['question'],
+                    'answer' => $faq['answer'],
+                    'audience' => $faq['audience'],
+                    'sort_order' => $i++,
+                    'active' => 1,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+        }
     }
 
     public function presentPlace($row): array

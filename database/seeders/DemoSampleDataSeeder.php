@@ -18,10 +18,9 @@ class DemoSampleDataSeeder extends Seeder
 
     private const DRIVER_PHONE = '7065876175';
 
-    /** Connaught Place / Rajiv Chowk — matches the emulator test pin. */
-    private const TEST_LAT = 28.6327;
-
-    private const TEST_LNG = 77.2198;
+    /** Nehru Vihar / Old Mustafabad (Delhi 110090). */
+    private const TEST_LAT = 28.7116;
+    private const TEST_LNG = 77.2703;
 
     private const KEEP = [
         '_prisma_migrations',

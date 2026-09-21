@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\CatalogService;
 use App\Models\CmsPage;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class CmsCatalogService
 {
@@ -22,12 +23,14 @@ class CmsCatalogService
             'catalog' => array_merge($this->catalog(), [
                 'rentalPackages' => app(FareService::class)->rentalPackages(),
             ]),
-            'faqs' => DB::table('support_faqs')
-                ->where('audience', 'customer')
-                ->where('active', 1)
-                ->orderBy('sort_order')
-                ->get(['question', 'answer'])
-                ->all(),
+            'faqs' => Schema::hasTable('support_faqs')
+                ? DB::table('support_faqs')
+                    ->where('audience', 'customer')
+                    ->where('active', 1)
+                    ->orderBy('sort_order')
+                    ->get(['question', 'answer'])
+                    ->all()
+                : [],
         ];
     }
 

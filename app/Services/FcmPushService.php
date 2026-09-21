@@ -16,9 +16,45 @@ class FcmPushService
         if ($ids === []) {
             return;
         }
+        $this->persistInbox($ids, $title, $body, $data);
         $tokens = $this->tokensFor($ids);
         foreach ($tokens as $token) {
             $this->send($token, $title, $body, $data, $imageUrl);
+        }
+    }
+
+    /**
+     * @param  list<int>  $userIds
+     * @param  array<string, mixed>  $data
+     */
+    private function persistInbox(array $userIds, string $title, string $body, array $data): void
+    {
+        if (! Schema::hasTable('user_notifications')) {
+            return;
+        }
+        if (! Schema::hasColumn('user_notifications', 'read_at') && Schema::hasTable('user_notifications')) {
+            try {
+                Schema::table('user_notifications', fn ($table) => $table->timestamp('read_at')->nullable());
+            } catch (\Throwable) {
+            }
+        }
+        $now = now();
+        foreach ($userIds as $userId) {
+            $row = [
+                'user_id' => $userId,
+                'title' => $title,
+                'body' => $body,
+                'kind' => (string) ($data['type'] ?? 'info'),
+                'created_at' => $now,
+            ];
+            if (Schema::hasColumn('user_notifications', 'updated_at')) {
+                $row['updated_at'] = $now;
+            }
+            DB::table('user_notifications')->insert(array_filter(
+                $row,
+                fn ($key) => Schema::hasColumn('user_notifications', $key),
+                ARRAY_FILTER_USE_KEY,
+            ));
         }
     }
 
@@ -60,7 +96,7 @@ class FcmPushService
                 'android' => [
                     'priority' => 'HIGH',
                     'notification' => array_filter([
-                        'channel_id' => (($data['type'] ?? '') === 'booking') ? 'karnacab_booking' : 'karnacab_default',
+                        'channel_id' => (str_contains((string) ($data['type'] ?? ''), 'booking') || ($data['event'] ?? '') === 'new_booking') ? 'karnacab_booking' : 'karnacab_default',
                         'sound' => 'default',
                         'notification_priority' => 'PRIORITY_MAX',
                         'default_vibrate_timings' => false,

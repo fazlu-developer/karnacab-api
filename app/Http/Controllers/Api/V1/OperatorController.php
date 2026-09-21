@@ -148,4 +148,34 @@ class OperatorController extends Controller
     {
         return $this->fleet->updateProfile($request->user(), $request->all());
     }
+
+    public function onboarding(Request $request)
+    {
+        return $this->fleet->onboarding($request->user());
+    }
+
+    public function saveOnboarding(Request $request)
+    {
+        return $this->fleet->saveOnboarding($request->user(), $request->all());
+    }
+
+    public function uploadCompanyDocument(Request $request)
+    {
+        return $this->fleet->uploadCompanyDocument($request->user(), $request->all());
+    }
+
+    public function submitOnboarding(Request $request)
+    {
+        return $this->fleet->submitOnboarding($request->user());
+    }
+
+    public function storeDriverDocument(Request $request, string $id)
+    {
+        return $this->fleet->storeDriverDocument($request->user(), (int) $id, $request->all());
+    }
+
+    public function storeVehicleDocument(Request $request, string $id)
+    {
+        return $this->fleet->storeVehicleDocument($request->user(), (int) $id, $request->all());
+    }
 }

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\User;
+use App\Support\FleetOnboarding;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -29,6 +30,103 @@ class OperatorFleetService
             'driverId' => $driver?->id,
             'role' => $actor->role,
         ];
+    }
+
+    public function onboarding(User $actor): array
+    {
+        $fleet = $this->requireFleet($actor, false);
+
+        return $this->presentOnboarding($actor, $fleet);
+    }
+
+    public function saveOnboarding(User $actor, array $data): array
+    {
+        $fleet = $this->requireFleet($actor, false);
+        FleetOnboarding::ensureColumns();
+        $type = strtoupper(trim((string) ($data['companyType'] ?? $data['company_type'] ?? $fleet->company_type ?? '')));
+        abort_unless($type === '' || in_array($type, FleetOnboarding::COMPANY_TYPES, true), 422, 'Select a valid company type.');
+        $name = trim((string) ($data['tradeName'] ?? $data['trade_name'] ?? $data['companyName'] ?? $fleet->trade_name ?? ''));
+        $ownerName = trim((string) ($data['ownerName'] ?? $data['name'] ?? $actor->name ?? ''));
+        $patch = ['updated_at' => now()];
+        if ($type !== '' && Schema::hasColumn('fleet_owners', 'company_type')) {
+            $patch['company_type'] = $type;
+        }
+        if ($name !== '') {
+            abort_unless(strlen($name) >= 2, 422, 'Enter the company name.');
+            $patch['trade_name'] = $name;
+        }
+        foreach ([
+            'gstin' => $data['gstin'] ?? $data['gst'] ?? null,
+            'address' => $data['address'] ?? null,
+            'pan' => $data['pan'] ?? null,
+            'contact_email' => $data['email'] ?? $data['contactEmail'] ?? null,
+            'contact_phone' => $data['phone'] ?? $data['contactPhone'] ?? null,
+            'state_id' => $data['stateId'] ?? $data['state_id'] ?? null,
+            'district_id' => $data['districtId'] ?? $data['district_id'] ?? null,
+        ] as $col => $value) {
+            if ($value !== null && $value !== '' && Schema::hasColumn('fleet_owners', $col)) {
+                $patch[$col] = $value;
+            }
+        }
+        if (strtolower((string) ($fleet->kyc_status ?? '')) === 'rejected' && Schema::hasColumn('fleet_owners', 'kyc_status')) {
+            $patch['kyc_status'] = 'pending';
+        }
+        DB::table('fleet_owners')->where('id', $fleet->id)->update($patch);
+        if ($ownerName !== '' && strlen($ownerName) >= 2) {
+            DB::table('users')->where('id', $actor->id)->update(['name' => $ownerName, 'updated_at' => now()]);
+            $actor->name = $ownerName;
+        }
+
+        return $this->presentOnboarding($actor->fresh(), DB::table('fleet_owners')->where('id', $fleet->id)->first());
+    }
+
+    public function uploadCompanyDocument(User $actor, array $data): array
+    {
+        $fleet = $this->requireFleet($actor, false);
+        FleetOnboarding::ensureColumns();
+        $type = strtoupper(trim((string) ($data['type'] ?? '')));
+        abort_unless(in_array($type, FleetOnboarding::COMPANY_DOCS, true), 422, 'Unknown company document type.');
+        $saved = $this->storeBinary($data, 'fleet/'.$fleet->id);
+        $docs = FleetOnboarding::documents($fleet);
+        $docs = array_values(array_filter($docs, fn ($row) => strtoupper((string) ($row['type'] ?? '')) !== $type));
+        $docs[] = [
+            'type' => $type,
+            'status' => 'pending',
+            'storageKey' => $saved['path'],
+            'originalName' => $saved['name'],
+            'mime' => $saved['mime'],
+            'uploadedAt' => now()->toIso8601String(),
+        ];
+        DB::table('fleet_owners')->where('id', $fleet->id)->update([
+            'documents_json' => json_encode($docs),
+            'updated_at' => now(),
+        ]);
+
+        return $this->presentOnboarding($actor, DB::table('fleet_owners')->where('id', $fleet->id)->first());
+    }
+
+    public function submitOnboarding(User $actor): array
+    {
+        $fleet = $this->requireFleet($actor, false);
+        FleetOnboarding::ensureColumns();
+        abort_unless(strlen(trim((string) ($fleet->trade_name ?? ''))) >= 2, 422, 'Enter company information first.');
+        abort_unless(trim((string) ($fleet->company_type ?? '')) !== '', 422, 'Select a company type.');
+        $docs = FleetOnboarding::documents($fleet);
+        abort_unless(count($docs) >= 1, 422, 'Upload at least one company document.');
+        $patch = [
+            'status' => 'PENDING',
+            'updated_at' => now(),
+        ];
+        if (Schema::hasColumn('fleet_owners', 'kyc_status')) {
+            $patch['kyc_status'] = 'under_review';
+        }
+        if (Schema::hasColumn('fleet_owners', 'submitted_at')) {
+            $patch['submitted_at'] = now();
+        }
+        DB::table('fleet_owners')->where('id', $fleet->id)->update($patch);
+        DB::table('users')->where('id', $actor->id)->update(['status' => 'PENDING', 'updated_at' => now()]);
+
+        return $this->presentOnboarding($actor->fresh(), DB::table('fleet_owners')->where('id', $fleet->id)->first());
     }
 
     public function dashboard(User $actor): array
@@ -103,7 +201,7 @@ class OperatorFleetService
             'fleet_owner_id' => $fleet->id,
             'registration_no' => $registration,
             'category' => $category,
-            'status' => 'available',
+            'status' => 'pending_review',
             'brand' => $data['make'] ?? $data['brand'] ?? null,
             'model' => $data['model'] ?? null,
             'year' => $data['year'] ?? null,
@@ -127,6 +225,11 @@ class OperatorFleetService
             abort(409, 'Registration number already exists.');
         }
         $this->audit($actor, $fleet, 'vehicle.created', 'vehicle', $id, null, $payload);
+        foreach ((array) ($data['documents'] ?? []) as $doc) {
+            if (is_array($doc)) {
+                $this->storeOwnedDocument('vehicle_documents', 'vehicle_id', $id, $doc, 'vehicle/'.$id);
+            }
+        }
 
         return $this->vehicle($actor, $id);
     }
@@ -209,7 +312,7 @@ class OperatorFleetService
         }
         $userId = DB::table('users')->insertGetId([
             'role' => 'DRIVER',
-            'status' => 'ACTIVE',
+            'status' => 'PENDING',
             'name' => $name,
             'email' => $email,
             'phone' => $phone ?: null,
@@ -217,16 +320,28 @@ class OperatorFleetService
             'created_at' => now(),
             'updated_at' => now(),
         ]);
-        $driverId = DB::table('drivers')->insertGetId([
+        $driverPayload = [
             'user_id' => $userId,
             'fleet_owner_id' => $fleet->id,
             'online' => false,
             'duty_status' => 'offline',
-            'kyc_status' => 'pending',
+            'kyc_status' => 'under_review',
             'license_no' => $data['licenseNo'] ?? $data['license_no'] ?? null,
             'created_at' => now(),
             'updated_at' => now(),
-        ]);
+        ];
+        if (Schema::hasColumn('drivers', 'city') && ! empty($data['city'])) {
+            $driverPayload['city'] = $data['city'];
+        }
+        if (Schema::hasColumn('drivers', 'application_submitted_at')) {
+            $driverPayload['application_submitted_at'] = now();
+        }
+        $driverId = DB::table('drivers')->insertGetId($driverPayload);
+        foreach ((array) ($data['documents'] ?? []) as $doc) {
+            if (is_array($doc)) {
+                $this->storeOwnedDocument('driver_documents', 'driver_id', $driverId, $doc, 'kyc/'.$driverId);
+            }
+        }
         $this->audit($actor, $fleet, 'driver.created', 'driver', $driverId, null, ['userId' => $userId]);
 
         return $this->driver($actor, $driverId);
@@ -236,9 +351,9 @@ class OperatorFleetService
     {
         $fleet = $this->requireFleet($actor);
         $vehicle = $this->requireVehicle($fleet, $vehicleId);
+        abort_if(in_array(strtolower((string) $vehicle->status), ['pending_review', 'pending', 'rejected', 'maintenance', 'blocked', 'suspended'], true), 422, 'Vehicle is not assignable until admin approval.');
         $driver = $this->requireDriver($fleet, $driverId);
         $this->assertAssignable($driver);
-        abort_if(in_array(strtolower((string) $vehicle->status), ['maintenance', 'blocked', 'suspended'], true), 422, 'Vehicle is not assignable.');
         $this->closeActiveAssignment($fleet, (int) $vehicle->id, 'replaced', $actor->id);
         DB::table('vehicles')->where('fleet_owner_id', $fleet->id)->where('driver_id', $driverId)->where('id', '!=', $vehicleId)->update([
             'driver_id' => null,
@@ -566,9 +681,27 @@ class OperatorFleetService
         ])->all()];
     }
 
+    public function storeDriverDocument(User $actor, int $id, array $data): array
+    {
+        $fleet = $this->requireFleet($actor);
+        $this->requireDriver($fleet, $id);
+        $this->storeOwnedDocument('driver_documents', 'driver_id', $id, $data, 'kyc/'.$id);
+
+        return $this->driver($actor, $id);
+    }
+
+    public function storeVehicleDocument(User $actor, int $id, array $data): array
+    {
+        $fleet = $this->requireFleet($actor);
+        $this->requireVehicle($fleet, $id);
+        $this->storeOwnedDocument('vehicle_documents', 'vehicle_id', $id, $data, 'vehicle/'.$id);
+
+        return $this->vehicle($actor, $id);
+    }
+
     public function profile(User $actor): array
     {
-        $fleet = $this->fleetRow($actor) ?: $this->requireFleet($actor);
+        $fleet = $this->requireFleet($actor, false);
 
         return [
             'id' => (string) $actor->id,
@@ -580,13 +713,16 @@ class OperatorFleetService
             'city' => $actor->last_address,
             'stateId' => $actor->state_id,
             'districtId' => $actor->district_id,
+            'kycStatus' => $fleet->kyc_status ?? null,
+            'nextStep' => FleetOnboarding::nextStep($fleet),
+            'approved' => FleetOnboarding::isActive($fleet),
             'capabilities' => $this->capabilities($actor),
         ];
     }
 
     public function updateProfile(User $actor, array $data): array
     {
-        $fleet = $this->requireFleet($actor);
+        $fleet = $this->requireFleet($actor, false);
         $userPatch = array_filter([
             'name' => $data['name'] ?? null,
             'phone' => $data['phone'] ?? $data['mobile'] ?? null,
@@ -624,30 +760,18 @@ class OperatorFleetService
         ])->all()];
     }
 
-    private function requireFleet(User $actor): object
+    private function requireFleet(User $actor, bool $mustBeActive = true): object
     {
         abort_unless(in_array($actor->role, ['FLEET_OWNER', 'ADMIN', 'SUPER_ADMIN'], true) || $this->fleetRow($actor), 403, 'Fleet Owner access only.');
         abort_if(in_array($actor->role, ['ADMIN', 'SUPER_ADMIN'], true) && ! $this->fleetRow($actor), 403, 'Super Admin must use the admin panel.');
         $fleet = $this->fleetRow($actor);
         if ($fleet === null && $actor->role === 'FLEET_OWNER' && Schema::hasTable('fleet_owners')) {
-            $payload = [
-                'user_id' => $actor->id,
-                'trade_name' => ($actor->name ?: 'KarnaCab').' Fleet',
-            ];
-            if (Schema::hasColumn('fleet_owners', 'state_id')) {
-                $payload['state_id'] = $actor->state_id;
-                $payload['district_id'] = $actor->district_id;
-            }
-            if (Schema::hasColumn('fleet_owners', 'created_at')) {
-                $payload['created_at'] = now();
-            }
-            if (Schema::hasColumn('fleet_owners', 'updated_at')) {
-                $payload['updated_at'] = now();
-            }
-            $id = DB::table('fleet_owners')->insertGetId($payload);
-            $fleet = DB::table('fleet_owners')->where('id', $id)->first();
+            $fleet = FleetOnboarding::ensureRow((int) $actor->id);
         }
         abort_if($fleet === null, 403, 'No fleet is linked to this account.');
+        if ($mustBeActive && ! FleetOnboarding::isActive($fleet)) {
+            abort(403, 'Your fleet owner application is under review. Admin verification is required before you can operate.');
+        }
 
         return $fleet;
     }
@@ -758,6 +882,10 @@ class OperatorFleetService
             'stateId' => $stateId,
             'districtId' => $districtId,
             'franchiseId' => $fleet->franchise_id ?? null,
+            'companyType' => $fleet->company_type ?? null,
+            'kycStatus' => $fleet->kyc_status ?? null,
+            'status' => $fleet->status ?? null,
+            'approved' => FleetOnboarding::isActive($fleet),
             'stateName' => $stateName,
             'districtName' => $districtName,
         ];
@@ -784,6 +912,8 @@ class OperatorFleetService
             'color' => $row->color,
             'fuelType' => $row->fuel,
             'status' => $status,
+            'pendingReview' => in_array($status, ['pending_review', 'pending'], true),
+            'approved' => ! in_array($status, ['pending_review', 'pending', 'rejected'], true),
             'assignedDriverId' => $driverId,
             'assignedDriverName' => $driver->name ?? null,
             'assignedDriverPhone' => $driver->phone ?? null,
@@ -814,7 +944,9 @@ class OperatorFleetService
             'licenseNo' => $row->license_no,
             'vehicleId' => $vehicle->id ?? null,
             'vehicleNo' => $vehicle->registration_no ?? null,
-            'accountStatus' => $row->account_status ?? 'ACTIVE',
+            'accountStatus' => $row->account_status ?? 'PENDING',
+            'active' => in_array(strtolower((string) ($row->kyc_status ?? '')), ['verified', 'approved', 'active'], true)
+                && strtoupper((string) ($row->account_status ?? '')) === 'ACTIVE',
         ];
     }
 
@@ -970,5 +1102,96 @@ class OperatorFleetService
             ]);
         } catch (\Throwable) {
         }
+    }
+
+    private function presentOnboarding(User $actor, object $fleet): array
+    {
+        $docs = FleetOnboarding::documents($fleet);
+
+        return [
+            'fleet' => $this->presentFleet($fleet, $actor),
+            'companyType' => $fleet->company_type ?? null,
+            'tradeName' => $fleet->trade_name ?? '',
+            'gstin' => $fleet->gstin ?? '',
+            'pan' => $fleet->pan ?? '',
+            'address' => $fleet->address ?? '',
+            'email' => $fleet->contact_email ?? ($actor->email ?? ''),
+            'phone' => $fleet->contact_phone ?? ($actor->phone ?? ''),
+            'ownerName' => $actor->name,
+            'kycStatus' => $fleet->kyc_status ?? 'pending',
+            'status' => $fleet->status ?? 'PENDING',
+            'submittedAt' => $fleet->submitted_at ?? null,
+            'nextStep' => FleetOnboarding::nextStep($fleet),
+            'approved' => FleetOnboarding::isActive($fleet),
+            'documents' => $docs,
+            'companyTypes' => FleetOnboarding::COMPANY_TYPES,
+            'requiredDocs' => FleetOnboarding::COMPANY_DOCS,
+        ];
+    }
+
+    private function storeOwnedDocument(string $table, string $fk, int $id, array $data, string $folder): void
+    {
+        if (! Schema::hasTable($table)) {
+            return;
+        }
+        $type = strtoupper(trim((string) ($data['type'] ?? '')));
+        abort_unless($type !== '', 422, 'Document type is required.');
+        $saved = $this->storeBinary($data, $folder);
+        $existing = DB::table($table)->where($fk, $id)->where('type', $type)->value('id');
+        $payload = [
+            $fk => $id,
+            'type' => $type,
+            'status' => 'pending',
+            'storage_key' => $saved['path'],
+            'original_name' => $saved['name'],
+            'mime' => $saved['mime'],
+            'size_bytes' => $saved['bytes'],
+            'updated_at' => now(),
+        ];
+        if (Schema::hasColumn($table, 'checksum_sha256')) {
+            $payload['checksum_sha256'] = $saved['hash'];
+        }
+        if (! empty($data['expiresAt'] ?? $data['expires_at']) && Schema::hasColumn($table, 'expires_at')) {
+            $payload['expires_at'] = $data['expiresAt'] ?? $data['expires_at'];
+        }
+        if ($existing) {
+            DB::table($table)->where('id', $existing)->update($payload);
+        } else {
+            $payload['created_at'] = now();
+            DB::table($table)->insert($payload);
+        }
+    }
+
+    /**
+     * @return array{path:string,name:string,mime:string,bytes:int,hash:string}
+     */
+    private function storeBinary(array $data, string $folder): array
+    {
+        $binary = null;
+        $mime = (string) ($data['mime'] ?? 'image/jpeg');
+        $name = (string) ($data['originalName'] ?? 'document.jpg');
+        if (! empty($data['fileBase64'])) {
+            $raw = (string) $data['fileBase64'];
+            if (str_contains($raw, ',')) {
+                $raw = explode(',', $raw, 2)[1];
+            }
+            $binary = base64_decode($raw, true) ?: null;
+        }
+        abort_unless($binary, 422, 'Upload an image of this document');
+        abort_unless(strlen($binary) < 8 * 1024 * 1024, 422, 'Image must be under 8 MB');
+        $ext = str_contains($mime, 'png') ? 'png' : (str_contains($mime, 'webp') ? 'webp' : 'jpg');
+        $path = trim($folder, '/').'/'.Str::uuid().'.'.$ext;
+        $full = storage_path('app/public/'.$path);
+        $dir = dirname($full);
+        abort_unless(is_dir($dir) || mkdir($dir, 0777, true) || is_dir($dir), 500, 'Could not save the attachment');
+        abort_unless(file_put_contents($full, $binary) !== false, 500, 'Could not save the attachment');
+
+        return [
+            'path' => $path,
+            'name' => substr($name, 0, 180),
+            'mime' => substr($mime, 0, 80),
+            'bytes' => strlen($binary),
+            'hash' => hash('sha256', $binary),
+        ];
     }
 }

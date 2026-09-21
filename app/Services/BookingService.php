@@ -7,6 +7,7 @@ use App\Models\Driver;
 use App\Models\User;
 use App\Support\BookingStatus;
 use App\Support\Geo;
+use App\Support\ServiceArea;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
@@ -30,6 +31,14 @@ class BookingService
         $dropLng = isset($dto['dropLng']) ? (float) $dto['dropLng'] : null;
         abort_unless($pickupLat !== null && $pickupLng !== null, 422, 'Pickup coordinates are required');
         abort_unless($dropLat !== null && $dropLng !== null, 422, 'Drop coordinates are required');
+        ServiceArea::assertTrip($dto + [
+            'pickupLat' => $pickupLat,
+            'pickupLng' => $pickupLng,
+            'dropLat' => $dropLat,
+            'dropLng' => $dropLng,
+            'pickupText' => $dto['pickupText'] ?? $dto['pickup_text'] ?? null,
+            'dropText' => $dto['dropText'] ?? $dto['drop_text'] ?? null,
+        ]);
 
         $distanceKm = (float) ($dto['distanceKm'] ?? Geo::haversineKm($pickupLat, $pickupLng, $dropLat, $dropLng));
         $quote = $this->fares->quote([
@@ -63,6 +72,13 @@ class BookingService
             (string) ($dto['product'] ?? 'LOCAL_CAB'),
         );
         abort_if(! $scheduled && $matches === [], 422, 'No nearby drivers found.');
+        $mode = $this->normalizePaymentMode($dto['paymentMode'] ?? $dto['payment_mode'] ?? 'CASH');
+        if ($mode === 'WALLET') {
+            $wallet = Schema::hasTable('wallets')
+                ? DB::table('wallets')->where('owner_user_id', $actor->id)->orderBy('id')->first()
+                : null;
+            abort_unless($wallet && (int) $wallet->balance_paise >= (int) $quote['totalPaise'], 422, 'Add wallet balance to pay with wallet.');
+        }
 
         $booking = Booking::query()->create($this->filterColumns([
             'public_ref' => strtoupper(Str::random(8)),
@@ -92,6 +108,7 @@ class BookingService
             'instructions' => $dto['instructions'] ?? null,
             'start_otp' => (string) random_int(1000, 9999),
             'end_otp' => (string) random_int(1000, 9999),
+            'payment_mode' => $mode,
         ]));
 
         if (! $scheduled) {
@@ -101,7 +118,8 @@ class BookingService
                 'New KarnaCab booking',
                 trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
                 [
-                    'type' => 'booking',
+                    'type' => 'booking_offer',
+                    'event' => 'new_booking',
                     'bookingId' => (string) $booking->id,
                 ],
             );
@@ -183,6 +201,18 @@ class BookingService
         $vehicle = $driver->vehicles->first();
         abort_unless($vehicle, 422, 'Add a vehicle before accepting rides.');
 
+        $preview = Booking::query()->find($id);
+        abort_unless($preview, 404, 'Booking not found');
+        $wallet = Schema::hasTable('wallets')
+            ? DB::table('wallets')->where('owner_user_id', $actor->id)->where(function ($q) {
+                if (Schema::hasColumn('wallets', 'owner_type')) {
+                    $q->where('owner_type', 'DRIVER');
+                }
+            })->orderBy('id')->first()
+            : null;
+        $eligibility = $this->settings->walletEligibility((int) ($wallet->balance_paise ?? 0), (int) ($preview->quote_paise ?? 0));
+        abort_unless($eligibility['eligible'], 422, $eligibility['reason'] ?? 'Wallet balance is too low to accept this booking.');
+
         $assigned = false;
         DB::transaction(function () use ($id, $driver, $vehicle, &$assigned) {
             $booking = Booking::query()->where('id', $id)->lockForUpdate()->first();
@@ -220,7 +250,7 @@ class BookingService
             [(int) $booking->customer_id],
             'Driver assigned',
             ($actor->name ?: 'Your driver').' is on the way.',
-            ['type' => 'trip', 'bookingId' => (string) $booking->id],
+            ['type' => 'trip', 'event' => 'accepted', 'bookingId' => (string) $booking->id],
         );
 
         return $this->present($booking, $actor);
@@ -237,9 +267,41 @@ class BookingService
         return $this->present($booking, $actor);
     }
 
-    public function cancel(User $actor, string $id): array
+    public function cancel(User $actor, string $id, array $data = []): array
     {
-        return $this->lifecycle($actor, $id, 'cancel');
+        return $this->lifecycle($actor, $id, 'cancel', null, $data);
+    }
+
+    public function rate(User $actor, string $id, int $stars, string $comment): void
+    {
+        $booking = $this->findVisible($actor, $id);
+        $stars = max(1, min(5, $stars));
+        if (Schema::hasTable('booking_ratings')) {
+            $row = [
+                'booking_id' => $booking->id,
+                'from_role' => $actor->role,
+                'from_user_id' => $actor->id,
+                'stars' => $stars,
+                'comment' => $comment !== '' ? $comment : null,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
+            $match = ['booking_id' => $booking->id];
+            if (Schema::hasColumn('booking_ratings', 'from_role')) {
+                $match['from_role'] = $actor->role;
+            }
+            DB::table('booking_ratings')->updateOrInsert(
+                $match,
+                array_filter($row, fn ($key) => Schema::hasColumn('booking_ratings', $key), ARRAY_FILTER_USE_KEY),
+            );
+        }
+        if ($booking->driver_id && Schema::hasTable('booking_ratings')) {
+            $ids = Booking::query()->where('driver_id', $booking->driver_id)->pluck('id');
+            $avg = $ids->isEmpty() ? null : DB::table('booking_ratings')->whereIn('booking_id', $ids)->avg('stars');
+            if ($avg !== null) {
+                Driver::query()->where('id', $booking->driver_id)->update(['rating_avg' => round((float) $avg, 2)]);
+            }
+        }
     }
 
     public function verifyOtp(User $actor, string $id, string $otp): array
@@ -260,7 +322,7 @@ class BookingService
         return $this->present($booking->fresh(), $actor);
     }
 
-    public function lifecycle(User $actor, string $id, string $status, ?string $otp = null): array
+    public function lifecycle(User $actor, string $id, string $status, ?string $otp = null, array $extra = []): array
     {
         $action = strtolower($status);
         $booking = $this->findVisible($actor, $id);
@@ -270,12 +332,32 @@ class BookingService
             if (BookingStatus::isTerminal((string) $booking->status)) {
                 return $this->present($booking, $actor);
             }
-            $booking->update(['status' => $target]);
+            $reason = trim((string) ($extra['reason'] ?? $extra['cancelReason'] ?? $extra['cancel_reason'] ?? ''));
+            $custom = trim((string) ($extra['customReason'] ?? $extra['note'] ?? ''));
+            $fullReason = trim($reason.($custom !== '' ? ' — '.$custom : ''));
+            $booking->update($this->filterColumns([
+                'status' => $target,
+                'cancel_reason' => $fullReason !== '' ? $fullReason : null,
+                'cancelled_by' => $actor->role,
+            ]));
             $this->closeAllOffers((int) $booking->id, 'CANCELLED');
             if ($booking->driver_id) {
                 Driver::query()->where('id', $booking->driver_id)->update(['duty_status' => 'online', 'online' => 1]);
             }
-            Log::info('booking.cancelled', ['bookingId' => $booking->id, 'by' => $actor->role]);
+            Log::info('booking.cancelled', ['bookingId' => $booking->id, 'by' => $actor->role, 'reason' => $fullReason]);
+            $targets = [(int) $booking->customer_id];
+            if ($booking->driver_id) {
+                $driverUserId = Driver::query()->where('id', $booking->driver_id)->value('user_id');
+                if ($driverUserId) {
+                    $targets[] = (int) $driverUserId;
+                }
+            }
+            $this->push->notifyUsers(
+                $targets,
+                'Booking cancelled',
+                $fullReason !== '' ? $fullReason : 'This trip was cancelled.',
+                ['type' => 'trip', 'event' => 'cancelled', 'bookingId' => (string) $booking->id],
+            );
 
             return $this->present($booking->fresh(), $actor);
         }
@@ -287,6 +369,12 @@ class BookingService
                 'status' => BookingStatus::DRIVER_ARRIVED,
                 'arrived_at' => now(),
             ]));
+            $this->push->notifyUsers(
+                [(int) $booking->customer_id],
+                'Driver has arrived',
+                'Your driver is at the pickup point.',
+                ['type' => 'trip', 'event' => 'arrived', 'bookingId' => (string) $booking->id],
+            );
 
             return $this->present($booking->fresh(), $actor);
         }
@@ -362,6 +450,20 @@ class BookingService
         ]));
         Driver::query()->where('id', $driver->id)->update(['duty_status' => 'online']);
         $this->creditDriverWallet((int) $driver->user_id, (int) $booking->id, $earning, $commission, $totalPaise);
+        $this->debitCustomerWallet((int) $booking->customer_id, (int) $booking->id, $totalPaise, (string) ($booking->payment_mode ?? 'CASH'));
+        $this->writeInvoice($booking->fresh(), $totalPaise);
+        $this->push->notifyUsers(
+            [(int) $booking->customer_id],
+            'Trip completed',
+            'Please rate your ride.',
+            ['type' => 'trip', 'event' => 'completed', 'bookingId' => (string) $booking->id],
+        );
+        $this->push->notifyUsers(
+            [(int) $driver->user_id],
+            'Trip completed',
+            'Earning ₹'.number_format($earning / 100, 0).' after commission.',
+            ['type' => 'wallet', 'event' => 'trip_completed', 'bookingId' => (string) $booking->id],
+        );
         Log::info('booking.completed', ['bookingId' => $booking->id, 'farePaise' => $totalPaise, 'earningPaise' => $earning]);
         app(DriverSessionService::class)->finishPendingLogout($actor);
 
@@ -435,6 +537,8 @@ class BookingService
             'product' => $row->product,
             'category' => $row->category,
             'status' => $row->status,
+            'cancelReason' => $row->cancel_reason ?? null,
+            'paymentMode' => $row->payment_mode ?? 'CASH',
             'lifecycle' => BookingStatus::lifecycle((string) $row->status),
             'lifecycleLabel' => str_replace('_', ' ', BookingStatus::lifecycle((string) $row->status)),
             'pickupText' => $row->pickup_text,
@@ -575,6 +679,10 @@ class BookingService
             'name' => $customer->name,
             'phone' => $mask ? null : $customer->phone,
             'phoneMasked' => $customer->phone ? substr($customer->phone, 0, 2).'******'.substr($customer->phone, -2) : null,
+            'photoUrl' => app(KycDocumentService::class)->previewUrl($customer->avatar_path ?? null),
+            'avatarUrl' => app(KycDocumentService::class)->previewUrl($customer->avatar_path ?? null),
+            'lat' => $customer->last_lat !== null ? (float) $customer->last_lat : (float) $row->pickup_lat,
+            'lng' => $customer->last_lng !== null ? (float) $customer->last_lng : (float) $row->pickup_lng,
         ];
     }
 
@@ -717,9 +825,116 @@ class BookingService
      */
     private function filterColumns(array $row): array
     {
+        if (! Schema::hasColumn('bookings', 'cancel_reason')) {
+            try {
+                Schema::table('bookings', fn ($table) => $table->string('cancel_reason', 500)->nullable());
+            } catch (\Throwable) {
+            }
+        }
+        if (! Schema::hasColumn('bookings', 'payment_mode')) {
+            try {
+                Schema::table('bookings', fn ($table) => $table->string('payment_mode', 24)->nullable());
+            } catch (\Throwable) {
+            }
+        }
+
         return array_filter(
             $row,
             fn ($key) => Schema::hasColumn('bookings', $key),
+            ARRAY_FILTER_USE_KEY,
+        );
+    }
+
+    private function normalizePaymentMode(mixed $value): string
+    {
+        $raw = strtoupper(trim((string) $value));
+        if (str_contains($raw, 'WALLET') || $raw === 'KARNACAB CASH') {
+            return 'WALLET';
+        }
+        if (str_contains($raw, 'UPI')) {
+            return 'UPI';
+        }
+
+        return $raw !== '' ? $raw : 'CASH';
+    }
+
+    private function debitCustomerWallet(int $userId, int $bookingId, int $amountPaise, string $paymentMode): void
+    {
+        if ($amountPaise <= 0 || ! Schema::hasTable('wallets')) {
+            return;
+        }
+        $mode = strtoupper($paymentMode);
+        if (! in_array($mode, ['WALLET', 'KARNACAB_CASH', 'CASH_WALLET'], true)) {
+            return;
+        }
+        $wallet = DB::table('wallets')->where('owner_user_id', $userId)->orderBy('id')->first();
+        abort_unless($wallet, 422, 'Wallet not found');
+        $before = (int) $wallet->balance_paise;
+        abort_unless($before >= $amountPaise, 422, 'Insufficient wallet balance');
+        if (Schema::hasTable('wallet_ledger')) {
+            $exists = DB::table('wallet_ledger')->where('booking_id', $bookingId)->where('wallet_id', $wallet->id)->where('kind', 'trip')->where('direction', 'debit')->exists();
+            if ($exists) {
+                return;
+            }
+        }
+        $after = $before - $amountPaise;
+        DB::table('wallets')->where('id', $wallet->id)->update($this->filterWallet(['balance_paise' => $after, 'updated_at' => now()]));
+        if (Schema::hasTable('wallet_ledger')) {
+            DB::table('wallet_ledger')->insert($this->filterLedger([
+                'public_ref' => 'WD'.strtoupper(Str::random(10)),
+                'wallet_id' => $wallet->id,
+                'booking_id' => $bookingId,
+                'owner_user_id' => $userId,
+                'account' => 'CUSTOMER',
+                'direction' => 'debit',
+                'amount_paise' => $amountPaise,
+                'balance_before_paise' => $before,
+                'balance_after_paise' => $after,
+                'kind' => 'trip',
+                'status' => 'posted',
+                'note' => 'Trip fare',
+                'created_at' => now(),
+            ]));
+        }
+    }
+
+    private function writeInvoice(Booking $booking, int $totalPaise): void
+    {
+        if (! Schema::hasTable('invoices')) {
+            return;
+        }
+        $exists = DB::table('invoices')->where('booking_id', $booking->id)->exists();
+        if ($exists) {
+            return;
+        }
+        $row = [
+            'public_ref' => 'INV'.strtoupper(Str::random(8)),
+            'customer_id' => $booking->customer_id,
+            'booking_id' => $booking->id,
+            'kind' => 'ride',
+            'status' => 'paid',
+            'total_paise' => $totalPaise,
+            'currency' => 'INR',
+            'issued_at' => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ];
+        DB::table('invoices')->insert(array_filter(
+            $row,
+            fn ($key) => Schema::hasColumn('invoices', $key),
+            ARRAY_FILTER_USE_KEY,
+        ));
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     * @return array<string, mixed>
+     */
+    private function filterLedger(array $row): array
+    {
+        return array_filter(
+            $row,
+            fn ($key) => Schema::hasColumn('wallet_ledger', $key),
             ARRAY_FILTER_USE_KEY,
         );
     }
@@ -731,22 +946,22 @@ class BookingService
         }
         $wallet = DB::table('wallets')->where('owner_user_id', $userId)->where('owner_type', 'DRIVER')->first();
         if (! $wallet) {
-            $id = DB::table('wallets')->insertGetId([
+            $id = DB::table('wallets')->insertGetId($this->filterWallet([
                 'owner_user_id' => $userId,
                 'owner_type' => 'DRIVER',
                 'balance_paise' => 0,
                 'created_at' => now(),
                 'updated_at' => now(),
-            ]);
+            ]));
             $wallet = DB::table('wallets')->where('id', $id)->first();
         }
         $before = (int) $wallet->balance_paise;
         $after = $before + $earningPaise;
-        DB::table('wallets')->where('id', $wallet->id)->update(['balance_paise' => $after, 'updated_at' => now()]);
+        DB::table('wallets')->where('id', $wallet->id)->update($this->filterWallet(['balance_paise' => $after, 'updated_at' => now()]));
         if (Schema::hasTable('wallet_ledger')) {
             $exists = DB::table('wallet_ledger')->where('booking_id', $bookingId)->where('wallet_id', $wallet->id)->where('kind', 'trip')->exists();
             if (! $exists) {
-                DB::table('wallet_ledger')->insert([
+                DB::table('wallet_ledger')->insert($this->filterLedger([
                     'public_ref' => 'WL'.strtoupper(Str::random(10)),
                     'wallet_id' => $wallet->id,
                     'booking_id' => $bookingId,
@@ -762,8 +977,21 @@ class BookingService
                     'status' => 'posted',
                     'note' => 'Trip earning',
                     'created_at' => now(),
-                ]);
+                ]));
             }
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     * @return array<string, mixed>
+     */
+    private function filterWallet(array $row): array
+    {
+        return array_filter(
+            $row,
+            fn ($key) => Schema::hasColumn('wallets', $key),
+            ARRAY_FILTER_USE_KEY,
+        );
     }
 }

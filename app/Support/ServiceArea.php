@@ -5,6 +5,7 @@ namespace App\Support;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
+use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 use Throwable;
 
 class ServiceArea
@@ -21,7 +22,7 @@ class ServiceArea
             ?: self::label($lat, $lng);
 
         $inLiveState = $detected !== null && self::matchesLive($detected, $live);
-        $inBbox = $lat !== null && $lng !== null && self::allowsBbox($lat, $lng);
+        $inBbox = $lat !== null && $lng !== null && self::allowsBbox($lat, $lng, $live);
         $allowed = $inLiveState || $inBbox;
         if ($allowed) {
             $detected = $detected ?: self::label($lat, $lng);
@@ -37,8 +38,71 @@ class ServiceArea
             'state' => $detected,
             'stateId' => $stateId,
             'districtId' => $districtId,
-            'message' => ($hasFix && ! $allowed) ? self::comingSoonMessage($detected) : null,
+            'message' => ($hasFix && ! $allowed) ? self::comingSoonMessage($detected) : (! $hasFix ? self::locationRequiredMessage() : null),
         ];
+    }
+
+    /**
+     * A trip is bookable when pickup OR drop is inside an active KarnaCab service state.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array{allowed: bool, comingSoon: bool, pickupState: ?string, dropState: ?string, message: ?string, serviceStates: list<string>}
+     */
+    public static function trip(array $input): array
+    {
+        $pickupLat = self::coord($input, ['pickupLat', 'pickup_lat', 'originLat']);
+        $pickupLng = self::coord($input, ['pickupLng', 'pickup_lng', 'originLng']);
+        $dropLat = self::coord($input, ['dropLat', 'drop_lat', 'destLat']);
+        $dropLng = self::coord($input, ['dropLng', 'drop_lng', 'destLng']);
+        $pickupText = isset($input['pickupText']) ? (string) $input['pickupText'] : (string) ($input['pickup_text'] ?? '');
+        $dropText = isset($input['dropText']) ? (string) $input['dropText'] : (string) ($input['drop_text'] ?? '');
+
+        $hasPoint = $pickupLat !== null || $dropLat !== null || $pickupText !== '' || $dropText !== '';
+        if (! $hasPoint) {
+            return [
+                'allowed' => true,
+                'comingSoon' => false,
+                'pickupState' => null,
+                'dropState' => null,
+                'message' => null,
+                'serviceStates' => self::states(),
+            ];
+        }
+
+        $pickup = self::resolve(
+            $pickupLat,
+            $pickupLng,
+            isset($input['pickupState']) ? (string) $input['pickupState'] : null,
+            $pickupText !== '' ? $pickupText : null,
+        );
+        $drop = self::resolve(
+            $dropLat,
+            $dropLng,
+            isset($input['dropState']) ? (string) $input['dropState'] : null,
+            $dropText !== '' ? $dropText : null,
+        );
+        $allowed = $pickup['allowed'] || $drop['allowed'];
+        $detected = $drop['state'] ?: $pickup['state'];
+
+        return [
+            'allowed' => $allowed,
+            'comingSoon' => ! $allowed,
+            'pickupState' => $pickup['state'],
+            'dropState' => $drop['state'],
+            'message' => $allowed ? null : self::comingSoonMessage($detected),
+            'serviceStates' => self::states(),
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $input
+     */
+    public static function assertTrip(array $input): void
+    {
+        $trip = self::trip($input);
+        if ($trip['comingSoon']) {
+            throw new UnprocessableEntityHttpException((string) $trip['message']);
+        }
     }
 
     public static function allows(?float $lat, ?float $lng, ?string $stateHint = null, ?string $address = null): bool
@@ -51,10 +115,11 @@ class ServiceArea
         if ($lat === null || $lng === null) {
             return null;
         }
-        if (self::inDelhi($lat, $lng)) {
+        $live = self::liveStateNames();
+        if (self::inDelhi($lat, $lng) && self::matchesLive('Delhi', $live)) {
             return 'Delhi';
         }
-        if (self::inBihar($lat, $lng)) {
+        if (self::inBihar($lat, $lng) && self::matchesLive('Bihar', $live)) {
             return 'Bihar';
         }
 
@@ -66,20 +131,25 @@ class ServiceArea
      */
     public static function states(): array
     {
-        return array_values(array_unique(array_map(
+        return array_values(array_unique(array_filter(array_map(
             fn (string $name) => self::canonicalState($name) ?? $name,
             self::liveStateNames(),
-        )));
+        ), fn (string $name) => ! in_array($name, ['National Capital Territory of Delhi', 'NCT of Delhi'], true))));
     }
 
     public static function comingSoonMessage(?string $detected = null): string
     {
-        $live = implode(' and ', self::states()) ?: 'Bihar and Delhi';
+        $live = implode(' and ', self::states()) ?: 'live KarnaCab states';
         if ($detected) {
-            return 'KarnaCab is not live in '.$detected.' yet. We currently operate in '.$live.'.';
+            return 'Coming soon: KarnaCab is not live in '.$detected.' yet. Service is available when pickup or destination is in '.$live.'.';
         }
 
-        return 'KarnaCab is coming soon in your city. We currently operate in '.$live.'.';
+        return 'Coming soon: KarnaCab is not live for this pickup and destination. We currently operate in '.$live.'.';
+    }
+
+    public static function locationRequiredMessage(): string
+    {
+        return 'Allow location access so KarnaCab can confirm whether your state is live. Otherwise this city stays Coming soon.';
     }
 
     /**
@@ -87,22 +157,23 @@ class ServiceArea
      */
     private static function liveStateNames(): array
     {
-        $names = ['Bihar', 'Delhi', 'National Capital Territory of Delhi', 'NCT of Delhi'];
+        $fallback = ['Bihar', 'Delhi', 'National Capital Territory of Delhi', 'NCT of Delhi'];
         try {
-            if (Schema::hasTable('states')) {
-                $q = DB::table('states')->orderBy('name');
-                if (Schema::hasColumn('states', 'status')) {
-                    $q->whereIn('status', ['ACTIVE', 'LIVE', 'active', 'live']);
-                }
-                $fromDb = $q->pluck('name')->filter()->map(fn ($n) => (string) $n)->all();
-                if ($fromDb !== []) {
-                    $names = array_merge($names, $fromDb);
-                }
+            if (! Schema::hasTable('states')) {
+                return $fallback;
+            }
+            $q = DB::table('states')->orderBy('name');
+            if (Schema::hasColumn('states', 'status')) {
+                $q->whereIn('status', ['ACTIVE', 'LIVE', 'active', 'live']);
+            }
+            $fromDb = $q->pluck('name')->filter()->map(fn ($n) => (string) $n)->all();
+            if ($fromDb !== []) {
+                return array_values(array_unique($fromDb));
             }
         } catch (Throwable) {
         }
 
-        return array_values(array_unique($names));
+        return $fallback;
     }
 
     /**
@@ -146,6 +217,12 @@ class ServiceArea
         if (preg_match('/\b(bihar|delhi|nct)\b/i', $address, $m)) {
             return self::canonicalState($m[1]);
         }
+        foreach (self::liveStateNames() as $name) {
+            $canonical = self::canonicalState($name) ?? $name;
+            if ($canonical !== '' && preg_match('/\b'.preg_quote($canonical, '/').'\b/i', $address)) {
+                return $canonical;
+            }
+        }
 
         return null;
     }
@@ -182,9 +259,16 @@ class ServiceArea
         return null;
     }
 
-    private static function allowsBbox(float $lat, float $lng): bool
+    /**
+     * @param  list<string>  $live
+     */
+    private static function allowsBbox(float $lat, float $lng, array $live): bool
     {
-        return self::inDelhi($lat, $lng) || self::inBihar($lat, $lng);
+        if (self::inDelhi($lat, $lng) && self::matchesLive('Delhi', $live)) {
+            return true;
+        }
+
+        return self::inBihar($lat, $lng) && self::matchesLive('Bihar', $live);
     }
 
     private static function inDelhi(float $lat, float $lng): bool
@@ -231,5 +315,20 @@ class ServiceArea
         } catch (Throwable) {
             return null;
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $input
+     * @param  list<string>  $keys
+     */
+    private static function coord(array $input, array $keys): ?float
+    {
+        foreach ($keys as $key) {
+            if (isset($input[$key]) && $input[$key] !== '' && is_numeric($input[$key])) {
+                return (float) $input[$key];
+            }
+        }
+
+        return null;
     }
 }

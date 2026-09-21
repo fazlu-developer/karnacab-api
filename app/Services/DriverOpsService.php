@@ -2,13 +2,11 @@
 
 namespace App\Services;
 
-use App\Mail\WelcomeCustomerMail;
 use App\Models\Driver;
 use App\Models\User;
 use App\Models\Vehicle;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Schema;
 
 class DriverOpsService
@@ -30,7 +28,14 @@ class DriverOpsService
         $duty = $driver->duty_status ?: ($online ? 'online' : 'offline');
         $canReceive = $canGoOnline && $online && in_array(strtolower((string) $duty), ['online'], true);
         $vehicle = $driver->vehicles->first();
-        $wallet = DB::table('wallets')->where('owner_user_id', $actor->id)->first();
+        $wallet = Schema::hasTable('wallets')
+            ? DB::table('wallets')->where('owner_user_id', $actor->id)->when(
+                Schema::hasColumn('wallets', 'owner_type'),
+                fn ($q) => $q->where(function ($inner) {
+                    $inner->where('owner_type', 'DRIVER')->orWhereNull('owner_type');
+                }),
+            )->orderByDesc('id')->first()
+            : null;
         $balance = (int) ($wallet->balance_paise ?? 0);
         $todayStart = now()->timezone('Asia/Kolkata')->startOfDay();
         $todayRides = \App\Models\Booking::query()
@@ -61,6 +66,15 @@ class DriverOpsService
             : null;
         $kycDocs = app(KycDocumentService::class);
         $documents = $driver->documents->map(fn ($doc) => $kycDocs->present($doc))->all();
+        $inbox = Schema::hasTable('user_notifications')
+            ? DB::table('user_notifications')->where('user_id', $actor->id)->orderByDesc('id')->limit(30)->get()->map(fn ($row) => [
+                'id' => (string) $row->id,
+                'title' => $row->title ?? $row->subject ?? 'Update',
+                'body' => $row->body ?? $row->message ?? '',
+                'read' => (bool) ($row->read_at ?? $row->is_read ?? false),
+                'createdAt' => $row->created_at,
+            ])->all()
+            : [];
 
         return [
             'id' => (string) $driver->id,
@@ -88,6 +102,13 @@ class DriverOpsService
             'dutyStatus' => $duty,
             'dutyLabel' => ucfirst(str_replace('_', ' ', (string) $duty)),
             'kycStatus' => $kycStatus,
+            'kycRejectedReason' => $driver->kyc_rejected_reason ?? null,
+            'submittedAt' => Schema::hasColumn('drivers', 'application_submitted_at')
+                ? optional($driver->application_submitted_at)?->toIso8601String()
+                : null,
+            'applicationSubmittedAt' => Schema::hasColumn('drivers', 'application_submitted_at')
+                ? optional($driver->application_submitted_at)?->toIso8601String()
+                : null,
             'canGoOnline' => $canGoOnline,
             'canReceiveOffers' => $canReceive,
             'offerBlockReason' => $canReceive ? null : ($blocked ? 'Account is blocked' : ($approved ? 'Tap Go online when you are ready.' : 'Complete KYC onboarding to go online.')),
@@ -103,6 +124,8 @@ class DriverOpsService
                 'parcels' => $todayParcels,
             ],
             'pendingRequests' => $pending,
+            'unreadNotifications' => count(array_filter($inbox, fn ($row) => empty($row['read']))),
+            'notifications' => $inbox,
             'wallet' => [
                 'balancePaise' => $balance,
                 'balanceRupees' => $balance / 100,
@@ -255,7 +278,7 @@ class DriverOpsService
                 'last_fix_at' => now(),
             ]);
         }
-        $allowed = \App\Support\ServiceArea::resolve($lat, $lng, $data['stateName'] ?? $data['state'] ?? null, $data['address'] ?? null);
+        $allowed = \App\Support\ServiceArea::resolve($lat, $lng, null, null);
         $live = null;
         if ($bookingId) {
             try {
@@ -276,6 +299,7 @@ class DriverOpsService
             'serviceArea' => $allowed['state'],
             'detectedState' => $allowed['state'],
             'message' => $allowed['message'] ?? ($allowed['allowed'] ? null : \App\Support\ServiceArea::comingSoonMessage($allowed['state'])),
+            'recordedAt' => now()->toIso8601String(),
             'live' => $live,
         ];
     }
@@ -330,10 +354,7 @@ class DriverOpsService
             'date_of_birth' => $data['dateOfBirth'] ?? $data['date_of_birth'] ?? null,
         ], fn ($v) => $v !== null && $v !== ''));
         if (! empty($data['email']) && filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
-            try {
-                Mail::to(strtolower((string) $data['email']))->send(new WelcomeCustomerMail($actor->fresh()));
-            } catch (\Throwable) {
-            }
+            app(AuthService::class)->sendWelcomeMail($actor->fresh());
         }
 
         $driver = Driver::query()->where('user_id', $actor->id)->first();
@@ -384,10 +405,34 @@ class DriverOpsService
 
     public function submitKyc(User $actor): array
     {
-        Driver::query()->where('user_id', $actor->id)->update([
+        $driver = Driver::query()->where('user_id', $actor->id)->with('vehicles', 'documents', 'user')->firstOrFail();
+        $kyc = strtolower((string) ($driver->kyc_status ?? 'pending'));
+        abort_if($kyc === 'under_review', 422, 'Your application is already under review.');
+        abort_if(in_array($kyc, ['verified', 'approved', 'active'], true), 422, 'Onboarding is already approved.');
+
+        $catalog = app(KycDocumentService::class)->catalog();
+        $required = $catalog['requiredDocs'] ?? [];
+        $family = strtoupper((string) ($driver->vehicle_family ?? $driver->vehicles->first()?->category ?? ''));
+        if (in_array($family, $catalog['permitRequiredFor'] ?? [], true) || in_array($family, ['AUTO', 'CAR', 'SEDAN', 'SUV', 'MINI', 'TRAVELLER'], true)) {
+            $required[] = 'PERMIT';
+        }
+        $have = $driver->documents->pluck('type')->map(fn ($t) => strtoupper((string) $t))->all();
+        if (in_array('SELFIE', $have, true) && ! in_array('LIVE_PHOTO', $have, true)) {
+            $have[] = 'LIVE_PHOTO';
+        }
+        $missing = [];
+        foreach ($required as $type) {
+            if (! in_array($type, $have, true)) {
+                $missing[] = $type;
+            }
+        }
+        abort_unless($driver->vehicles->isNotEmpty(), 422, 'Add vehicle information before submitting.');
+        abort_if($missing !== [], 422, 'Complete these items before submitting: '.implode(', ', $missing));
+
+        $driver->update(array_filter([
             'kyc_status' => 'under_review',
-            'application_submitted_at' => now(),
-        ]);
+            'application_submitted_at' => Schema::hasColumn('drivers', 'application_submitted_at') ? now() : null,
+        ], fn ($v) => $v !== null));
 
         return $this->me($actor);
     }
@@ -438,6 +483,10 @@ class DriverOpsService
             'updated_at' => now(),
         ], fn ($v) => $v !== null && $v !== '');
         abort_unless(! empty($payload['registration_no']), 422, 'Enter the vehicle registration number');
+        $family = strtoupper((string) ($data['vehicleFamily'] ?? $data['vehicle_family'] ?? ''));
+        if ($family !== '' && Schema::hasColumn('drivers', 'vehicle_family')) {
+            $driver->update(['vehicle_family' => $family]);
+        }
         if ($vehicle) {
             $vehicle->update($payload);
         } else {

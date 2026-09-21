@@ -4,12 +4,14 @@ namespace App\Services;
 
 use App\Mail\WelcomeCustomerMail;
 use App\Models\User;
+use App\Support\FleetOnboarding;
 use App\Support\JwtToken;
 use App\Support\Permissions;
 use App\Support\ServiceArea;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Schema;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
@@ -51,7 +53,18 @@ class AuthService
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
+            if (Schema::hasTable('wallets') && ! DB::table('wallets')->where('owner_user_id', $user->id)->exists()) {
+                DB::table('wallets')->insert(array_filter([
+                    'owner_user_id' => $user->id,
+                    'owner_type' => 'DRIVER',
+                    'balance_paise' => 0,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ], fn ($key) => Schema::hasColumn('wallets', $key), ARRAY_FILTER_USE_KEY));
+            }
         }
+
+        $this->sendWelcomeMail($user);
 
         return $this->issue($user);
     }
@@ -104,13 +117,28 @@ class AuthService
         }
 
         $user = User::query()->where('phone', $phone)->first();
+        if (! $user) {
+            $placeholder = $phone.'@otp.karnacab.local';
+            $user = User::query()->where('email', $placeholder)->first();
+            if ($user && (string) $user->phone !== $phone) {
+                $taken = User::query()->where('phone', $phone)->where('id', '!=', $user->id)->exists();
+                if (! $taken) {
+                    $user->update(['phone' => $phone]);
+                    $user->refresh();
+                }
+            }
+        }
         $this->ensureProfileColumns();
         if (! $user) {
+            $email = $phone.'@otp.karnacab.local';
+            if (User::query()->where('email', $email)->exists()) {
+                $email = $phone.'.'.substr((string) time(), -4).'@otp.karnacab.local';
+            }
             $user = User::query()->create([
                 'role' => $role,
-                'status' => $role === 'DRIVER' ? 'PENDING' : 'ACTIVE',
-                'name' => 'KarnaCab user',
-                'email' => $phone.'@otp.karnacab.local',
+                'status' => in_array($role, ['DRIVER', 'FLEET_OWNER'], true) ? 'PENDING' : 'ACTIVE',
+                'name' => $role === 'FLEET_OWNER' ? 'KarnaCab fleet owner' : 'KarnaCab user',
+                'email' => $email,
                 'phone' => $phone,
                 'password_hash' => Hash::make(bin2hex(random_bytes(8))),
             ]);
@@ -124,9 +152,15 @@ class AuthService
                 ]);
             }
         } elseif ($role === 'DRIVER' && $user->role !== 'DRIVER') {
-            abort(403, 'Use the customer app for this number');
-        } elseif ($role === 'CUSTOMER' && $user->role === 'DRIVER') {
-            abort(403, 'Use the driver app for this number');
+            abort(403, $user->role === 'FLEET_OWNER' ? 'Use Fleet Owner mode for this number' : 'Use the customer app for this number');
+        } elseif ($role === 'CUSTOMER' && in_array($user->role, ['DRIVER', 'FLEET_OWNER'], true)) {
+            abort(403, $user->role === 'FLEET_OWNER' ? 'Use the driver app Fleet Owner mode for this number' : 'Use the driver app for this number');
+        } elseif ($role === 'FLEET_OWNER' && $user->role !== 'FLEET_OWNER') {
+            abort(403, $user->role === 'DRIVER' ? 'Use Driver mode for this number' : 'This number is already registered');
+        }
+
+        if ($role === 'FLEET_OWNER') {
+            FleetOnboarding::ensureRow((int) $user->id);
         }
 
         if ($role === 'DRIVER' && ! DB::table('drivers')->where('user_id', $user->id)->exists()) {
@@ -138,6 +172,15 @@ class AuthService
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
+            if (Schema::hasTable('wallets') && ! DB::table('wallets')->where('owner_user_id', $user->id)->exists()) {
+                DB::table('wallets')->insert(array_filter([
+                    'owner_user_id' => $user->id,
+                    'owner_type' => 'DRIVER',
+                    'balance_paise' => 0,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ], fn ($key) => Schema::hasColumn('wallets', $key), ARRAY_FILTER_USE_KEY));
+            }
         }
 
         $this->touchSeen($user);
@@ -210,14 +253,24 @@ class AuthService
         }
         $this->touchSeen($user->fresh());
 
+        $hasFix = $lat !== null && $lng !== null;
+        $isDriver = $user->role === 'DRIVER';
+        $comingSoon = $isDriver
+            ? ($hasFix && ! $area['allowed'])
+            : ! $hasFix;
+        $message = $comingSoon
+            ? ($isDriver ? ($area['message'] ?? ServiceArea::comingSoonMessage($area['state'])) : ServiceArea::locationRequiredMessage())
+            : ($area['allowed'] ? null : 'KarnaCab is live in '.implode(' and ', ServiceArea::states()).'. You can still book if pickup or destination is in a live state.');
+
         return [
             'ok' => true,
             'allowed' => $area['allowed'],
-            'comingSoon' => $area['comingSoon'],
+            'comingSoon' => $comingSoon,
+            'inServiceState' => $area['allowed'],
             'serviceArea' => $area['state'],
             'detectedState' => $area['state'],
             'serviceStates' => ServiceArea::states(),
-            'message' => $area['message'],
+            'message' => $message,
         ];
     }
 
@@ -274,7 +327,12 @@ class AuthService
         );
         $inArea = $area['allowed'];
         $next = 'HOME';
-        if ($user->role === 'DRIVER') {
+        $fleet = Schema::hasTable('fleet_owners')
+            ? DB::table('fleet_owners')->where('user_id', $user->id)->orderBy('id')->first()
+            : null;
+        if ($user->role === 'FLEET_OWNER') {
+            $next = FleetOnboarding::nextStep($fleet);
+        } elseif ($user->role === 'DRIVER') {
             $kyc = strtolower((string) ($user->driver?->kyc_status ?? 'pending'));
             if (in_array($kyc, ['verified', 'approved', 'active'], true)) {
                 $next = (! $needsLocation && ! $inArea) ? 'COMING_SOON' : 'HOME';
@@ -289,8 +347,8 @@ class AuthService
             $next = 'PROFILE';
         } elseif ($needsLocation) {
             $next = 'LOCATION';
-        } elseif ($user->role === 'CUSTOMER' && ! $inArea) {
-            $next = 'COMING_SOON';
+        } elseif ($user->role === 'CUSTOMER') {
+            $next = 'HOME';
         }
 
         return [
@@ -303,28 +361,29 @@ class AuthService
             'gender' => $user->gender,
             'dateOfBirth' => $user->date_of_birth?->toDateString(),
             'avatarUrl' => Schema::hasColumn('users', 'avatar_path')
-                ? app(KycDocumentService::class)->previewUrl($user->avatar_path ?? null)
+                ? $this->avatarUrl($user)
                 : null,
             'permissions' => Permissions::forRole($user->role),
-            'canOperatorMode' => $user->role === 'FLEET_OWNER'
-                || (Schema::hasTable('fleet_owners') && DB::table('fleet_owners')->where('user_id', $user->id)->exists()),
+            'canOperatorMode' => $user->role === 'FLEET_OWNER' || $fleet !== null,
             'canDriverMode' => (bool) $user->driver,
-            'fleetOwnerId' => Schema::hasTable('fleet_owners')
-                ? DB::table('fleet_owners')->where('user_id', $user->id)->value('id')
-                : null,
+            'fleetOwnerId' => $fleet?->id,
+            'fleetKycStatus' => $fleet?->kyc_status,
+            'fleetStatus' => $fleet?->status,
             'districtId' => $user->district_id,
             'stateId' => $user->state_id,
             'driverType' => $user->driver
                 ? ($user->driver->fleet_owner_id ? 'fleet_driver' : 'individual_driver')
                 : null,
             'assignedFleetOwnerId' => $user->driver?->fleet_owner_id,
-            'kycStatus' => $user->driver?->kyc_status,
+            'kycStatus' => $user->role === 'FLEET_OWNER'
+                ? ($fleet?->kyc_status ?? 'pending')
+                : $user->driver?->kyc_status,
             'lastLat' => $user->last_lat !== null ? (float) $user->last_lat : null,
             'lastLng' => $user->last_lng !== null ? (float) $user->last_lng : null,
             'lastAddress' => $user->last_address,
             'nextStep' => $next,
             'serviceStates' => ServiceArea::states(),
-            'comingSoon' => ! $needsProfile && ! $needsLocation && ! $inArea,
+            'comingSoon' => $needsLocation || ($user->role === 'DRIVER' && ! $needsLocation && ! $inArea),
             'detectedState' => $area['state'],
             'message' => $area['message'],
         ];
@@ -394,16 +453,37 @@ class AuthService
         return $this->present($user->fresh());
     }
 
-    private function sendWelcomeMail(User $user): void
+    public function sendWelcomeMail(User $user): void
     {
         $email = (string) $user->email;
         if ($email === '' || str_ends_with($email, '@otp.karnacab.local')) {
             return;
         }
+        $lock = 'welcome-mail:'.$user->id;
+        if (! Cache::add($lock, 1, now()->addYear())) {
+            return;
+        }
         try {
             Mail::to($email)->send(new WelcomeCustomerMail($user));
-        } catch (\Throwable) {
+            Log::info('welcome.mail_sent', ['userId' => $user->id, 'role' => $user->role]);
+        } catch (\Throwable $e) {
+            Cache::forget($lock);
+            Log::warning('welcome.mail_failed', ['userId' => $user->id, 'error' => $e->getMessage()]);
         }
+    }
+
+    public function clearDevice(User $user, ?string $token = null): array
+    {
+        $table = Schema::hasTable('push_devices') ? 'push_devices' : (Schema::hasTable('device_tokens') ? 'device_tokens' : null);
+        if ($table) {
+            $q = DB::table($table)->where('user_id', $user->id);
+            if ($token) {
+                $q->where('token', $token);
+            }
+            $q->delete();
+        }
+
+        return ['ok' => true];
     }
 
     private function touchSeen(User $user): void
@@ -433,6 +513,23 @@ class AuthService
         if (! Schema::hasColumn('users', 'avatar_path')) {
             Schema::table('users', fn ($table) => $table->string('avatar_path', 255)->nullable());
         }
+        if (! Schema::hasColumn('users', 'emergency_name')) {
+            Schema::table('users', fn ($table) => $table->string('emergency_name', 120)->nullable());
+        }
+        if (! Schema::hasColumn('users', 'emergency_phone')) {
+            Schema::table('users', fn ($table) => $table->string('emergency_phone', 20)->nullable());
+        }
+    }
+
+    private function avatarUrl(User $user): ?string
+    {
+        $url = app(KycDocumentService::class)->previewUrl($user->avatar_path ?? null);
+        if (! $url) {
+            return null;
+        }
+        $stamp = optional($user->updated_at)?->timestamp ?? time();
+
+        return $url.(str_contains($url, '?') ? '&' : '?').'v='.$stamp;
     }
 
     private function ensureLastSeenColumn(): void

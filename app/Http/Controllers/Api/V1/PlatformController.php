@@ -109,6 +109,7 @@ class PlatformController extends Controller
 
     public function quoteOptions(Request $request)
     {
+        \App\Support\ServiceArea::assertTrip($request->all());
         $requested = strtoupper((string) $request->input('category', 'BIKE'));
         $options = [];
         foreach (config('karnacab.vehicle_types') as $vehicle) {
@@ -300,7 +301,7 @@ class PlatformController extends Controller
 
     public function bookingsCancel(Request $request, string $id)
     {
-        return $this->bookings->cancel($request->user(), $id);
+        return $this->bookings->cancel($request->user(), $id, $request->all());
     }
 
     public function bookingsVerifyOtp(Request $request, string $id)
@@ -329,6 +330,7 @@ class PlatformController extends Controller
             $id,
             (string) ($request->input('action') ?? $request->input('status', 'CANCELLED')),
             $request->input('otp') !== null ? (string) $request->input('otp') : null,
+            $request->all(),
         );
     }
 
@@ -342,10 +344,7 @@ class PlatformController extends Controller
 
     public function bookingsRate(Request $request, string $id)
     {
-        DB::table('booking_ratings')->updateOrInsert(
-            ['booking_id' => $id, 'from_role' => $request->user()->role],
-            ['stars' => (int) $request->input('stars', 5), 'comment' => $request->input('comment'), 'created_at' => now()],
-        );
+        $this->bookings->rate($request->user(), $id, (int) $request->input('stars', 5), (string) ($request->input('comment') ?? ''));
 
         return ['ok' => true];
     }
@@ -473,6 +472,11 @@ class PlatformController extends Controller
         );
     }
 
+    public function kycDelete(Request $request, string $id)
+    {
+        return app(\App\Services\KycDocumentService::class)->delete($request->user(), $id);
+    }
+
     public function kycSubmit(Request $request)
     {
         return $this->drivers->submitKyc($request->user());
@@ -524,6 +528,30 @@ class PlatformController extends Controller
         return $this->surface->walletMe($request->user());
     }
 
+    public function walletTopup(Request $request)
+    {
+        $rupees = (float) ($request->input('amountRupees') ?? $request->input('amount') ?? 0);
+
+        return app(\App\Services\PayUService::class)->startTopup($request->user(), $rupees);
+    }
+
+    public function payuCheckout(string $txnid)
+    {
+        return response(app(\App\Services\PayUService::class)->checkoutPage($txnid), 200, [
+            'Content-Type' => 'text/html; charset=UTF-8',
+        ]);
+    }
+
+    public function payuWebhook(Request $request)
+    {
+        return app(\App\Services\PayUService::class)->handleWebhook($request);
+    }
+
+    public function notificationRead(Request $request, string $id)
+    {
+        return $this->surface->markNotificationRead($request->user(), $id);
+    }
+
     public function experience(Request $request)
     {
         return $this->surface->experienceOverview($request->user());
@@ -547,6 +575,11 @@ class PlatformController extends Controller
     public function invoices(Request $request)
     {
         return $this->surface->invoices($request->user());
+    }
+
+    public function invoiceOne(Request $request, string $id)
+    {
+        return $this->surface->invoiceOne($request->user(), $id);
     }
 
     public function supportFaqs(Request $request)
@@ -577,6 +610,11 @@ class PlatformController extends Controller
     public function safetyMe(Request $request)
     {
         return $this->surface->safetyMe($request->user());
+    }
+
+    public function safetyIncidents(Request $request)
+    {
+        return $this->surface->safetyIncidents($request->user());
     }
 
     public function safetySos(Request $request)

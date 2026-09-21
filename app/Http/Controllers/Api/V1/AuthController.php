@@ -94,6 +94,13 @@ class AuthController extends Controller
         return $this->auth->verifyOtp($data['phone'], $data['code'], 'DRIVER');
     }
 
+    public function verifyOperatorOtp(Request $request)
+    {
+        $data = $request->validate(['phone' => 'required|string', 'code' => 'required|string']);
+
+        return $this->auth->verifyOtp($data['phone'], $data['code'], 'FLEET_OWNER');
+    }
+
     public function me(Request $request)
     {
         return $this->auth->present($request->user());
@@ -101,7 +108,24 @@ class AuthController extends Controller
 
     public function profile(Request $request)
     {
-        return $this->auth->patchProfile($request->user(), $request->all());
+        $data = $request->all();
+        if ($request->is('*/safety/emergency-contact')) {
+            $data['emergencyName'] = $request->input('name') ?? $request->input('emergencyName');
+            $data['emergencyPhone'] = $request->input('phone') ?? $request->input('emergencyPhone');
+            unset($data['name'], $data['phone']);
+
+            return $this->auth->patchProfile($request->user(), $data);
+        }
+        $user = $request->user();
+        $onboarding = filled($data['name'] ?? null)
+            && filled($data['email'] ?? null)
+            && filled($data['gender'] ?? null)
+            && filled($data['dateOfBirth'] ?? $data['date_of_birth'] ?? null)
+            && empty($user->profile_completed_at);
+
+        return $onboarding
+            ? $this->auth->completeProfile($user, $data)
+            : $this->auth->patchProfile($user, $data);
     }
 
     public function avatar(Request $request)
@@ -139,5 +163,12 @@ class AuthController extends Controller
         ]);
 
         return $this->auth->saveDevice($request->user(), $data['token'], $data['platform'] ?? 'android');
+    }
+
+    public function clearDevice(Request $request)
+    {
+        $token = $request->input('token');
+
+        return $this->auth->clearDevice($request->user(), is_string($token) ? $token : null);
     }
 }

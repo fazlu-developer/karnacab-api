@@ -33,6 +33,8 @@ Route::get('/v1/franchise/catalog', fn () => ['ok' => true, 'module' => 'franchi
 Route::get('/v1/experience/catalog', [PlatformController::class, 'experienceCatalog']);
 Route::get('/v1/notifications/catalog', fn () => ['ok' => true, 'module' => 'notifications']);
 Route::get('/v1/payments/catalog', fn () => ['gateway' => env('PAYMENT_GATEWAY', 'demo')]);
+Route::post('/v1/payments/webhooks/payu', [PlatformController::class, 'payuWebhook']);
+Route::get('/v1/payments/payu/checkout/{txnid}', [PlatformController::class, 'payuCheckout']);
 Route::post('/v1/payments/webhooks/{provider}', fn (string $provider) => ['ok' => true, 'provider' => $provider]);
 
 Route::post('/v1/auth/register', [AuthController::class, 'register']);
@@ -45,6 +47,7 @@ Route::post('/v1/auth/operator/login', [AuthController::class, 'operatorLogin'])
 Route::post('/v1/auth/otp/request', [AuthController::class, 'requestOtp']);
 Route::post('/v1/auth/otp/verify', [AuthController::class, 'verifyOtp']);
 Route::post('/v1/auth/driver/otp/verify', [AuthController::class, 'verifyDriverOtp']);
+Route::post('/v1/auth/operator/otp/verify', [AuthController::class, 'verifyOperatorOtp']);
 
 Route::middleware('jwt')->group(function () {
     Route::get('/v1/auth/me', [AuthController::class, 'me']);
@@ -53,6 +56,8 @@ Route::middleware('jwt')->group(function () {
     Route::patch('/v1/auth/location', [AuthController::class, 'location']);
     Route::post('/v1/auth/heartbeat', [AuthController::class, 'heartbeat']);
     Route::post('/v1/notifications/devices', [AuthController::class, 'saveDevice']);
+    Route::post('/v1/notifications/devices/unregister', [AuthController::class, 'clearDevice']);
+    Route::delete('/v1/notifications/devices', [AuthController::class, 'clearDevice']);
     Route::get('/v1/platform/session', [PlatformController::class, 'session']);
     Route::get('/v1/platform/roles', fn () => ['roles' => ['CUSTOMER', 'DRIVER', 'ADMIN', 'SUPER_ADMIN', 'FLEET_OWNER', 'DISTRICT_HEAD', 'STATE_HEAD', 'FRANCHISE', 'CORPORATE', 'ADVERTISER']]);
 
@@ -118,6 +123,7 @@ Route::middleware('jwt')->group(function () {
     Route::patch('/v1/drivers/me/vehicle', [PlatformController::class, 'kycProfile']);
     Route::patch('/v1/drivers/me/bank', [PlatformController::class, 'kycProfile']);
     Route::post('/v1/drivers/me/documents', [PlatformController::class, 'kycUpload']);
+    Route::delete('/v1/drivers/me/documents/{id}', [PlatformController::class, 'kycDelete']);
     Route::post('/v1/drivers/me/kyc/submit', [PlatformController::class, 'kycSubmit']);
     Route::get('/v1/ops/kyc', [PlatformController::class, 'driversList']);
     Route::patch('/v1/ops/kyc/{driverId}', [PlatformController::class, 'kycReview']);
@@ -128,8 +134,10 @@ Route::middleware('jwt')->group(function () {
     Route::get('/v1/vehicles/{id}', [PlatformController::class, 'vehicles']);
 
     Route::get('/v1/wallets/me', [PlatformController::class, 'walletMe']);
+    Route::post('/v1/wallets/me/topup', [PlatformController::class, 'walletTopup']);
     Route::get('/v1/wallets/commission-policy', fn () => ['percent' => 0]);
     Route::get('/v1/wallets/{id}', [PlatformController::class, 'walletMe']);
+    Route::patch('/v1/experience/notifications/{id}/read', [PlatformController::class, 'notificationRead']);
 
     Route::get('/v1/experience', [PlatformController::class, 'experience']);
     Route::get('/v1/experience/dashboard', [PlatformController::class, 'experience']);
@@ -137,6 +145,7 @@ Route::middleware('jwt')->group(function () {
     Route::get('/v1/experience/family', [PlatformController::class, 'family']);
     Route::post('/v1/experience/family', [PlatformController::class, 'family']);
     Route::get('/v1/payments/invoices', [PlatformController::class, 'invoices']);
+    Route::get('/v1/payments/invoices/{id}', [PlatformController::class, 'invoiceOne']);
     Route::get('/v1/ads/serve', [PlatformController::class, 'adsServe']);
     Route::post('/v1/ads/campaigns/{id}/impression', [PlatformController::class, 'adsNoop']);
     Route::post('/v1/ads/campaigns/{id}/click', [PlatformController::class, 'adsNoop']);
@@ -147,7 +156,7 @@ Route::middleware('jwt')->group(function () {
     Route::post('/v1/safety/sos', [PlatformController::class, 'safetySos']);
     Route::post('/v1/safety/share', [PlatformController::class, 'safetySos']);
     Route::post('/v1/safety/tickets', [PlatformController::class, 'supportTickets']);
-    Route::get('/v1/safety/incidents', fn () => ['incidents' => []]);
+    Route::get('/v1/safety/incidents', [PlatformController::class, 'safetyIncidents']);
     Route::get('/v1/safety/bookings/{bookingId}/verify', fn () => ['ok' => true]);
     Route::patch('/v1/safety/emergency-contact', [AuthController::class, 'profile']);
     Route::post('/v1/parcels/quote', [PlatformController::class, 'parcelsQuote']);
@@ -163,6 +172,11 @@ Route::middleware('jwt')->group(function () {
     Route::post('/v1/bulk/quote', [PlatformController::class, 'bulkQuote']);
     Route::post('/v1/bulk', [PlatformController::class, 'bulkCreate']);
 
+    Route::get('/v1/operator/onboarding', [OperatorController::class, 'onboarding']);
+    Route::put('/v1/operator/onboarding', [OperatorController::class, 'saveOnboarding']);
+    Route::patch('/v1/operator/onboarding', [OperatorController::class, 'saveOnboarding']);
+    Route::post('/v1/operator/onboarding/documents', [OperatorController::class, 'uploadCompanyDocument']);
+    Route::post('/v1/operator/onboarding/submit', [OperatorController::class, 'submitOnboarding']);
     Route::get('/v1/operator/dashboard', [OperatorController::class, 'dashboard']);
     Route::get('/v1/operator/vehicles', [OperatorController::class, 'vehicles']);
     Route::post('/v1/operator/vehicles', [OperatorController::class, 'storeVehicle']);
@@ -175,7 +189,9 @@ Route::middleware('jwt')->group(function () {
     Route::get('/v1/operator/vehicles/{vehicleId}/eligible-drivers', [OperatorController::class, 'eligible']);
     Route::get('/v1/operator/drivers', [OperatorController::class, 'drivers']);
     Route::post('/v1/operator/drivers', [OperatorController::class, 'storeDriver']);
+    Route::post('/v1/operator/drivers/{id}/documents', [OperatorController::class, 'storeDriverDocument']);
     Route::get('/v1/operator/drivers/{id}', [OperatorController::class, 'driver']);
+    Route::post('/v1/operator/vehicles/{id}/documents', [OperatorController::class, 'storeVehicleDocument']);
     Route::get('/v1/operator/assignments', [OperatorController::class, 'assignments']);
     Route::get('/v1/operator/leave', [OperatorController::class, 'leave']);
     Route::post('/v1/operator/leave', [OperatorController::class, 'storeLeave']);

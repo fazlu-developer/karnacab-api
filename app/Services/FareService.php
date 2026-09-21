@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\ServiceArea;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
@@ -10,6 +11,7 @@ class FareService
 {
     public function quote(array $input): array
     {
+        ServiceArea::assertTrip($input);
         $product = strtoupper((string) ($input['product'] ?? 'LOCAL_CAB'));
         if (in_array($product, ['LOCAL', 'TRIP', 'CAB'], true)) {
             $product = 'LOCAL_CAB';

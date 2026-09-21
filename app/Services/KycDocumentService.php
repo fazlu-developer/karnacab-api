@@ -55,7 +55,7 @@ class KycDocumentService
             'vehicleFamilies' => $families,
             'requiredDocs' => [
                 'AADHAAR_FRONT', 'AADHAAR_BACK', 'PAN', 'LICENSE_FRONT', 'LICENSE_BACK',
-                'RC', 'INSURANCE', 'VEHICLE_PHOTO', 'VEHICLE_DRIVER_PHOTO', 'SELFIE',
+                'RC', 'INSURANCE', 'VEHICLE_PHOTO', 'VEHICLE_DRIVER_PHOTO', 'LIVE_PHOTO',
             ],
             'datedDocs' => self::DATED_TYPES,
             'optionalDocs' => ['POLLUTION', 'PERMIT'],
@@ -123,7 +123,10 @@ class KycDocumentService
 
         $ext = str_contains($mime, 'png') ? 'png' : (str_contains($mime, 'webp') ? 'webp' : 'jpg');
         $path = 'kyc/'.$driver->id.'/'.Str::uuid().'.'.$ext;
-        Storage::disk('public')->put($path, $binary);
+        $full = storage_path('app/public/'.$path);
+        $dir = dirname($full);
+        abort_unless(is_dir($dir) || mkdir($dir, 0777, true) || is_dir($dir), 500, 'Could not save the attachment');
+        abort_unless(file_put_contents($full, $binary) !== false, 500, 'Could not save the attachment');
 
         $expires = $data['expiresAt'] ?? $data['expires_at'] ?? null;
         if (in_array($type, self::DATED_TYPES, true)) {
@@ -152,6 +155,20 @@ class KycDocumentService
             'created_at' => now(),
             'updated_at' => now(),
         ])->save();
+
+        if (in_array($type, ['LIVE_PHOTO', 'SELFIE'], true) && Schema::hasColumn('users', 'avatar_path')) {
+            $actor->update(['avatar_path' => $path]);
+        }
+
+        return app(DriverOpsService::class)->kycSnapshot($actor);
+    }
+
+    public function delete(User $actor, string $id): array
+    {
+        $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
+        $doc = DriverDocument::query()->where('driver_id', $driver->id)->where('id', $id)->firstOrFail();
+        $this->deleteFile($doc->storage_key);
+        $doc->delete();
 
         return app(DriverOpsService::class)->kycSnapshot($actor);
     }
