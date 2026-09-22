@@ -34,7 +34,7 @@ class PayUService
             'updated_at' => now(),
         ];
         DB::table('payment_intents')->insert($this->filter('payment_intents', $payload));
-        $base = rtrim((string) (config('app.url') ?: env('API_PUBLIC_URL')), '/');
+        $base = rtrim((string) (request()?->getSchemeAndHttpHost() ?: config('app.url') ?: env('API_PUBLIC_URL')), '/');
         $checkout = $base.'/api/v1/payments/payu/checkout/'.$txnid;
 
         return [
@@ -42,8 +42,24 @@ class PayUService
             'txnid' => $txnid,
             'amountRupees' => (float) $amount,
             'checkoutUrl' => $checkout,
+            'webhookUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
+            'successUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
+            'failureUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
             'gateway' => 'payu',
             'mode' => env('PAYU_MODE', 'test'),
+            'sdk' => [
+                'key' => $this->key(),
+                'txnid' => $txnid,
+                'amount' => $amount,
+                'productinfo' => $productinfo,
+                'firstname' => $firstname,
+                'email' => $email,
+                'phone' => (string) ($actor->phone ?: '9999999999'),
+                'hash' => $hash,
+                'surl' => $base.'/api/v1/payments/webhooks/payu',
+                'furl' => $base.'/api/v1/payments/webhooks/payu',
+                'environment' => env('PAYU_MODE', 'test') === 'live' ? '0' : '1',
+            ],
         ];
     }
 
@@ -61,7 +77,8 @@ class PayUService
         $productinfo = 'KarnaCab wallet top-up';
         $hash = $this->requestHash($txnid, $amount, $productinfo, $user->name ?: 'Customer', $email);
         $action = $this->payuUrl();
-        $surl = url('/api/v1/payments/webhooks/payu');
+        $returnHost = rtrim((string) (request()?->getSchemeAndHttpHost() ?: config('app.url')), '/');
+        $surl = $returnHost.'/api/v1/payments/webhooks/payu';
         $key = e($this->key());
         $phone = e((string) ($user->phone ?: '9999999999'));
         $emailEsc = e($email);

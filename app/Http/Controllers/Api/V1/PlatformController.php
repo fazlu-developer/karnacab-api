@@ -392,6 +392,24 @@ class PlatformController extends Controller
         );
     }
 
+    public function driverSupport(Request $request)
+    {
+        $payload = $this->surface->supportTickets($request->user(), $request);
+        if ($request->isMethod('post')) {
+            return $payload;
+        }
+
+        return [
+            'tickets' => $payload['tickets'] ?? [],
+            'faqs' => [
+                ['q' => 'How do I go online?', 'a' => 'Finish KYC, keep location on, then tap Go online.'],
+                ['q' => 'How much wallet do I need?', 'a' => 'Admin sets a percent of the fare. At 10%, a ₹1,000 wallet can accept a ₹10,000 booking.'],
+                ['q' => 'Where are my documents reviewed?', 'a' => 'Open Support and send a ticket. The admin team sees the same ticket.'],
+            ],
+            'tel' => 'tel:08041234500',
+        ];
+    }
+
     public function driversNearby(Request $request)
     {
         $data = $request->validate([
@@ -544,7 +562,29 @@ class PlatformController extends Controller
 
     public function payuWebhook(Request $request)
     {
-        return app(\App\Services\PayUService::class)->handleWebhook($request);
+        $result = app(\App\Services\PayUService::class)->handleWebhook($request);
+        if ($request->expectsJson()) {
+            return $result;
+        }
+        $status = e((string) ($result['status'] ?? 'received'));
+        $txn = e((string) ($result['txnid'] ?? ''));
+        $ok = in_array($result['status'] ?? '', ['captured', 'success'], true);
+        $headline = $ok ? 'Payment received' : 'Payment not completed';
+        $copy = $ok
+            ? 'Wallet balance will update in the KarnaCab app.'
+            : 'You can close this window and try again from the app.';
+
+        return response(<<<HTML
+<!DOCTYPE html>
+<html><body style="margin:0;background:#f4f1ea;font-family:Segoe UI,Arial,sans-serif;color:#10231c">
+  <main id="karnacab-payu" data-status="{$status}" style="max-width:420px;margin:48px auto;background:#fff;border-radius:18px;padding:28px">
+    <p style="letter-spacing:.12em;text-transform:uppercase;color:#5c564c;font-size:12px">KarnaCab PayU</p>
+    <h1 style="margin:8px 0">{$headline}</h1>
+    <p>{$copy}</p>
+    <p style="color:#5c564c">Reference {$txn}</p>
+  </main>
+</body></html>
+HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
     }
 
     public function notificationRead(Request $request, string $id)
@@ -590,6 +630,16 @@ class PlatformController extends Controller
     public function supportTickets(Request $request)
     {
         return $this->surface->supportTickets($request->user(), $request);
+    }
+
+    public function supportTicket(Request $request, string $id)
+    {
+        return $this->surface->supportTicket($request->user(), $id);
+    }
+
+    public function supportTicketMessage(Request $request, string $id)
+    {
+        return $this->surface->supportTicketMessage($request->user(), $id, (string) $request->input('body', ''));
     }
 
     public function adsServe(Request $request)
@@ -649,7 +699,7 @@ class PlatformController extends Controller
 
     public function parcelsPay(Request $request, string $id)
     {
-        return $this->surface->parcelPay($id, $request->all());
+        return $this->surface->parcelPay($request->user(), $id, $request->all());
     }
 
     public function parcelsAccept(Request $request, string $id)
@@ -684,7 +734,7 @@ class PlatformController extends Controller
 
     public function travelPay(Request $request, string $id)
     {
-        return $this->surface->travelPay($id, $request->all());
+        return $this->surface->travelPay($request->user(), $id, $request->all());
     }
 
     public function bulkCatalog()

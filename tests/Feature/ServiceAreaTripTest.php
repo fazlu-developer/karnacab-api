@@ -34,7 +34,7 @@ class ServiceAreaTripTest extends TestCase
         $this->assertStringContainsString('Coming soon', (string) $trip['message']);
     }
 
-    public function test_mumbai_pickup_to_patna_drop_is_allowed(): void
+    public function test_mumbai_pickup_to_patna_drop_is_coming_soon(): void
     {
         $trip = ServiceArea::trip([
             'pickupLat' => 19.0760,
@@ -44,8 +44,24 @@ class ServiceAreaTripTest extends TestCase
             'pickupText' => 'Mumbai',
             'dropText' => 'Patna, Bihar',
         ]);
-        $this->assertTrue($trip['allowed']);
-        $this->assertFalse($trip['comingSoon']);
+        $this->assertFalse($trip['allowed']);
+        $this->assertTrue($trip['comingSoon']);
+        $this->assertStringContainsString('pickup', strtolower((string) $trip['message']));
+    }
+
+    public function test_delhi_pickup_to_uttar_pradesh_drop_is_coming_soon(): void
+    {
+        $trip = ServiceArea::trip([
+            'pickupLat' => 28.6139,
+            'pickupLng' => 77.2090,
+            'dropLat' => 26.8467,
+            'dropLng' => 80.9462,
+            'pickupText' => 'Delhi',
+            'dropText' => 'Lucknow, Uttar Pradesh',
+        ]);
+        $this->assertFalse($trip['allowed']);
+        $this->assertTrue($trip['comingSoon']);
+        $this->assertStringContainsString('drop location', strtolower((string) $trip['message']));
     }
 
     public function test_quote_without_coordinates_is_not_blocked(): void

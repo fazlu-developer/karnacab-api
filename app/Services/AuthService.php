@@ -419,7 +419,7 @@ class AuthService
         abort_unless($binary, 422, 'Choose a profile photo');
         $ext = str_contains($mime, 'png') ? 'png' : 'jpg';
         $path = 'avatars/'.$user->id.'/'.uniqid('p', true).'.'.$ext;
-        \Illuminate\Support\Facades\Storage::disk('public')->put($path, $binary);
+        app(KycDocumentService::class)->writePublicFile($path, $binary);
         User::query()->where('id', $user->id)->update(['avatar_path' => $path, 'updated_at' => now()]);
 
         return $this->present($user->fresh());
@@ -548,6 +548,9 @@ class AuthService
 
     private function isDemoOtpPhone(string $phone): bool
     {
+        if (! filter_var(config('karnacab.static_test_otp_enabled'), FILTER_VALIDATE_BOOL)) {
+            return false;
+        }
         $phones = array_map(
             fn ($value) => $this->normalizePhone((string) $value),
             (array) config('karnacab.demo_otp_phones', []),

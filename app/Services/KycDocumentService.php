@@ -123,10 +123,7 @@ class KycDocumentService
 
         $ext = str_contains($mime, 'png') ? 'png' : (str_contains($mime, 'webp') ? 'webp' : 'jpg');
         $path = 'kyc/'.$driver->id.'/'.Str::uuid().'.'.$ext;
-        $full = storage_path('app/public/'.$path);
-        $dir = dirname($full);
-        abort_unless(is_dir($dir) || mkdir($dir, 0777, true) || is_dir($dir), 500, 'Could not save the attachment');
-        abort_unless(file_put_contents($full, $binary) !== false, 500, 'Could not save the attachment');
+        $this->writePublicFile($path, $binary);
 
         $expires = $data['expiresAt'] ?? $data['expires_at'] ?? null;
         if (in_array($type, self::DATED_TYPES, true)) {
@@ -142,7 +139,7 @@ class KycDocumentService
         }
 
         $doc = new DriverDocument();
-        $doc->forceFill([
+        $row = [
             'driver_id' => $driver->id,
             'type' => $type,
             'status' => 'pending',
@@ -154,9 +151,16 @@ class KycDocumentService
             'expires_at' => $expires,
             'created_at' => now(),
             'updated_at' => now(),
-        ])->save();
+        ];
+        $fill = [];
+        foreach ($row as $column => $value) {
+            if (Schema::hasColumn('driver_documents', $column)) {
+                $fill[$column] = $value;
+            }
+        }
+        $doc->forceFill($fill)->save();
 
-        if (in_array($type, ['LIVE_PHOTO', 'SELFIE'], true) && Schema::hasColumn('users', 'avatar_path')) {
+        if (in_array($type, ['LIVE_PHOTO', 'SELFIE', 'PROFILE_PHOTO'], true) && Schema::hasColumn('users', 'avatar_path')) {
             $actor->update(['avatar_path' => $path]);
         }
 
@@ -202,6 +206,27 @@ class KycDocumentService
         }
 
         return $count;
+    }
+
+    public function writePublicFile(string $path, string $binary): void
+    {
+        $path = ltrim(str_replace('\\', '/', $path), '/');
+        abort_if($path === '' || str_contains($path, '..'), 422, 'Could not save the attachment');
+        $targets = [
+            storage_path('app/public/'.$path),
+            base_path('../management-admin/storage/app/public/'.$path),
+        ];
+        $wrote = false;
+        foreach ($targets as $full) {
+            $dir = dirname($full);
+            if (! is_dir($dir) && ! @mkdir($dir, 0777, true) && ! is_dir($dir)) {
+                continue;
+            }
+            if (@file_put_contents($full, $binary) !== false) {
+                $wrote = true;
+            }
+        }
+        abort_unless($wrote, 500, 'Could not save the attachment');
     }
 
     private function deleteFile(?string $key): void

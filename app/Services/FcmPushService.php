@@ -84,6 +84,24 @@ class FcmPushService
             $payloadData['image'] = $imageUrl;
             $payloadData['imageUrl'] = $imageUrl;
         }
+        $silent = ($data['silent'] ?? '') === '1' || ($data['event'] ?? '') === 'accepted';
+        $channel = $silent
+            ? 'karnacab_silent'
+            : ((str_contains((string) ($data['type'] ?? ''), 'booking') || ($data['event'] ?? '') === 'new_booking') ? 'karnacab_booking' : 'karnacab_default');
+        $androidNotification = [
+            'channel_id' => $channel,
+            'notification_priority' => 'PRIORITY_HIGH',
+            'visibility' => 'PUBLIC',
+        ];
+        if (! $silent) {
+            $androidNotification['sound'] = 'default';
+            $androidNotification['notification_priority'] = 'PRIORITY_MAX';
+            $androidNotification['default_vibrate_timings'] = false;
+            $androidNotification['vibrate_timings'] = ['0s', '0.4s', '0.2s', '0.4s'];
+        }
+        if ($imageUrl) {
+            $androidNotification['image'] = $imageUrl;
+        }
         $message = [
             'message' => [
                 'token' => $token,
@@ -95,24 +113,16 @@ class FcmPushService
                 'data' => $payloadData,
                 'android' => [
                     'priority' => 'HIGH',
-                    'notification' => array_filter([
-                        'channel_id' => (str_contains((string) ($data['type'] ?? ''), 'booking') || ($data['event'] ?? '') === 'new_booking') ? 'karnacab_booking' : 'karnacab_default',
-                        'sound' => 'default',
-                        'notification_priority' => 'PRIORITY_MAX',
-                        'default_vibrate_timings' => false,
-                        'vibrate_timings' => ['0s', '0.7s', '0.3s', '0.7s', '0.3s', '0.9s'],
-                        'image' => $imageUrl,
-                        'visibility' => 'PUBLIC',
-                    ], fn ($value) => $value !== null && $value !== ''),
+                    'notification' => $androidNotification,
                 ],
                 'apns' => [
                     'payload' => [
-                        'aps' => [
+                        'aps' => array_filter([
                             'alert' => ['title' => $title, 'body' => $body],
-                            'sound' => 'default',
+                            'sound' => $silent ? null : 'default',
                             'badge' => 1,
                             'mutable-content' => 1,
-                        ],
+                        ], fn ($value) => $value !== null),
                     ],
                     'fcm_options' => array_filter(['image' => $imageUrl]),
                 ],

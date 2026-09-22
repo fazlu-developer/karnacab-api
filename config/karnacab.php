@@ -6,9 +6,10 @@ return [
     'leads_notify_email' => (string) env('LEADS_NOTIFY_EMAIL', env('MAIL_FROM_ADDRESS', 'website.fazlu@gmail.com')),
     // Cached via config — do not read env() in AuthService after php artisan config:cache.
     'otp_show_in_app' => filter_var(env('OTP_SHOW_IN_APP', false), FILTER_VALIDATE_BOOL),
+    'static_test_otp_enabled' => filter_var(env('STATIC_TEST_OTP_ENABLED', false), FILTER_VALIDATE_BOOL),
     'demo_otp_phones' => array_values(array_filter(array_map('trim', explode(',', (string) env(
         'DEMO_OTP_PHONES',
-        '7428059960,7065876175',
+        '7428059960,7428059961,7065876175,7065876176,8595238890,9560210876,9560210875',
     ))))),
     'demo_otp_code' => (string) env('DEMO_OTP_CODE', '123456'),
     'fast2sms_api_key' => (string) env('FAST2SMS_API_KEY', ''),

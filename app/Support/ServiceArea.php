@@ -43,7 +43,7 @@ class ServiceArea
     }
 
     /**
-     * A trip is bookable when pickup OR drop is inside an active KarnaCab service state.
+     * A trip is bookable only when both pickup and drop are inside an admin live state.
      *
      * @param  array<string, mixed>  $input
      * @return array{allowed: bool, comingSoon: bool, pickupState: ?string, dropState: ?string, message: ?string, serviceStates: list<string>}
@@ -81,15 +81,29 @@ class ServiceArea
             isset($input['dropState']) ? (string) $input['dropState'] : null,
             $dropText !== '' ? $dropText : null,
         );
-        $allowed = $pickup['allowed'] || $drop['allowed'];
-        $detected = $drop['state'] ?: $pickup['state'];
+        $pickupKnown = $pickupLat !== null || trim($pickupText) !== '';
+        $dropKnown = $dropLat !== null || trim($dropText) !== '';
+        $allowed = match (true) {
+            $pickupKnown && $dropKnown => $pickup['allowed'] && $drop['allowed'],
+            $pickupKnown => $pickup['allowed'],
+            $dropKnown => $drop['allowed'],
+            default => true,
+        };
+        $message = null;
+        if (! $allowed) {
+            $message = ($pickupKnown && $pickup['allowed'] && $dropKnown && ! $drop['allowed'])
+                ? 'This drop location is not in service. Coming soon.'
+                : (($dropKnown && $drop['allowed'] && $pickupKnown && ! $pickup['allowed'])
+                    ? 'This pickup location is not in service. Coming soon.'
+                    : self::comingSoonMessage($drop['state'] ?: $pickup['state']));
+        }
 
         return [
             'allowed' => $allowed,
             'comingSoon' => ! $allowed,
             'pickupState' => $pickup['state'],
             'dropState' => $drop['state'],
-            'message' => $allowed ? null : self::comingSoonMessage($detected),
+            'message' => $message,
             'serviceStates' => self::states(),
         ];
     }

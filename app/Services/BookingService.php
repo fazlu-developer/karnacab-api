@@ -2,14 +2,18 @@
 
 namespace App\Services;
 
+use App\Mail\EventNoticeMail;
+use App\Mail\TripInvoiceMail;
 use App\Models\Booking;
 use App\Models\Driver;
+use App\Models\DriverDocument;
 use App\Models\User;
 use App\Support\BookingStatus;
 use App\Support\Geo;
 use App\Support\ServiceArea;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
@@ -74,10 +78,8 @@ class BookingService
         abort_if(! $scheduled && $matches === [], 422, 'No nearby drivers found.');
         $mode = $this->normalizePaymentMode($dto['paymentMode'] ?? $dto['payment_mode'] ?? 'CASH');
         if ($mode === 'WALLET') {
-            $wallet = Schema::hasTable('wallets')
-                ? DB::table('wallets')->where('owner_user_id', $actor->id)->orderBy('id')->first()
-                : null;
-            abort_unless($wallet && (int) $wallet->balance_paise >= (int) $quote['totalPaise'], 422, 'Add wallet balance to pay with wallet.');
+            $balance = app(CustomerWallet::class)->balancePaise((int) $actor->id);
+            abort_unless($balance >= (int) $quote['totalPaise'], 422, 'Add wallet balance to pay with wallet.');
         }
 
         $booking = Booking::query()->create($this->filterColumns([
@@ -246,12 +248,29 @@ class BookingService
         abort_unless($assigned, 409, 'Booking has already been accepted by another driver.');
         $booking = Booking::query()->findOrFail($id);
         Log::info('booking.accepted', ['bookingId' => $booking->id, 'driverId' => $driver->id]);
-        $this->push->notifyUsers(
-            [(int) $booking->customer_id],
-            'Driver assigned',
-            ($actor->name ?: 'Your driver').' is on the way.',
-            ['type' => 'trip', 'event' => 'accepted', 'bookingId' => (string) $booking->id],
-        );
+        $notice = app(NotificationTemplates::class)->definition('driver_assigned', [
+            'title' => 'Your booking is accepted',
+            'body' => '{name} accepted your booking {ref}.',
+            'channels' => ['in_app', 'push'],
+        ]);
+        $vars = [
+            'name' => $actor->name ?: 'Your driver',
+            'ref' => (string) $booking->public_ref,
+            'status' => 'accepted',
+        ];
+        $title = NotificationTemplates::fill($notice['title'], $vars);
+        $body = NotificationTemplates::fill($notice['body'], $vars);
+        if (in_array('in_app', $notice['channels'], true) || in_array('push', $notice['channels'], true)) {
+            $this->push->notifyUsers(
+                [(int) $booking->customer_id],
+                $title !== '' ? $title : 'Your booking is accepted',
+                $body !== '' ? $body : 'Your booking is accepted.',
+                ['type' => 'trip', 'event' => 'accepted', 'silent' => '1', 'bookingId' => (string) $booking->id],
+            );
+        }
+        if (in_array('email', $notice['channels'], true)) {
+            $this->emailCustomer((int) $booking->customer_id, $title, $body);
+        }
 
         return $this->present($booking, $actor);
     }
@@ -277,6 +296,12 @@ class BookingService
         $booking = $this->findVisible($actor, $id);
         $stars = max(1, min(5, $stars));
         if (Schema::hasTable('booking_ratings')) {
+            if (! Schema::hasColumn('booking_ratings', 'comment')) {
+                try {
+                    Schema::table('booking_ratings', fn ($table) => $table->text('comment')->nullable());
+                } catch (\Throwable) {
+                }
+            }
             $row = [
                 'booking_id' => $booking->id,
                 'from_role' => $actor->role,
@@ -451,7 +476,8 @@ class BookingService
         Driver::query()->where('id', $driver->id)->update(['duty_status' => 'online']);
         $this->creditDriverWallet((int) $driver->user_id, (int) $booking->id, $earning, $commission, $totalPaise);
         $this->debitCustomerWallet((int) $booking->customer_id, (int) $booking->id, $totalPaise, (string) ($booking->payment_mode ?? 'CASH'));
-        $this->writeInvoice($booking->fresh(), $totalPaise);
+        $invoiceRef = $this->writeInvoice($booking->fresh(), $totalPaise);
+        $this->emailInvoice($booking->fresh(), $totalPaise, $invoiceRef);
         $this->push->notifyUsers(
             [(int) $booking->customer_id],
             'Trip completed',
@@ -512,8 +538,8 @@ class BookingService
             'name' => $driverUser?->name,
             'phone' => $isCustomer && ! BookingStatus::isSearching((string) $row->status) ? $driverUser?->phone : null,
             'rating' => (float) $driver->rating_avg,
-            'photoUrl' => app(KycDocumentService::class)->previewUrl($driverUser?->avatar_path ?? null),
-            'avatarUrl' => app(KycDocumentService::class)->previewUrl($driverUser?->avatar_path ?? null),
+            'photoUrl' => $this->driverPhotoUrl($driver, $driverUser),
+            'avatarUrl' => $this->driverPhotoUrl($driver, $driverUser),
             'lat' => $driverUser?->last_lat !== null ? (float) $driverUser->last_lat : null,
             'lng' => $driverUser?->last_lng !== null ? (float) $driverUser->last_lng : null,
             'heading' => $driverUser->last_heading ?? null,
@@ -539,6 +565,8 @@ class BookingService
             'status' => $row->status,
             'cancelReason' => $row->cancel_reason ?? null,
             'paymentMode' => $row->payment_mode ?? 'CASH',
+            'ratings' => $this->ratingsPayload($row),
+            'customerReview' => $this->customerReview($row),
             'lifecycle' => BookingStatus::lifecycle((string) $row->status),
             'lifecycleLabel' => str_replace('_', ' ', BookingStatus::lifecycle((string) $row->status)),
             'pickupText' => $row->pickup_text,
@@ -860,55 +888,108 @@ class BookingService
 
     private function debitCustomerWallet(int $userId, int $bookingId, int $amountPaise, string $paymentMode): void
     {
-        if ($amountPaise <= 0 || ! Schema::hasTable('wallets')) {
-            return;
-        }
         $mode = strtoupper($paymentMode);
         if (! in_array($mode, ['WALLET', 'KARNACAB_CASH', 'CASH_WALLET'], true)) {
             return;
         }
-        $wallet = DB::table('wallets')->where('owner_user_id', $userId)->orderBy('id')->first();
-        abort_unless($wallet, 422, 'Wallet not found');
-        $before = (int) $wallet->balance_paise;
-        abort_unless($before >= $amountPaise, 422, 'Insufficient wallet balance');
-        if (Schema::hasTable('wallet_ledger')) {
-            $exists = DB::table('wallet_ledger')->where('booking_id', $bookingId)->where('wallet_id', $wallet->id)->where('kind', 'trip')->where('direction', 'debit')->exists();
-            if ($exists) {
-                return;
+        app(CustomerWallet::class)->debit($userId, $amountPaise, 'Trip fare', $bookingId, 'trip');
+    }
+
+    private function driverPhotoUrl(?Driver $driver, ?User $driverUser): ?string
+    {
+        $docs = app(KycDocumentService::class);
+        $avatar = $docs->previewUrl($driverUser?->avatar_path ?? null);
+        if ($avatar) {
+            return $avatar;
+        }
+        if (! $driver || ! Schema::hasTable('driver_documents')) {
+            return null;
+        }
+        $preferred = ['LIVE_PHOTO', 'VEHICLE_DRIVER_PHOTO', 'PROFILE_PHOTO', 'VEHICLE_PHOTO'];
+        $rows = DriverDocument::query()->where('driver_id', $driver->id)->get();
+        foreach ($preferred as $type) {
+            $match = $rows->first(fn ($row) => strtoupper((string) $row->type) === $type && ! empty($row->storage_key));
+            if ($match) {
+                return $docs->previewUrl($match->storage_key);
             }
         }
-        $after = $before - $amountPaise;
-        DB::table('wallets')->where('id', $wallet->id)->update($this->filterWallet(['balance_paise' => $after, 'updated_at' => now()]));
-        if (Schema::hasTable('wallet_ledger')) {
-            DB::table('wallet_ledger')->insert($this->filterLedger([
-                'public_ref' => 'WD'.strtoupper(Str::random(10)),
-                'wallet_id' => $wallet->id,
-                'booking_id' => $bookingId,
-                'owner_user_id' => $userId,
-                'account' => 'CUSTOMER',
-                'direction' => 'debit',
-                'amount_paise' => $amountPaise,
-                'balance_before_paise' => $before,
-                'balance_after_paise' => $after,
-                'kind' => 'trip',
-                'status' => 'posted',
-                'note' => 'Trip fare',
-                'created_at' => now(),
-            ]));
+
+        return null;
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function ratingsPayload(Booking $row): array
+    {
+        if (! Schema::hasTable('booking_ratings')) {
+            return [];
+        }
+
+        return DB::table('booking_ratings')->where('booking_id', $row->id)->orderBy('id')->get()->map(fn ($rating) => [
+            'fromRole' => $rating->from_role ?? 'CUSTOMER',
+            'stars' => (int) ($rating->stars ?? 0),
+            'comment' => $rating->comment ?? null,
+        ])->all();
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function customerReview(Booking $row): ?array
+    {
+        foreach ($this->ratingsPayload($row) as $rating) {
+            if (($rating['fromRole'] ?? '') === 'CUSTOMER') {
+                return $rating;
+            }
+        }
+
+        return null;
+    }
+
+    private function emailCustomer(int $userId, string $title, string $body): void
+    {
+        $user = User::query()->find($userId);
+        $email = (string) ($user->email ?? '');
+        if ($email === '' || str_ends_with($email, '@otp.karnacab.local')) {
+            return;
+        }
+        try {
+            Mail::to($email)->send(new EventNoticeMail($title, $body));
+        } catch (\Throwable $e) {
+            Log::warning('booking.notice_mail_failed', ['userId' => $userId, 'error' => $e->getMessage()]);
         }
     }
 
-    private function writeInvoice(Booking $booking, int $totalPaise): void
+    private function emailInvoice(Booking $booking, int $totalPaise, ?string $invoiceRef): void
+    {
+        if (! $invoiceRef) {
+            return;
+        }
+        $user = User::query()->find($booking->customer_id);
+        $email = (string) ($user->email ?? '');
+        if (! $user || $email === '' || str_ends_with($email, '@otp.karnacab.local')) {
+            return;
+        }
+        try {
+            Mail::to($email)->send(new TripInvoiceMail($user, $booking, $totalPaise, $invoiceRef));
+        } catch (\Throwable $e) {
+            Log::warning('booking.invoice_mail_failed', ['bookingId' => $booking->id, 'error' => $e->getMessage()]);
+        }
+    }
+
+    private function writeInvoice(Booking $booking, int $totalPaise): ?string
     {
         if (! Schema::hasTable('invoices')) {
-            return;
+            return null;
         }
-        $exists = DB::table('invoices')->where('booking_id', $booking->id)->exists();
-        if ($exists) {
-            return;
+        $existing = DB::table('invoices')->where('booking_id', $booking->id)->first();
+        if ($existing) {
+            return (string) ($existing->public_ref ?? ('INV'.$booking->id));
         }
+        $ref = 'INV'.strtoupper(Str::random(8));
         $row = [
-            'public_ref' => 'INV'.strtoupper(Str::random(8)),
+            'public_ref' => $ref,
             'customer_id' => $booking->customer_id,
             'booking_id' => $booking->id,
             'kind' => 'ride',
@@ -924,6 +1005,8 @@ class BookingService
             fn ($key) => Schema::hasColumn('invoices', $key),
             ARRAY_FILTER_USE_KEY,
         ));
+
+        return $ref;
     }
 
     /**

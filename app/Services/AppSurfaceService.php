@@ -290,6 +290,10 @@ class AppSurfaceService
                 fn ($key) => Schema::hasColumn('support_tickets', $key),
                 ARRAY_FILTER_USE_KEY,
             ));
+            if (Schema::hasColumn('support_tickets', 'district_id') && $actor->district_id) {
+                DB::table('support_tickets')->where('id', $id)->update(['district_id' => $actor->district_id]);
+            }
+            $this->addSupportMessage((int) $id, (int) $actor->id, $description, false);
 
             return [
                 'id' => (string) $id,
@@ -309,7 +313,63 @@ class AppSurfaceService
             'status' => $row->status ?? 'open',
             'kind' => $row->kind ?? $row->type ?? 'support',
             'description' => $row->description ?? $row->message ?? '',
+            'message' => $row->description ?? $row->message ?? $row->subject ?? '',
         ])->all()];
+    }
+
+    public function supportTicket(User $actor, string $id): array
+    {
+        $row = DB::table('support_tickets')->where('id', $id)->where('user_id', $actor->id)->first();
+        abort_unless($row, 404, 'Ticket not found');
+
+        return $this->presentSupportTicket($row);
+    }
+
+    public function supportTicketMessage(User $actor, string $id, string $body): array
+    {
+        $row = DB::table('support_tickets')->where('id', $id)->where('user_id', $actor->id)->first();
+        abort_unless($row, 404, 'Ticket not found');
+        abort_unless(trim($body) !== '', 422, 'Write a message');
+        abort_if(in_array((string) $row->status, ['resolved', 'closed'], true), 422, 'This ticket is already closed');
+        $this->addSupportMessage((int) $row->id, (int) $actor->id, trim($body), false);
+
+        return $this->presentSupportTicket(DB::table('support_tickets')->where('id', $row->id)->first());
+    }
+
+    private function presentSupportTicket(object $row): array
+    {
+        $messages = Schema::hasTable('support_messages')
+            ? DB::table('support_messages')->where('ticket_id', $row->id)->orderBy('id')->get()->map(fn ($message) => [
+                'id' => (string) $message->id,
+                'body' => $message->body,
+                'fromStaff' => (bool) ($message->from_staff ?? false),
+                'createdAt' => $message->created_at ?? null,
+            ])->all()
+            : [];
+
+        return [
+            'id' => (string) $row->id,
+            'publicRef' => $row->public_ref ?? null,
+            'subject' => $row->subject ?? 'Ticket',
+            'status' => $row->status ?? 'open',
+            'kind' => $row->kind ?? 'support',
+            'description' => $row->description ?? $row->message ?? '',
+            'messages' => $messages,
+        ];
+    }
+
+    private function addSupportMessage(int $ticketId, int $authorId, string $body, bool $staff): void
+    {
+        if ($body === '' || ! Schema::hasTable('support_messages')) {
+            return;
+        }
+        DB::table('support_messages')->insert([
+            'ticket_id' => $ticketId,
+            'author_id' => $authorId,
+            'from_staff' => $staff ? 1 : 0,
+            'body' => substr($body, 0, 2000),
+            'created_at' => now(),
+        ]);
     }
 
     public function safetyIncidents(User $actor): array
@@ -534,11 +594,17 @@ class AppSurfaceService
         return $this->presentParcel($row);
     }
 
-    public function parcelPay(string $id, array $data): array
+    public function parcelPay(User $actor, string $id, array $data): array
     {
+        $row = DB::table('parcel_shipments')->where('id', $id)->first();
+        abort_unless($row, 404, 'Parcel not found');
+        $method = strtoupper((string) ($data['method'] ?? $data['paymentMethod'] ?? 'CASH'));
+        if (str_contains($method, 'WALLET')) {
+            app(CustomerWallet::class)->debit((int) $actor->id, (int) ($row->quote_paise ?? 0), 'Parcel fare', null, 'parcel');
+        }
         DB::table('parcel_shipments')->where('id', $id)->update([
             'payment_status' => 'paid',
-            'payment_method' => $data['method'] ?? $data['paymentMethod'] ?? 'demo',
+            'payment_method' => $method,
             'updated_at' => now(),
         ]);
 
@@ -654,16 +720,21 @@ class AppSurfaceService
         return $this->presentTravelBooking($row, $pkg);
     }
 
-    public function travelPay(string $id, array $data): array
+    public function travelPay(User $actor, string $id, array $data): array
     {
+        $row = DB::table('travel_bookings')->where('id', $id)->first();
+        abort_unless($row, 404);
+        $method = strtoupper((string) ($data['method'] ?? $data['paymentMethod'] ?? 'CASH'));
+        if (str_contains($method, 'WALLET')) {
+            app(CustomerWallet::class)->debit((int) $actor->id, (int) ($row->quote_paise ?? 0), 'Travel package', null, 'travel');
+        }
         DB::table('travel_bookings')->where('id', $id)->update([
             'payment_status' => 'paid',
-            'payment_method' => $data['method'] ?? $data['paymentMethod'] ?? 'demo',
+            'payment_method' => $method,
             'status' => 'confirmed',
             'updated_at' => now(),
         ]);
         $row = DB::table('travel_bookings')->where('id', $id)->first();
-        abort_unless($row, 404);
         $pkg = DB::table('travel_packages')->where('id', $row->package_id)->first();
 
         return $this->presentTravelBooking($row, $pkg);

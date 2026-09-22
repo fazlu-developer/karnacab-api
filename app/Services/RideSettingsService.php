@@ -147,8 +147,9 @@ class RideSettingsService
         if ($this->get(self::WALLET_MIN_PAISE_KEY) === null) {
             $this->put(self::WALLET_MIN_PAISE_KEY, '0');
         }
-        if ($this->get(self::WALLET_MIN_FARE_PERCENT_KEY) === null) {
-            $this->put(self::WALLET_MIN_FARE_PERCENT_KEY, '0');
+        $percent = $this->get(self::WALLET_MIN_FARE_PERCENT_KEY);
+        if ($percent === null || $percent === '' || (float) $percent <= 0) {
+            $this->put(self::WALLET_MIN_FARE_PERCENT_KEY, '10');
         }
         if ($this->get(self::WALLET_COVER_COMMISSION_KEY) === null) {
             $this->put(self::WALLET_COVER_COMMISSION_KEY, '1');

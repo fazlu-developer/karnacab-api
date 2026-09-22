@@ -32,7 +32,12 @@ Route::get('/v1/fleet/catalog', fn () => ['ok' => true, 'module' => 'fleet']);
 Route::get('/v1/franchise/catalog', fn () => ['ok' => true, 'module' => 'franchise']);
 Route::get('/v1/experience/catalog', [PlatformController::class, 'experienceCatalog']);
 Route::get('/v1/notifications/catalog', fn () => ['ok' => true, 'module' => 'notifications']);
-Route::get('/v1/payments/catalog', fn () => ['gateway' => env('PAYMENT_GATEWAY', 'demo')]);
+Route::get('/v1/payments/catalog', fn () => [
+    'gateway' => 'payu',
+    'webhookUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
+    'successUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
+    'failureUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
+]);
 Route::post('/v1/payments/webhooks/payu', [PlatformController::class, 'payuWebhook']);
 Route::get('/v1/payments/payu/checkout/{txnid}', [PlatformController::class, 'payuCheckout']);
 Route::post('/v1/payments/webhooks/{provider}', fn (string $provider) => ['ok' => true, 'provider' => $provider]);
@@ -103,8 +108,8 @@ Route::middleware('jwt')->group(function () {
     Route::get('/v1/drivers/me/documents', [PlatformController::class, 'driversDocuments']);
     Route::get('/v1/drivers/me/incentives', fn () => ['incentives' => []]);
     Route::get('/v1/drivers/me/ratings', fn () => ['ratings' => []]);
-    Route::get('/v1/drivers/me/support', fn () => ['tickets' => []]);
-    Route::post('/v1/drivers/me/support/tickets', fn () => ['ok' => true, 'module' => 'support']);
+    Route::get('/v1/drivers/me/support', [PlatformController::class, 'driverSupport']);
+    Route::post('/v1/drivers/me/support/tickets', [PlatformController::class, 'driverSupport']);
     Route::get('/v1/drivers/me/sos', fn () => ['ok' => true]);
     Route::post('/v1/drivers/me/sos', fn () => ['ok' => true]);
     Route::get('/v1/drivers/me/earnings', [PlatformController::class, 'driversEarnings']);
@@ -151,6 +156,8 @@ Route::middleware('jwt')->group(function () {
     Route::post('/v1/ads/campaigns/{id}/click', [PlatformController::class, 'adsNoop']);
     Route::get('/v1/support/tickets', [PlatformController::class, 'supportTickets']);
     Route::post('/v1/support/tickets', [PlatformController::class, 'supportTickets']);
+    Route::get('/v1/support/tickets/{id}', [PlatformController::class, 'supportTicket']);
+    Route::post('/v1/support/tickets/{id}/messages', [PlatformController::class, 'supportTicketMessage']);
     Route::get('/v1/safety/me', [PlatformController::class, 'safetyMe']);
     Route::get('/v1/safety/sos', [PlatformController::class, 'safetySos']);
     Route::post('/v1/safety/sos', [PlatformController::class, 'safetySos']);

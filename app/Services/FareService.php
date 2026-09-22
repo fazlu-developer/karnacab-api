@@ -28,6 +28,12 @@ class FareService
             $query->where('rental_hours', $hours);
         }
         $rule = $query->orderByDesc('district_id')->first();
+        if (! $rule && in_array($product, ['ONE_WAY', 'SCHEDULE', 'AIRPORT', 'RAILWAY'], true)) {
+            $rule = DB::table('fare_rules')->where('active', 1)->where('product', 'LOCAL_CAB')->where('category', $category)->orderByDesc('district_id')->first();
+        }
+        if (! $rule && $product === 'MULTI_STOP') {
+            $rule = DB::table('fare_rules')->where('active', 1)->where('product', 'LOCAL_CAB')->where('category', $category)->orderByDesc('district_id')->first();
+        }
         if (! $rule) {
             $fallback = DB::table('fare_rules')->where('active', 1)->where('product', $product);
             $rule = $fallback->orderByDesc('district_id')->first()
