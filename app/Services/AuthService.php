@@ -548,9 +548,6 @@ class AuthService
 
     private function isDemoOtpPhone(string $phone): bool
     {
-        if (! filter_var(config('karnacab.static_test_otp_enabled'), FILTER_VALIDATE_BOOL)) {
-            return false;
-        }
         $phones = array_map(
             fn ($value) => $this->normalizePhone((string) $value),
             (array) config('karnacab.demo_otp_phones', []),
