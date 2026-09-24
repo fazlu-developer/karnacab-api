@@ -121,14 +121,39 @@ class CmsCatalogService
 
     private function service($row): array
     {
+        $slug = (string) $row->slug;
+
         return [
             'id' => $row->id,
-            'slug' => $row->slug,
+            'slug' => $slug,
             'title' => $row->title,
             'subtitle' => $row->subtitle,
             'group' => $row->service_group,
-            'key' => strtoupper(str_replace('-', '_', (string) $row->slug)),
+            'iconKey' => $row->icon_key,
+            'badge' => $row->badge,
+            'key' => strtoupper(str_replace('-', '_', $slug)),
+            'homeMode' => $this->homeMode($slug),
+            'active' => (bool) $row->active,
         ];
+    }
+
+    private function homeMode(string $slug): string
+    {
+        return match ($slug) {
+            'trip', 'city-ride', 'ride' => 'ride',
+            'intercity', 'one-way', 'outstation-one-way' => 'one_way',
+            'round-trip', 'round-way', 'outstation-round-trip' => 'round_way',
+            'rental', 'cab-rental' => 'rental',
+            'pre-book', 'schedule', 'schedule-ride' => 'schedule',
+            'bus-train', 'railway', 'railway-transfer' => 'railway',
+            'airport', 'airport-transfer' => 'airport',
+            'multi-stop', 'multi-stop-ride' => 'multi_stop',
+            'parcel', 'parcel-home', 'send-bike', 'send-mini3w', 'send-truck' => 'parcel',
+            'travel', 'travel-tours' => 'travel',
+            'bulk', 'bulk-booking' => 'bulk',
+            'corporate', 'corporate-travel', 'seniors' => 'corporate',
+            default => str_replace('-', '_', $slug),
+        };
     }
 
     private function json(?string $raw): array
