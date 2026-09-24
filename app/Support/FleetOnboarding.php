@@ -58,7 +58,7 @@ class FleetOnboarding
         }
         $payload = [
             'user_id' => $userId,
-            'trade_name' => null,
+            'trade_name' => '',
             'status' => 'PENDING',
         ];
         if (Schema::hasColumn('fleet_owners', 'kyc_status')) {
