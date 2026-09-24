@@ -55,6 +55,50 @@ class PlatformController extends Controller
         return $this->cms->site();
     }
 
+    public function appControl()
+    {
+        $raw = DB::table('system_settings')->where('key', 'cms_site')->value('value');
+        $site = json_decode((string) $raw, true);
+        if (! is_array($site)) {
+            $site = [];
+        }
+        $admin = rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnacab.in'), '/');
+        $url = function (?string $value) use ($admin): string {
+            $value = trim((string) $value);
+            if ($value === '') {
+                return '';
+            }
+            if (str_starts_with($value, 'http://') || str_starts_with($value, 'https://')) {
+                return $value;
+            }
+
+            return $admin.'/'.ltrim($value, '/');
+        };
+        $flag = fn (string $key): bool => filter_var($site[$key] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+        return [
+            'customer' => [
+                'maintenance' => $flag('customerMaintenance'),
+                'forceUpdate' => $flag('customerForceUpdate'),
+                'version' => (string) ($site['customerAppVersion'] ?? ''),
+                'playStoreUrl' => $url($site['customerPlayStoreUrl'] ?? $site['playStoreUrl'] ?? ''),
+                'logoUrl' => $url($site['customerAppLogoUrl'] ?? $site['logoUrl'] ?? ''),
+            ],
+            'driver' => [
+                'maintenance' => $flag('driverMaintenance'),
+                'forceUpdate' => $flag('driverForceUpdate'),
+                'version' => (string) ($site['driverAppVersion'] ?? ''),
+                'playStoreUrl' => $url($site['driverPlayStoreUrl'] ?? ''),
+                'logoUrl' => $url($site['driverAppLogoUrl'] ?? ''),
+            ],
+            'highAlert' => [
+                'enabled' => $flag('highAlertEnabled'),
+                'message' => (string) ($site['highAlertMessage'] ?? ''),
+                'until' => (string) ($site['highAlertUntil'] ?? ''),
+            ],
+        ];
+    }
+
     public function cmsPage(string $slug)
     {
         return $this->cms->page($slug);

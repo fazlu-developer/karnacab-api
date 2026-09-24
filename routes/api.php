@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('/v1/health', [PlatformController::class, 'health']);
 Route::get('/v1/cms/site', [PlatformController::class, 'cmsSite']);
+Route::get('/v1/app-control', [PlatformController::class, 'appControl']);
 Route::get('/v1/cms/pages/{slug}', [PlatformController::class, 'cmsPage']);
 Route::get('/v1/catalog', [PlatformController::class, 'catalog']);
 Route::post('/v1/leads', [PlatformController::class, 'lead']);
