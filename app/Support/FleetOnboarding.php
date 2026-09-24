@@ -38,6 +38,7 @@ class FleetOnboarding
             'documents_json' => fn ($table) => $table->longText('documents_json')->nullable(),
             'submitted_at' => fn ($table) => $table->timestamp('submitted_at')->nullable(),
             'verified_at' => fn ($table) => $table->timestamp('verified_at')->nullable(),
+            'updated_at' => fn ($table) => $table->timestamp('updated_at')->nullable(),
         ];
         foreach ($columns as $name => $define) {
             if (Schema::hasColumn('fleet_owners', $name)) {
@@ -121,5 +122,12 @@ class FleetOnboarding
         $decoded = json_decode((string) $fleet->documents_json, true);
 
         return is_array($decoded) ? $decoded : [];
+    }
+
+    public static function stamp(array $patch): array
+    {
+        unset($patch['updated_at']);
+
+        return $patch;
     }
 }

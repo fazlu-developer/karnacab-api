@@ -47,7 +47,7 @@ class OperatorFleetService
         abort_unless($type === '' || in_array($type, FleetOnboarding::COMPANY_TYPES, true), 422, 'Select a valid company type.');
         $name = trim((string) ($data['tradeName'] ?? $data['trade_name'] ?? $data['companyName'] ?? $fleet->trade_name ?? ''));
         $ownerName = trim((string) ($data['ownerName'] ?? $data['name'] ?? $actor->name ?? ''));
-        $patch = ['updated_at' => now()];
+        $patch = [];
         if ($type !== '' && Schema::hasColumn('fleet_owners', 'company_type')) {
             $patch['company_type'] = $type;
         }
@@ -71,7 +71,10 @@ class OperatorFleetService
         if (strtolower((string) ($fleet->kyc_status ?? '')) === 'rejected' && Schema::hasColumn('fleet_owners', 'kyc_status')) {
             $patch['kyc_status'] = 'pending';
         }
-        DB::table('fleet_owners')->where('id', $fleet->id)->update($patch);
+        $patch = FleetOnboarding::stamp($patch);
+        if ($patch !== []) {
+            DB::table('fleet_owners')->where('id', $fleet->id)->update($patch);
+        }
         if ($ownerName !== '' && strlen($ownerName) >= 2) {
             DB::table('users')->where('id', $actor->id)->update(['name' => $ownerName, 'updated_at' => now()]);
             $actor->name = $ownerName;
@@ -97,10 +100,9 @@ class OperatorFleetService
             'mime' => $saved['mime'],
             'uploadedAt' => now()->toIso8601String(),
         ];
-        DB::table('fleet_owners')->where('id', $fleet->id)->update([
+        DB::table('fleet_owners')->where('id', $fleet->id)->update(FleetOnboarding::stamp([
             'documents_json' => json_encode($docs),
-            'updated_at' => now(),
-        ]);
+        ]));
 
         return $this->presentOnboarding($actor, DB::table('fleet_owners')->where('id', $fleet->id)->first());
     }
@@ -115,7 +117,6 @@ class OperatorFleetService
         abort_unless(count($docs) >= 1, 422, 'Upload at least one company document.');
         $patch = [
             'status' => 'PENDING',
-            'updated_at' => now(),
         ];
         if (Schema::hasColumn('fleet_owners', 'kyc_status')) {
             $patch['kyc_status'] = 'under_review';
@@ -123,7 +124,7 @@ class OperatorFleetService
         if (Schema::hasColumn('fleet_owners', 'submitted_at')) {
             $patch['submitted_at'] = now();
         }
-        DB::table('fleet_owners')->where('id', $fleet->id)->update($patch);
+        DB::table('fleet_owners')->where('id', $fleet->id)->update(FleetOnboarding::stamp($patch));
         DB::table('users')->where('id', $actor->id)->update(['status' => 'PENDING', 'updated_at' => now()]);
 
         return $this->presentOnboarding($actor->fresh(), DB::table('fleet_owners')->where('id', $fleet->id)->first());
@@ -732,10 +733,9 @@ class OperatorFleetService
             DB::table('users')->where('id', $actor->id)->update($userPatch);
         }
         if (! empty($data['fleetName'] ?? $data['trade_name'])) {
-            DB::table('fleet_owners')->where('id', $fleet->id)->update([
+            DB::table('fleet_owners')->where('id', $fleet->id)->update(FleetOnboarding::stamp([
                 'trade_name' => $data['fleetName'] ?? $data['trade_name'],
-                'updated_at' => now(),
-            ]);
+            ]));
         }
 
         return $this->profile($actor->fresh());
