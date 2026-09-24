@@ -71,6 +71,7 @@ class CmsCatalogService
             ])->all(),
             'rideTypes' => collect(config('karnacab.ride_types'))->map(fn ($row) => ['key' => $row['key'], 'title' => $row['label']])->all(),
             'vehicleTypes' => collect(config('karnacab.vehicle_types'))->map(fn ($row) => ['key' => $row['key'], 'title' => $row['label']])->all(),
+            'homeOffers' => $this->homeOffers(),
         ];
     }
 
@@ -129,12 +130,34 @@ class CmsCatalogService
             'title' => $row->title,
             'subtitle' => $row->subtitle,
             'group' => $row->service_group,
-            'iconKey' => $row->icon_key,
-            'badge' => $row->badge,
+            'iconKey' => $row->icon_key ?? null,
+            'imageUrl' => $this->publicUpload($row->getAttributes()['image_url'] ?? null),
+            'badge' => $row->badge ?? null,
             'key' => strtoupper(str_replace('-', '_', $slug)),
             'homeMode' => $this->homeMode($slug),
             'active' => (bool) $row->active,
         ];
+    }
+
+    private function homeOffers(): array
+    {
+        $raw = DB::table('system_settings')->where('key', 'cms_home_offers')->value('value');
+        $rows = json_decode((string) $raw, true);
+
+        return is_array($rows) ? array_values($rows) : [];
+    }
+
+    private function publicUpload(mixed $value): string
+    {
+        $value = trim((string) $value);
+        if ($value === '' || (! str_starts_with($value, '/uploads/') && ! str_starts_with($value, 'http'))) {
+            return '';
+        }
+        if (str_starts_with($value, 'http://') || str_starts_with($value, 'https://')) {
+            return $value;
+        }
+
+        return rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnacab.in'), '/').'/'.ltrim($value, '/');
     }
 
     private function homeMode(string $slug): string

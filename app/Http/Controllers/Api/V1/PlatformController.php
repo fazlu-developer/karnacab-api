@@ -14,6 +14,7 @@ use App\Services\LeadIntakeService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 class PlatformController extends Controller
 {
@@ -162,10 +163,49 @@ class PlatformController extends Controller
                     'product' => $request->input('product', 'LOCAL_CAB'),
                     'category' => $vehicle['key'],
                 ]));
+                $catalogVehicle = Schema::hasTable('catalog_services')
+                    ? DB::table('catalog_services')->where('active', 1)->where('category_key', $vehicle['key'])->first()
+                    : null;
+                $image = '';
+                if ($catalogVehicle && Schema::hasColumn('catalog_services', 'image_url')) {
+                    $path = (string) ($catalogVehicle->image_url ?? '');
+                    if ($path !== '') {
+                        $image = str_starts_with($path, 'http')
+                            ? $path
+                            : rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnacab.in'), '/').'/'.ltrim($path, '/');
+                    }
+                }
+                $billedKm = (float) ($quote['billedKm'] ?? $request->input('distanceKm') ?? 5);
+                $durationMinutes = max(1, (int) round($billedKm * 2.3));
+                $etaMinutes = match ($vehicle['key']) {
+                    'BIKE' => 3,
+                    'AUTO' => 4,
+                    'E_RICKSHAW' => 6,
+                    'MINI' => 5,
+                    'SEDAN' => 8,
+                    'SUV' => 8,
+                    'TRAVELLER' => 10,
+                    default => 7,
+                };
+                $blurbs = [
+                    'BIKE' => 'Best for single rider',
+                    'AUTO' => 'Quick & affordable',
+                    'E_RICKSHAW' => 'Eco-friendly ride',
+                    'MINI' => 'Best for small group',
+                    'SEDAN' => 'Comfortable & spacious',
+                    'SUV' => 'For family & group',
+                    'TRAVELLER' => 'Best for large group',
+                ];
+                $subtitle = trim((string) ($catalogVehicle?->subtitle ?? ''));
                 $options[] = array_merge($quote, [
-                    'label' => $vehicle['label'],
+                    'label' => $catalogVehicle?->title ?? $vehicle['label'],
                     'seats' => $vehicle['seats'],
                     'icon' => $vehicle['key'],
+                    'imageUrl' => $image,
+                    'blurb' => $subtitle !== '' ? $subtitle : ($blurbs[$vehicle['key']] ?? ''),
+                    'etaMinutes' => $etaMinutes,
+                    'durationMinutes' => $durationMinutes,
+                    'distanceKm' => $billedKm,
                 ]);
             } catch (\Throwable $e) {
                 Log::notice('quote.option_skipped', ['category' => $vehicle['key'], 'message' => $e->getMessage()]);
