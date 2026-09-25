@@ -4,6 +4,10 @@ namespace App\Services;
 
 use App\Models\Driver;
 use App\Models\User;
+use App\Support\BulkSchema;
+use App\Support\CorporatePlanSchema;
+use App\Support\Geo;
+use App\Support\TravelPackageSchema;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -11,7 +15,10 @@ use Illuminate\Support\Str;
 
 class AppSurfaceService
 {
-    public function __construct(private readonly BookingService $bookings) {}
+    public function __construct(
+        private readonly BookingService $bookings,
+        private readonly FareService $fares,
+    ) {}
 
     public function experienceOverview(User $actor): array
     {
@@ -495,12 +502,19 @@ class AppSurfaceService
     public function parcelQuote(array $data): array
     {
         $lane = ! empty($data['biharLane']) ? 'BIHAR' : 'LOCAL';
-        $category = $data['category'] ?? 'BIKE';
+        $category = strtoupper((string) ($data['category'] ?? 'BIKE'));
         $km = max(1, (float) ($data['distanceKm'] ?? 1));
         $kg = max(0.1, (float) ($data['weightKg'] ?? 1));
-        $rule = Schema::hasTable('parcel_fare_rules')
-            ? DB::table('parcel_fare_rules')->where('active', 1)->where('lane', $lane)->where('category', $category)->first()
-            : null;
+        $aliases = ['CAR' => 'SEDAN', 'VAN' => 'TRAVELLER', 'MINI' => 'SEDAN'];
+        $category = $aliases[$category] ?? $category;
+        $baseQuery = Schema::hasTable('parcel_fare_rules') ? DB::table('parcel_fare_rules')->where('active', 1) : null;
+        $rule = null;
+        if ($baseQuery) {
+            $rule = (clone $baseQuery)->where('lane', $lane)->where('category', $category)->first()
+                ?: (clone $baseQuery)->where('category', $category)->first()
+                ?: (clone $baseQuery)->where('lane', $lane)->first()
+                ?: (clone $baseQuery)->orderBy('id')->first();
+        }
         $minCharge = (int) ($rule->min_charge_paise ?? 4900);
         $included = (float) ($rule->included_km ?? 2);
         $perKm = (int) ($rule->per_km_paise ?? 1500);
@@ -509,7 +523,13 @@ class AppSurfaceService
         $gstPct = (int) ($rule->gst_percent ?? 5);
         $billedKm = max($km, (float) ($rule->min_km ?? 1));
         $extra = max(0, $billedKm - $included);
-        $subtotal = $minCharge + (int) round($billedKm * $perKm) + (int) round($extra * $extraKm) + (int) round($kg * $perKg);
+        $distancePaise = (int) round($billedKm * $perKm) + (int) round($extra * $extraKm);
+        $weightPaise = (int) round($kg * $perKg);
+        $basePaise = $minCharge + $distancePaise;
+        $insurancePaise = ! empty($data['insurance']) ? max(2000, (int) round($perKg * max(1, $kg))) : 0;
+        $fragilePaise = ! empty($data['fragile']) ? max(1000, (int) round($perKg * 2)) : 0;
+        $handlingPaise = $insurancePaise + $fragilePaise;
+        $subtotal = $basePaise + $weightPaise + $handlingPaise;
         $gst = (int) round($subtotal * $gstPct / 100);
         $total = $subtotal + $gst;
 
@@ -518,12 +538,36 @@ class AppSurfaceService
             'category' => $category,
             'billedKm' => $billedKm,
             'weightKg' => $kg,
+            'basePaise' => $basePaise,
+            'weightPaise' => $weightPaise,
+            'handlingPaise' => $handlingPaise,
+            'insurancePaise' => $insurancePaise,
+            'fragilePaise' => $fragilePaise,
             'subtotalPaise' => $subtotal,
             'gstPaise' => $gst,
             'totalPaise' => $total,
             'totalRupees' => $total / 100,
             'currency' => 'INR',
+            'source' => $rule ? 'server' : 'fallback',
         ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array{options: list<array<string, mixed>>}
+     */
+    public function parcelQuoteOptions(array $data): array
+    {
+        $fromRules = Schema::hasTable('parcel_fare_rules')
+            ? DB::table('parcel_fare_rules')->where('active', 1)->pluck('category')->unique()->values()->all()
+            : [];
+        $categories = $fromRules ?: ['BIKE', 'AUTO', 'SEDAN', 'TRAVELLER', 'TRUCK'];
+        $options = [];
+        foreach ($categories as $category) {
+            $options[] = $this->parcelQuote([...$data, 'category' => (string) $category]);
+        }
+
+        return ['options' => $options];
     }
 
     public function parcelsList(User $actor): array
@@ -571,7 +615,12 @@ class AppSurfaceService
             'distance_km' => $quote['billedKm'],
             'contact_name' => $data['contactName'] ?? $actor->name,
             'contact_phone' => $data['contactPhone'] ?? $actor->phone,
-            'instructions' => $data['instructions'] ?? null,
+            'instructions' => trim(implode('. ', array_filter([
+                $data['instructions'] ?? null,
+                ! empty($data['insurance']) ? 'Insurance requested' : null,
+                ! empty($data['fragile']) ? 'Fragile handling' : null,
+                ! empty($data['scheduledAt']) ? 'Scheduled pickup: '.$data['scheduledAt'] : null,
+            ]))) ?: null,
             'compliance_confirmed' => ! empty($data['complianceConfirmed']) ? 1 : 0,
             'quote_paise' => $quote['totalPaise'],
             'quote_snapshot' => json_encode($quote),
@@ -660,8 +709,12 @@ class AppSurfaceService
         }
         if ($categories === []) {
             $categories = [
-                ['key' => 'SIGHTSEEING', 'label' => 'Sightseeing'],
-                ['key' => 'PILGRIMAGE', 'label' => 'Pilgrimage'],
+                ['key' => 'SIGHTSEEING', 'label' => 'Local Sightseeing'],
+                ['key' => 'OUTSTATION', 'label' => 'Outstation Tour'],
+                ['key' => 'WEEKEND', 'label' => 'Weekend Getaway'],
+                ['key' => 'PILGRIMAGE', 'label' => 'Pilgrimage Tour'],
+                ['key' => 'CORPORATE', 'label' => 'Corporate Travel'],
+                ['key' => 'PACKAGES', 'label' => 'Travel Packages'],
             ];
         }
 
@@ -670,6 +723,7 @@ class AppSurfaceService
 
     public function travelPackages(Request $request, ?string $id = null): array
     {
+        TravelPackageSchema::ensure();
         if (! Schema::hasTable('travel_packages')) {
             abort_if((bool) $id, 404);
 
@@ -691,6 +745,12 @@ class AppSurfaceService
         if ($request->query('destination')) {
             $q->where('destination', 'like', '%'.$request->query('destination').'%');
         }
+        if ($request->query('origin')) {
+            $q->where('origin', 'like', '%'.$request->query('origin').'%');
+        }
+        if ($request->query('region')) {
+            $q->where('region', $request->query('region'));
+        }
 
         return ['packages' => $q->limit(100)->get()->map(fn ($row) => $this->presentTravelPackage($row))->all()];
     }
@@ -699,22 +759,27 @@ class AppSurfaceService
     {
         $pkg = DB::table('travel_packages')->where('id', $data['packageId'] ?? $data['package_id'] ?? 0)->first();
         abort_unless($pkg, 404);
-        $price = (int) ($pkg->price_paise ?? 0);
-        $id = DB::table('travel_bookings')->insertGetId([
-            'public_ref' => strtoupper(Str::random(8)),
+        $guests = max(1, (int) ($data['guests'] ?? 1));
+        $unit = (int) ($pkg->price_paise ?? 0);
+        $base = $unit * $guests;
+        $gst = (int) round($base * 0.05);
+        $total = $base + $gst;
+        $id = DB::table('travel_bookings')->insertGetId(array_filter([
+            'public_ref' => 'KTR'.strtoupper(Str::random(8)),
             'customer_id' => $actor->id,
             'package_id' => $pkg->id,
             'travel_date' => $data['travelDate'] ?? now()->toDateString(),
-            'guests' => (int) ($data['guests'] ?? 1),
+            'guests' => $guests,
             'contact_name' => $data['contactName'] ?? $actor->name,
             'contact_phone' => $data['contactPhone'] ?? $actor->phone,
+            'pickup_text' => $data['pickupText'] ?? null,
             'notes' => $data['notes'] ?? null,
-            'quote_paise' => $price,
+            'quote_paise' => $total,
             'payment_status' => 'unpaid',
             'status' => 'created',
             'created_at' => now(),
             'updated_at' => now(),
-        ]);
+        ], fn ($key) => Schema::hasColumn('travel_bookings', $key), ARRAY_FILTER_USE_KEY));
         $row = DB::table('travel_bookings')->where('id', $id)->first();
 
         return $this->presentTravelBooking($row, $pkg);
@@ -736,16 +801,24 @@ class AppSurfaceService
         ]);
         $row = DB::table('travel_bookings')->where('id', $id)->first();
         $pkg = DB::table('travel_packages')->where('id', $row->package_id)->first();
+        $rideId = $this->attachTravelRideBooking($actor, $row, $pkg);
+        if ($rideId && Schema::hasColumn('travel_bookings', 'ride_booking_id')) {
+            DB::table('travel_bookings')->where('id', $id)->update(['ride_booking_id' => $rideId, 'updated_at' => now()]);
+            $row = DB::table('travel_bookings')->where('id', $id)->first();
+        }
 
         return $this->presentTravelBooking($row, $pkg);
     }
 
     public function bulkCatalog(): array
     {
+        BulkSchema::ensure();
         $events = [
-            ['key' => 'WEDDING', 'label' => 'Wedding'],
-            ['key' => 'CORPORATE', 'label' => 'Corporate'],
-            ['key' => 'PILGRIMAGE', 'label' => 'Pilgrimage'],
+            ['key' => 'CORPORATE', 'label' => 'Corporate Events'],
+            ['key' => 'EMPLOYEE', 'label' => 'Employee Transport'],
+            ['key' => 'WEDDING', 'label' => 'Wedding Events'],
+            ['key' => 'SCHOOL', 'label' => 'School & College Trips'],
+            ['key' => 'TOUR', 'label' => 'Tour Groups'],
         ];
         $row = Schema::hasTable('system_settings') ? DB::table('system_settings')->where('key', 'bulk_event_types')->first() : null;
         if ($row?->value) {
@@ -754,60 +827,453 @@ class AppSurfaceService
                 $events = $decoded;
             }
         }
+        $advance = 30;
+        $advRow = Schema::hasTable('system_settings') ? DB::table('system_settings')->where('key', 'bulk_advance_percent')->first() : null;
+        if ($advRow?->value !== null && is_numeric($advRow->value)) {
+            $advance = (int) $advRow->value;
+        }
+        $options = [];
+        foreach ($this->bulkVehicleMeta() as $meta) {
+            $unit = $this->bulkUnitQuote($meta['key'], [
+                'eventKey' => 'CORPORATE',
+                'tripKind' => 'ONE_WAY',
+            ]);
+            if (($unit['perCabPaise'] ?? 0) <= 0) {
+                continue;
+            }
+            $options[] = array_merge($meta, $unit);
+        }
 
         return [
             'events' => $events,
-            'vehicles' => ['SEDAN', 'SUV', 'TRAVELLER'],
-            'advancePercent' => 30,
+            'vehicles' => array_column($options, 'key') ?: ['SEDAN', 'SUV', 'TRAVELLER'],
+            'options' => $options,
+            'advancePercent' => $advance,
             'tracking' => ['Request', 'Quotation', 'Accepted', 'Advance', 'Assignment', 'Trip', 'Final Invoice'],
         ];
     }
 
     public function bulkQuote(array $data): array
     {
-        $vehicles = max(1, (int) ($data['vehicles'] ?? 1));
-        $per = match ($data['category'] ?? 'TRAVELLER') {
-            'SEDAN' => 250000,
-            'SUV' => 350000,
-            default => 450000,
-        };
-        $subtotal = $per * $vehicles;
-        $gst = (int) round($subtotal * 0.05);
-        $total = $subtotal + $gst;
+        BulkSchema::ensure();
+        $lines = $this->bulkLinesFrom($data);
+        $quoted = [];
+        $base = 0;
+        $allow = 0;
+        $toll = 0;
+        $gst = 0;
+        $cabs = 0;
+        foreach ($lines as $line) {
+            $count = max(0, (int) ($line['count'] ?? 0));
+            if ($count < 1) {
+                continue;
+            }
+            $unit = $this->bulkUnitQuote((string) $line['category'], $data);
+            $per = (int) ($unit['perCabPaise'] ?? 0);
+            if ($per <= 0) {
+                continue;
+            }
+            $lineBase = $per * $count;
+            $lineAllow = ((int) ($unit['driverAllowPaise'] ?? 0)) * $count;
+            $lineToll = ((int) ($unit['tollPaise'] ?? 0)) * $count;
+            $lineGst = ((int) ($unit['gstPaise'] ?? 0)) * $count;
+            $lineTotal = $lineBase + $lineAllow + $lineToll + $lineGst;
+            $quoted[] = array_merge($unit, [
+                'category' => $unit['category'] ?? $line['category'],
+                'count' => $count,
+                'lineBasePaise' => $lineBase,
+                'lineTotalPaise' => $lineTotal,
+                'lineTotalRupees' => $lineTotal / 100,
+            ]);
+            $base += $lineBase;
+            $allow += $lineAllow;
+            $toll += $lineToll;
+            $gst += $lineGst;
+            $cabs += $count;
+        }
+        $options = [];
+        foreach ($this->bulkVehicleMeta() as $meta) {
+            $unit = $this->bulkUnitQuote($meta['key'], $data);
+            if (($unit['perCabPaise'] ?? 0) <= 0) {
+                continue;
+            }
+            $options[] = array_merge($meta, $unit);
+        }
+        $total = $base + $allow + $toll + $gst;
+        $advance = 30;
+        $advRow = Schema::hasTable('system_settings') ? DB::table('system_settings')->where('key', 'bulk_advance_percent')->first() : null;
+        if ($advRow?->value !== null && is_numeric($advRow->value)) {
+            $advance = (int) $advRow->value;
+        }
 
         return [
-            'vehicles' => $vehicles,
-            'category' => $data['category'] ?? 'TRAVELLER',
-            'subtotalPaise' => $subtotal,
+            'tripKind' => $this->bulkTripKind($data),
+            'vehicles' => max(1, $cabs),
+            'vehicleCount' => $cabs,
+            'lines' => $quoted,
+            'options' => $options,
+            'basePaise' => $base,
+            'driverAllowPaise' => $allow,
+            'tollPaise' => $toll,
             'gstPaise' => $gst,
+            'subtotalPaise' => $base + $allow + $toll,
             'totalPaise' => $total,
             'totalRupees' => $total / 100,
-            'advancePaise' => (int) round($total * 0.3),
+            'advancePaise' => (int) round($total * ($advance / 100)),
+            'advanceRupees' => round($total * ($advance / 100)) / 100,
+            'currency' => 'INR',
         ];
     }
 
     public function bulkCreate(User $actor, array $data): array
     {
+        BulkSchema::ensure();
         $quote = $this->bulkQuote($data);
+        $lines = $quote['lines'] ?? [];
+        $cabs = max(1, (int) ($quote['vehicleCount'] ?? 1));
+        $method = strtoupper((string) ($data['paymentMethod'] ?? $data['method'] ?? 'CASH'));
+        $ref = 'BLK'.random_int(1000000, 9999999);
         $payload = [
-            'public_ref' => strtoupper(Str::random(8)),
+            'public_ref' => $ref,
             'customer_id' => $actor->id,
-            'status' => 'requested',
+            'status' => 'confirmed',
             'created_at' => now(),
             'updated_at' => now(),
         ];
-        if (Schema::hasColumn('bulk_bookings', 'event_key')) {
-            $payload['event_key'] = $data['eventKey'] ?? 'WEDDING';
-        }
-        if (Schema::hasColumn('bulk_bookings', 'category')) {
-            $payload['category'] = $data['category'] ?? 'TRAVELLER';
-        }
-        if (Schema::hasColumn('bulk_bookings', 'quote_paise')) {
-            $payload['quote_paise'] = $quote['totalPaise'];
+        $map = [
+            'event_key' => $data['eventKey'] ?? 'CORPORATE',
+            'category' => $data['category'] ?? ($lines[0]['category'] ?? 'SEDAN'),
+            'trip_kind' => $quote['tripKind'] ?? 'ONE_WAY',
+            'quote_paise' => $quote['totalPaise'] ?? 0,
+            'pickup_text' => $data['pickupText'] ?? null,
+            'drop_text' => $data['dropText'] ?? null,
+            'pickup_lat' => $data['pickupLat'] ?? null,
+            'pickup_lng' => $data['pickupLng'] ?? null,
+            'drop_lat' => $data['dropLat'] ?? null,
+            'drop_lng' => $data['dropLng'] ?? null,
+            'event_date' => $data['eventDate'] ?? null,
+            'event_time' => $data['eventTime'] ?? null,
+            'vehicle_count' => $cabs,
+            'passengers' => $data['passengers'] ?? null,
+            'passengers_per_cab' => $data['passengersPerCab'] ?? null,
+            'requirements' => $data['requirements'] ?? null,
+            'lines_json' => json_encode($lines),
+            'quote_snapshot' => json_encode($quote),
+            'payment_method' => $method,
+            'payment_status' => 'paid',
+            'contact_name' => $data['contactName'] ?? $actor->name,
+            'contact_phone' => $data['contactPhone'] ?? $actor->phone,
+        ];
+        foreach ($map as $col => $value) {
+            if (Schema::hasColumn('bulk_bookings', $col)) {
+                $payload[$col] = $value;
+            }
         }
         $id = DB::table('bulk_bookings')->insertGetId($payload);
+        $row = DB::table('bulk_bookings')->where('id', $id)->first();
+        $rideId = $this->attachBulkRideBooking($actor, $row, $quote, $data);
+        if ($rideId && Schema::hasColumn('bulk_bookings', 'ride_booking_id')) {
+            DB::table('bulk_bookings')->where('id', $id)->update(['ride_booking_id' => $rideId, 'updated_at' => now()]);
+            $row = DB::table('bulk_bookings')->where('id', $id)->first();
+        }
 
-        return ['id' => (string) $id, 'ok' => true, 'quote' => $quote];
+        return $this->presentBulkBooking($row, $quote, $actor);
+    }
+
+    public function corporateCatalog(): array
+    {
+        CorporatePlanSchema::ensure();
+        $options = [];
+        foreach ([
+            ['key' => 'SEDAN', 'label' => 'Sedan', 'seats' => 4, 'blurb' => 'AC, Comfortable'],
+            ['key' => 'SUV', 'label' => 'SUV', 'seats' => 6, 'blurb' => 'Spacious & Premium'],
+            ['key' => 'TRAVELLER', 'label' => 'Traveller (12 Seater)', 'seats' => 12, 'blurb' => 'Best for team travel'],
+        ] as $meta) {
+            $unit = $this->bulkUnitQuote($meta['key'], ['tripKind' => 'ONE_WAY', 'eventKey' => 'CORPORATE']);
+            if (($unit['perCabPaise'] ?? 0) <= 0) {
+                continue;
+            }
+            $options[] = array_merge($meta, $unit);
+        }
+
+        return [
+            'categories' => [
+                ['key' => 'EMPLOYEE', 'label' => 'Employee Transport', 'icon' => 'groups'],
+                ['key' => 'EXECUTIVE', 'label' => 'Executive Travel', 'icon' => 'person'],
+                ['key' => 'CLIENT', 'label' => 'Client Visit Travel', 'icon' => 'handshake'],
+                ['key' => 'AIRPORT', 'label' => 'Airport Transfers', 'icon' => 'flight'],
+                ['key' => 'OUTSTATION', 'label' => 'Outstation Travel', 'icon' => 'map'],
+                ['key' => 'EVENT', 'label' => 'Event Transportation', 'icon' => 'event'],
+            ],
+            'purposes' => ['Client Meeting', 'Employee Transport', 'Executive Travel', 'Airport Transfer', 'Outstation', 'Event'],
+            'options' => $options,
+            'plans' => $this->corporatePlans(),
+            'benefits' => [
+                'GST Invoices & Reports',
+                'Dedicated Account Manager',
+                'Priority Booking & Support',
+                'Flexible Payment Options',
+                'Corporate Dashboard',
+                'Travel Policy & Approval System',
+            ],
+        ];
+    }
+
+    public function corporateQuote(array $data): array
+    {
+        CorporatePlanSchema::ensure();
+        $category = strtoupper((string) ($data['category'] ?? 'SEDAN'));
+        $vehicle = $this->bulkUnitQuote($category, $data);
+        $options = [];
+        foreach (['SEDAN', 'SUV', 'TRAVELLER'] as $key) {
+            $unit = $this->bulkUnitQuote($key, $data);
+            if (($unit['perCabPaise'] ?? 0) <= 0) {
+                continue;
+            }
+            $options[] = $unit;
+        }
+        $plan = $this->resolveCorporatePlan($data);
+        $vehicleBase = (int) ($vehicle['perCabPaise'] ?? 0);
+        $allow = (int) ($vehicle['driverAllowPaise'] ?? 0);
+        $toll = (int) ($vehicle['tollPaise'] ?? 0);
+        $mode = strtoupper((string) ($plan['pricingMode'] ?? 'VEHICLE'));
+        $base = $vehicleBase;
+        if ($mode === 'FIXED' && (int) ($plan['pricePaise'] ?? 0) > 0) {
+            $base = (int) $plan['pricePaise'];
+        }
+        $gstPct = (float) ($plan['gstPercent'] ?? 5);
+        $gst = (int) round(($base + $allow) * ($gstPct / 100));
+        $total = $base + $allow + $toll + $gst;
+
+        return [
+            'tripKind' => $this->bulkTripKind($data),
+            'category' => $category,
+            'vehicle' => $vehicle,
+            'options' => $options,
+            'plan' => $plan,
+            'basePaise' => $base,
+            'driverAllowPaise' => $allow,
+            'tollPaise' => $toll,
+            'gstPaise' => $gst,
+            'gstPercent' => $gstPct,
+            'totalPaise' => $total,
+            'totalRupees' => $total / 100,
+            'currency' => 'INR',
+        ];
+    }
+
+    public function corporateBook(User $actor, array $data): array
+    {
+        CorporatePlanSchema::ensure();
+        $quote = $this->corporateQuote($data);
+        $plan = $quote['plan'] ?? [];
+        $method = strtoupper((string) ($data['paymentMethod'] ?? 'CORPORATE'));
+        $ref = 'CORP'.random_int(1000000, 9999999);
+        $accountId = null;
+        if (Schema::hasTable('corporate_accounts') && Schema::hasColumn('corporate_accounts', 'owner_user_id')) {
+            $accountId = DB::table('corporate_accounts')->where('owner_user_id', $actor->id)->value('id');
+        }
+        $payload = [
+            'public_ref' => $ref,
+            'customer_id' => $actor->id,
+            'status' => 'confirmed',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ];
+        $map = [
+            'corporate_account_id' => $accountId,
+            'plan_id' => $plan['id'] ?? null,
+            'plan_key' => $plan['key'] ?? null,
+            'category' => $data['category'] ?? 'SEDAN',
+            'trip_kind' => $quote['tripKind'] ?? 'ONE_WAY',
+            'purpose' => $data['purpose'] ?? null,
+            'service_key' => $data['serviceKey'] ?? null,
+            'quote_paise' => $quote['totalPaise'] ?? 0,
+            'pickup_text' => $data['pickupText'] ?? null,
+            'drop_text' => $data['dropText'] ?? null,
+            'pickup_lat' => $data['pickupLat'] ?? null,
+            'pickup_lng' => $data['pickupLng'] ?? null,
+            'drop_lat' => $data['dropLat'] ?? null,
+            'drop_lng' => $data['dropLng'] ?? null,
+            'travel_date' => $data['travelDate'] ?? $data['eventDate'] ?? null,
+            'pickup_time' => $data['pickupTime'] ?? $data['eventTime'] ?? null,
+            'passengers' => $data['passengers'] ?? 1,
+            'passengers_json' => is_array($data['passengerNames'] ?? null) ? json_encode($data['passengerNames']) : ($data['passengerNames'] ?? null),
+            'requirements' => $data['requirements'] ?? null,
+            'quote_snapshot' => json_encode($quote),
+            'payment_method' => $method,
+            'payment_status' => 'paid',
+            'send_invoice' => ! empty($data['sendInvoice']),
+            'contact_name' => $data['contactName'] ?? $actor->name,
+            'contact_phone' => $data['contactPhone'] ?? $actor->phone,
+        ];
+        foreach ($map as $col => $value) {
+            if (Schema::hasColumn('corporate_travel_bookings', $col)) {
+                $payload[$col] = $value;
+            }
+        }
+        $id = DB::table('corporate_travel_bookings')->insertGetId($payload);
+        $row = DB::table('corporate_travel_bookings')->where('id', $id)->first();
+        $rideId = $this->attachCorporateRideBooking($actor, $row, $quote, $data, $accountId);
+        if ($rideId && Schema::hasColumn('corporate_travel_bookings', 'ride_booking_id')) {
+            DB::table('corporate_travel_bookings')->where('id', $id)->update(['ride_booking_id' => $rideId, 'updated_at' => now()]);
+            $row = DB::table('corporate_travel_bookings')->where('id', $id)->first();
+        }
+
+        return $this->presentCorporateBooking($row, $quote, $actor);
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function corporatePlans(): array
+    {
+        if (! Schema::hasTable('corporate_plans')) {
+            return [];
+        }
+        $q = DB::table('corporate_plans')->orderBy('sort_order')->orderBy('id');
+        if (Schema::hasColumn('corporate_plans', 'status')) {
+            $q->whereIn('status', ['PUBLISHED', 'published', 'ACTIVE', 'active']);
+        }
+
+        return $q->get()->map(fn ($row) => $this->presentCorporatePlan($row))->all();
+    }
+
+    private function presentCorporatePlan(object $row): array
+    {
+        $highlights = $this->decodeList($row->highlights ?? null);
+        if (! $highlights && is_string($row->highlights ?? null) && trim((string) $row->highlights) !== '') {
+            $highlights = array_values(array_filter(array_map('trim', preg_split('/\r\n|\n/', (string) $row->highlights) ?: [])));
+        }
+
+        return [
+            'id' => (string) $row->id,
+            'key' => $row->plan_key ?? ('PLAN'.$row->id),
+            'title' => $row->title,
+            'subtitle' => $row->subtitle,
+            'pricingMode' => $row->pricing_mode ?? 'VEHICLE',
+            'pricePaise' => (int) ($row->price_paise ?? 0),
+            'priceRupees' => ((int) ($row->price_paise ?? 0)) / 100,
+            'priceLabel' => $row->price_label,
+            'gstPercent' => (float) ($row->gst_percent ?? 5),
+            'highlights' => $highlights,
+            'sortOrder' => (int) ($row->sort_order ?? 0),
+            'status' => $row->status ?? 'PUBLISHED',
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function resolveCorporatePlan(array $data): array
+    {
+        $plans = $this->corporatePlans();
+        $id = (string) ($data['planId'] ?? '');
+        $key = strtoupper((string) ($data['planKey'] ?? ''));
+        foreach ($plans as $plan) {
+            if ($id !== '' && (string) $plan['id'] === $id) {
+                return $plan;
+            }
+            if ($key !== '' && strtoupper((string) $plan['key']) === $key) {
+                return $plan;
+            }
+        }
+
+        return $plans[0] ?? [
+            'id' => null,
+            'key' => 'ON_DEMAND',
+            'title' => 'On-Demand Booking',
+            'pricingMode' => 'VEHICLE',
+            'pricePaise' => 0,
+            'gstPercent' => 5,
+            'highlights' => [],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $quote
+     */
+    private function presentCorporateBooking(object $row, array $quote, User $actor): array
+    {
+        $total = (int) ($row->quote_paise ?? $quote['totalPaise'] ?? 0);
+
+        return [
+            'id' => (string) $row->id,
+            'ok' => true,
+            'publicRef' => $row->public_ref,
+            'status' => $row->status,
+            'statusLabel' => ucfirst((string) $row->status),
+            'plan' => $quote['plan'] ?? null,
+            'category' => $row->category ?? null,
+            'tripKind' => $row->trip_kind ?? 'ONE_WAY',
+            'purpose' => $row->purpose ?? null,
+            'pickupText' => $row->pickup_text ?? null,
+            'dropText' => $row->drop_text ?? null,
+            'travelDate' => $row->travel_date ?? null,
+            'pickupTime' => $row->pickup_time ?? null,
+            'passengers' => $row->passengers ?? null,
+            'passengerNames' => $this->decodeList($row->passengers_json ?? null),
+            'requirements' => $row->requirements ?? null,
+            'paymentMethod' => $row->payment_method ?? null,
+            'contactName' => $row->contact_name ?? $actor->name,
+            'contactPhone' => $row->contact_phone ?? $actor->phone,
+            'rideBookingId' => $row->ride_booking_id ?? null,
+            'quote' => $quote,
+            'fare' => [
+                'basePaise' => (int) ($quote['basePaise'] ?? 0),
+                'tollPaise' => (int) ($quote['tollPaise'] ?? 0),
+                'gstPaise' => (int) ($quote['gstPaise'] ?? 0),
+                'totalPaise' => $total,
+                'totalRupees' => $total / 100,
+                'currency' => 'INR',
+            ],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $quote
+     * @param  array<string, mixed>  $data
+     */
+    private function attachCorporateRideBooking(User $actor, object $corp, array $quote, array $data, mixed $accountId): ?int
+    {
+        if (! Schema::hasTable('bookings')) {
+            return null;
+        }
+        if (! empty($corp->ride_booking_id)) {
+            return (int) $corp->ride_booking_id;
+        }
+        $date = $corp->travel_date ?? $data['travelDate'] ?? null;
+        $time = (string) ($corp->pickup_time ?? $data['pickupTime'] ?? '10:00');
+        $parts = preg_split('/[:.]/', $time) ?: [];
+        $start = $date ? \Carbon\Carbon::parse((string) $date)->setTime((int) ($parts[0] ?? 10), (int) ($parts[1] ?? 0)) : now()->addDay();
+        $planTitle = is_array($quote['plan'] ?? null) ? (string) ($quote['plan']['title'] ?? '') : '';
+        $payload = array_filter([
+            'public_ref' => $corp->public_ref,
+            'customer_id' => $actor->id,
+            'corporate_account_id' => $accountId,
+            'product' => 'CORPORATE',
+            'category' => strtoupper((string) ($corp->category ?? 'SEDAN')),
+            'status' => 'CONFIRMED',
+            'pickup_text' => $corp->pickup_text ?? ($data['pickupText'] ?? 'Pickup'),
+            'drop_text' => $corp->drop_text ?? ($data['dropText'] ?? 'Drop'),
+            'pickup_lat' => $corp->pickup_lat ?? ($data['pickupLat'] ?? 25.8748),
+            'pickup_lng' => $corp->pickup_lng ?? ($data['pickupLng'] ?? 86.5961),
+            'drop_lat' => $corp->drop_lat ?? ($data['dropLat'] ?? 25.5941),
+            'drop_lng' => $corp->drop_lng ?? ($data['dropLng'] ?? 85.1376),
+            'quote_paise' => (int) ($corp->quote_paise ?? $quote['totalPaise'] ?? 0),
+            'scheduled_at' => $start,
+            'passenger_name' => $corp->contact_name ?? $actor->name,
+            'passenger_phone' => $corp->contact_phone ?? $actor->phone,
+            'instructions' => trim(($data['requirements'] ?? '')."\nCorporate ".$planTitle),
+            'start_otp' => (string) random_int(1000, 9999),
+            'end_otp' => (string) random_int(1000, 9999),
+            'payment_mode' => $corp->payment_method ?? 'CORPORATE',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ], fn ($key) => Schema::hasColumn('bookings', $key), ARRAY_FILTER_USE_KEY);
+
+        return (int) DB::table('bookings')->insertGetId($payload);
     }
 
     public function walletMe(User $actor): array
@@ -862,6 +1328,290 @@ class AppSurfaceService
             'ownerType' => $row->owner_type ?? $ownerType,
             'ledger' => $ledger,
         ];
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function bulkVehicleMeta(): array
+    {
+        return [
+            ['key' => 'SEDAN', 'label' => 'Sedan', 'seats' => 4, 'blurb' => 'AC, Comfortable', 'tag' => 'Best for small groups'],
+            ['key' => 'SUV', 'label' => 'SUV', 'seats' => 6, 'blurb' => 'AC, Spacious', 'tag' => 'Best for family & team'],
+            ['key' => 'TRAVELLER', 'label' => 'Traveller (12 Seater)', 'seats' => 12, 'blurb' => 'AC, Push Back Seats', 'tag' => 'Best for large groups'],
+            ['key' => 'TEMPO', 'label' => 'Tempo Traveller (17 Seater)', 'seats' => 17, 'blurb' => 'AC, Comfortable', 'tag' => 'Best for big groups'],
+        ];
+    }
+
+    private function bulkTripKind(array $data): string
+    {
+        $raw = strtoupper((string) ($data['tripKind'] ?? $data['product'] ?? 'ONE_WAY'));
+
+        return match ($raw) {
+            'ROUND', 'ROUND_TRIP', 'ROUND_WAY' => 'ROUND_WAY',
+            'MULTI', 'MULTI_STOP', 'MULTISTOP' => 'MULTI_STOP',
+            default => 'ONE_WAY',
+        };
+    }
+
+    /**
+     * @return list<array{category: string, count: int}>
+     */
+    private function bulkLinesFrom(array $data): array
+    {
+        $raw = $data['lines'] ?? null;
+        if (is_string($raw)) {
+            $raw = json_decode($raw, true);
+        }
+        $lines = [];
+        if (is_array($raw)) {
+            foreach ($raw as $row) {
+                if (! is_array($row)) {
+                    continue;
+                }
+                $cat = strtoupper((string) ($row['category'] ?? $row['key'] ?? ''));
+                $count = (int) ($row['count'] ?? $row['qty'] ?? 0);
+                if ($cat !== '' && $count > 0) {
+                    $lines[] = ['category' => $cat, 'count' => $count];
+                }
+            }
+        }
+        if ($lines) {
+            return $lines;
+        }
+        $count = max(1, (int) ($data['vehicleCount'] ?? $data['vehicles'] ?? 1));
+
+        return [['category' => strtoupper((string) ($data['category'] ?? 'SEDAN')), 'count' => $count]];
+    }
+
+    private function bulkFareCategory(string $category): string
+    {
+        $key = strtoupper($category);
+
+        return match ($key) {
+            'TEMPO', 'TEMPO_TRAVELLER', 'VAN' => 'TRAVELLER',
+            'CAR', 'HATCHBACK' => 'SEDAN',
+            default => $key,
+        };
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function bulkUnitQuote(string $category, array $data): array
+    {
+        $display = strtoupper($category);
+        $fareCat = $this->bulkFareCategory($display);
+        $meta = collect($this->bulkVehicleMeta())->firstWhere('key', $display)
+            ?? collect($this->bulkVehicleMeta())->firstWhere('key', $fareCat)
+            ?? ['key' => $display, 'label' => $display, 'seats' => 4, 'blurb' => '', 'tag' => ''];
+        $rule = $this->findBulkRateRule($display, $data) ?? $this->findBulkRateRule($fareCat, $data);
+        if ($rule) {
+            $per = $this->bulkRuleUnitPaise($rule);
+            $allow = (int) ($rule->driver_allow_paise ?? 0);
+            $toll = (int) ($rule->toll_parking_paise ?? $rule->toll_paise ?? 0);
+            $gstPct = (float) ($rule->gst_percent ?? 5);
+            $gst = (int) round(($per + $allow) * ($gstPct / 100));
+
+            return array_merge($meta, [
+                'category' => $display,
+                'perCabPaise' => $per,
+                'perCabRupees' => $per / 100,
+                'driverAllowPaise' => $allow,
+                'tollPaise' => $toll,
+                'gstPaise' => $gst,
+                'gstPercent' => $gstPct,
+                'source' => 'bulk_rate_rules',
+            ]);
+        }
+        $product = $this->bulkTripKind($data);
+        $fareInput = [
+            'product' => $product,
+            'category' => $fareCat,
+            'roundTrip' => $product === 'ROUND_WAY',
+        ];
+        $pLat = isset($data['pickupLat']) ? (float) $data['pickupLat'] : null;
+        $pLng = isset($data['pickupLng']) ? (float) $data['pickupLng'] : null;
+        $dLat = isset($data['dropLat']) ? (float) $data['dropLat'] : null;
+        $dLng = isset($data['dropLng']) ? (float) $data['dropLng'] : null;
+        if ($pLat && $pLng && $dLat && $dLng) {
+            $fareInput['distanceKm'] = max(1, Geo::haversineKm($pLat, $pLng, $dLat, $dLng));
+        }
+        try {
+            $quote = $this->fares->quote($fareInput);
+        } catch (\Throwable) {
+            return array_merge($meta, [
+                'category' => $display,
+                'perCabPaise' => 0,
+                'perCabRupees' => 0,
+                'driverAllowPaise' => 0,
+                'tollPaise' => 0,
+                'gstPaise' => 0,
+                'source' => 'none',
+            ]);
+        }
+        $bd = is_array($quote['breakdown'] ?? null) ? $quote['breakdown'] : [];
+        $total = (int) ($quote['totalPaise'] ?? 0);
+        $gst = (int) ($bd['gstPaise'] ?? 0);
+        $allow = (int) ($bd['driverAllowPaise'] ?? 0);
+        $toll = (int) (($bd['tollPaise'] ?? 0) + ($bd['parkingPaise'] ?? 0));
+        $per = max(0, $total - $gst - $allow - $toll);
+
+        return array_merge($meta, [
+            'category' => $display,
+            'perCabPaise' => $per > 0 ? $per : $total,
+            'perCabRupees' => ($per > 0 ? $per : $total) / 100,
+            'driverAllowPaise' => $allow,
+            'tollPaise' => $toll,
+            'gstPaise' => $gst,
+            'billedKm' => $quote['billedKm'] ?? null,
+            'source' => 'fare_rules',
+        ]);
+    }
+
+    private function findBulkRateRule(string $category, array $data): ?object
+    {
+        if (! Schema::hasTable('bulk_rate_rules')) {
+            return null;
+        }
+        $q = DB::table('bulk_rate_rules')->where('category', strtoupper($category));
+        if (Schema::hasColumn('bulk_rate_rules', 'active')) {
+            $q->where(function ($inner) {
+                $inner->where('active', 1)->orWhere('active', true);
+            });
+        }
+        $event = strtoupper((string) ($data['eventKey'] ?? ''));
+        if ($event !== '' && Schema::hasColumn('bulk_rate_rules', 'event_key')) {
+            $q->where(function ($inner) use ($event) {
+                $inner->where('event_key', $event)->orWhereNull('event_key')->orWhere('event_key', '');
+            });
+        }
+        $kind = $this->bulkTripKind($data);
+        if (Schema::hasColumn('bulk_rate_rules', 'trip_kind')) {
+            $q->where(function ($inner) use ($kind) {
+                $inner->where('trip_kind', $kind)->orWhereNull('trip_kind')->orWhere('trip_kind', '');
+            });
+        }
+        $rows = $q->get();
+        if ($rows->isEmpty()) {
+            return null;
+        }
+        $scored = $rows->sortByDesc(function ($row) use ($event, $kind) {
+            $score = 0;
+            if ($event !== '' && strtoupper((string) ($row->event_key ?? '')) === $event) {
+                $score += 2;
+            }
+            if (strtoupper((string) ($row->trip_kind ?? '')) === $kind) {
+                $score += 1;
+            }
+
+            return $score;
+        });
+
+        return $scored->first();
+    }
+
+    private function bulkRuleUnitPaise(object $rule): int
+    {
+        foreach (['per_vehicle_paise', 'price_paise', 'rate_paise', 'fare_paise', 'unit_paise'] as $col) {
+            if (isset($rule->{$col}) && (int) $rule->{$col} > 0) {
+                return (int) $rule->{$col};
+            }
+        }
+
+        return 0;
+    }
+
+    /**
+     * @param  array<string, mixed>  $quote
+     * @param  array<string, mixed>  $data
+     */
+    private function presentBulkBooking(object $row, array $quote, User $actor): array
+    {
+        $lines = $quote['lines'] ?? $this->decodeList($row->lines_json ?? null);
+        $total = (int) ($row->quote_paise ?? $quote['totalPaise'] ?? 0);
+
+        return [
+            'id' => (string) $row->id,
+            'ok' => true,
+            'publicRef' => $row->public_ref,
+            'status' => $row->status,
+            'statusLabel' => ucfirst((string) $row->status),
+            'eventKey' => $row->event_key ?? null,
+            'tripKind' => $row->trip_kind ?? ($quote['tripKind'] ?? 'ONE_WAY'),
+            'category' => $row->category ?? null,
+            'vehicleCount' => (int) ($row->vehicle_count ?? $quote['vehicleCount'] ?? 0),
+            'passengers' => $row->passengers ?? null,
+            'pickupText' => $row->pickup_text ?? null,
+            'dropText' => $row->drop_text ?? null,
+            'eventDate' => $row->event_date ?? null,
+            'eventTime' => $row->event_time ?? null,
+            'requirements' => $row->requirements ?? null,
+            'paymentMethod' => $row->payment_method ?? null,
+            'paymentStatus' => $row->payment_status ?? null,
+            'rideBookingId' => $row->ride_booking_id ?? null,
+            'contactName' => $row->contact_name ?? $actor->name,
+            'contactPhone' => $row->contact_phone ?? $actor->phone,
+            'lines' => $lines,
+            'quote' => $quote,
+            'fare' => [
+                'basePaise' => (int) ($quote['basePaise'] ?? 0),
+                'driverAllowPaise' => (int) ($quote['driverAllowPaise'] ?? 0),
+                'tollPaise' => (int) ($quote['tollPaise'] ?? 0),
+                'gstPaise' => (int) ($quote['gstPaise'] ?? 0),
+                'totalPaise' => $total,
+                'totalRupees' => $total / 100,
+                'currency' => 'INR',
+            ],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $quote
+     * @param  array<string, mixed>  $data
+     */
+    private function attachBulkRideBooking(User $actor, object $bulk, array $quote, array $data): ?int
+    {
+        if (! Schema::hasTable('bookings')) {
+            return null;
+        }
+        $existing = $bulk->ride_booking_id ?? null;
+        if ($existing) {
+            return (int) $existing;
+        }
+        $date = $bulk->event_date ?? $data['eventDate'] ?? null;
+        $time = (string) ($bulk->event_time ?? $data['eventTime'] ?? '08:00');
+        $parts = preg_split('/[:.]/', $time) ?: [];
+        $hour = (int) ($parts[0] ?? 8);
+        $minute = (int) ($parts[1] ?? 0);
+        $start = $date ? \Carbon\Carbon::parse((string) $date)->setTime($hour, $minute) : now()->addDay();
+        $lines = $quote['lines'] ?? [];
+        $summary = collect($lines)->map(fn ($line) => ($line['count'] ?? 1).'x '.($line['category'] ?? ''))->implode(', ');
+        $payload = array_filter([
+            'public_ref' => $bulk->public_ref,
+            'customer_id' => $actor->id,
+            'product' => 'BULK',
+            'category' => strtoupper((string) ($bulk->category ?? $data['category'] ?? 'SEDAN')),
+            'status' => 'CONFIRMED',
+            'pickup_text' => $bulk->pickup_text ?? ($data['pickupText'] ?? 'Pickup'),
+            'drop_text' => $bulk->drop_text ?? ($data['dropText'] ?? 'Drop'),
+            'pickup_lat' => $bulk->pickup_lat ?? ($data['pickupLat'] ?? 25.8748),
+            'pickup_lng' => $bulk->pickup_lng ?? ($data['pickupLng'] ?? 86.5961),
+            'drop_lat' => $bulk->drop_lat ?? ($data['dropLat'] ?? 25.5941),
+            'drop_lng' => $bulk->drop_lng ?? ($data['dropLng'] ?? 85.1376),
+            'quote_paise' => (int) ($bulk->quote_paise ?? $quote['totalPaise'] ?? 0),
+            'scheduled_at' => $start,
+            'passenger_name' => $bulk->contact_name ?? $actor->name,
+            'passenger_phone' => $bulk->contact_phone ?? $actor->phone,
+            'instructions' => trim(($data['requirements'] ?? '')."\nBulk fleet: ".$summary),
+            'start_otp' => (string) random_int(1000, 9999),
+            'end_otp' => (string) random_int(1000, 9999),
+            'payment_mode' => $bulk->payment_method ?? 'CASH',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ], fn ($key) => Schema::hasColumn('bookings', $key), ARRAY_FILTER_USE_KEY);
+
+        return (int) DB::table('bookings')->insertGetId($payload);
     }
 
     /**
@@ -980,6 +1730,142 @@ class AppSurfaceService
         ];
     }
 
+    private function presentTravelPackage(object $row): array
+    {
+        $price = (int) ($row->price_paise ?? 0);
+        $dates = $this->decodeList($row->available_dates ?? []);
+        $gallery = $this->decodeList($row->gallery ?? []);
+        $itinerary = $this->decodeList($row->itinerary ?? []);
+        $highlights = $this->decodeList($row->highlights ?? []);
+        if ($highlights === [] && is_string($row->highlights ?? null) && trim((string) $row->highlights) !== '') {
+            $highlights = preg_split('/\r\n|\n/', (string) $row->highlights) ?: [];
+        }
+        $vehicle = strtoupper((string) ($row->vehicle_category ?? 'SEDAN'));
+        $image = $row->image_url ?? ($gallery[0] ?? null);
+        $nights = (int) ($row->nights ?? 0);
+        $days = $nights > 0 ? $nights + 1 : (int) round(((int) ($row->duration_hours ?? 24)) / 24);
+
+        return [
+            'id' => (int) $row->id,
+            'kind' => 'travel',
+            'category' => $row->category,
+            'categoryLabel' => $row->category,
+            'title' => $row->title ?? $row->name,
+            'destination' => $row->destination,
+            'origin' => $row->origin ?? 'Saharsa, Bihar',
+            'region' => $row->region,
+            'places' => $row->places,
+            'durationHours' => $row->duration_hours,
+            'durationLabel' => $row->duration_label ?: ($nights > 0 ? $nights.'N / '.$days.'D' : (($row->duration_hours ?? 0).' hours')),
+            'nights' => $nights,
+            'kmIncluded' => $row->km_included,
+            'vehicleLabel' => $row->vehicle_label ?: match ($vehicle) {
+                'TRAVELLER' => 'Traveller',
+                'SUV' => 'SUV',
+                default => 'Private Cab',
+            },
+            'vehicleCategory' => $vehicle,
+            'driverLabel' => $row->driver_label ?? 'Dedicated driver',
+            'minPax' => (int) ($row->min_pax ?? 2),
+            'pricePaise' => $price,
+            'priceRupees' => $price / 100,
+            'inclusions' => $row->inclusions ?? '',
+            'exclusions' => $row->exclusions ?? '',
+            'highlights' => $highlights,
+            'itinerary' => $itinerary,
+            'gallery' => $gallery,
+            'imageUrl' => $image,
+            'popular' => (bool) ($row->popular ?? false),
+            'availableDates' => $dates,
+            'status' => $row->status ?? 'PUBLISHED',
+        ];
+    }
+
+    private function presentTravelBooking(object $row, ?object $pkg): array
+    {
+        $total = (int) ($row->quote_paise ?? 0);
+        $guests = (int) ($row->guests ?? 1);
+        $unit = $pkg ? (int) ($pkg->price_paise ?? 0) : (int) round($total / max(1, $guests) / 1.05);
+        $base = $unit * $guests;
+        $gst = max(0, $total - $base);
+
+        return [
+            'id' => (string) $row->id,
+            'publicRef' => $row->public_ref,
+            'status' => $row->status,
+            'statusLabel' => ucfirst((string) $row->status),
+            'paymentStatus' => $row->payment_status,
+            'paymentMethod' => $row->payment_method ?? null,
+            'guests' => $guests,
+            'travelDate' => $row->travel_date,
+            'pickupText' => $row->pickup_text ?? null,
+            'contactName' => $row->contact_name ?? null,
+            'contactPhone' => $row->contact_phone ?? null,
+            'rideBookingId' => $row->ride_booking_id ?? null,
+            'package' => $pkg ? $this->presentTravelPackage($pkg) : null,
+            'fare' => [
+                'basePaise' => $base,
+                'gstPaise' => $gst,
+                'totalPaise' => $total,
+                'totalRupees' => $total / 100,
+                'currency' => 'INR',
+            ],
+        ];
+    }
+
+    /**
+     * @return list<mixed>
+     */
+    private function decodeList(mixed $value): array
+    {
+        if (is_array($value)) {
+            return $value;
+        }
+        if (! is_string($value) || trim($value) === '') {
+            return [];
+        }
+        $decoded = json_decode($value, true);
+
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    private function attachTravelRideBooking(User $actor, object $travel, ?object $pkg): ?int
+    {
+        if (! Schema::hasTable('bookings')) {
+            return null;
+        }
+        $existing = $travel->ride_booking_id ?? null;
+        if ($existing) {
+            return (int) $existing;
+        }
+        $start = $travel->travel_date ? \Carbon\Carbon::parse((string) $travel->travel_date)->setTime(7, 0) : now()->addDay();
+        $payload = array_filter([
+            'public_ref' => $travel->public_ref,
+            'customer_id' => $actor->id,
+            'product' => 'TRAVEL',
+            'category' => strtoupper((string) ($pkg->vehicle_category ?? 'TRAVELLER')),
+            'status' => 'CONFIRMED',
+            'pickup_text' => $travel->pickup_text ?: ($pkg->origin ?? 'Pickup'),
+            'drop_text' => $pkg->destination ?? 'Tour',
+            'pickup_lat' => 25.8748,
+            'pickup_lng' => 86.5961,
+            'drop_lat' => 25.8748,
+            'drop_lng' => 86.5961,
+            'quote_paise' => (int) ($travel->quote_paise ?? 0),
+            'scheduled_at' => $start,
+            'passenger_name' => $travel->contact_name ?? $actor->name,
+            'passenger_phone' => $travel->contact_phone ?? $actor->phone,
+            'instructions' => $travel->notes ?? 'Travel & tour package',
+            'start_otp' => (string) random_int(1000, 9999),
+            'end_otp' => (string) random_int(1000, 9999),
+            'payment_mode' => $travel->payment_method ?? 'CASH',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ], fn ($key) => Schema::hasColumn('bookings', $key), ARRAY_FILTER_USE_KEY);
+
+        return (int) DB::table('bookings')->insertGetId($payload);
+    }
+
     private function presentCoupon(object $row): array
     {
         return [
@@ -989,51 +1875,6 @@ class AppSurfaceService
             'subtitle' => $row->subtitle,
             'kind' => $row->kind,
             'percent' => $row->percent,
-        ];
-    }
-
-    private function presentTravelPackage(object $row): array
-    {
-        $price = (int) ($row->price_paise ?? 0);
-        $dates = $row->available_dates ?? [];
-        if (is_string($dates)) {
-            $dates = json_decode($dates, true) ?: [];
-        }
-
-        return [
-            'id' => (int) $row->id,
-            'kind' => 'travel',
-            'category' => $row->category,
-            'title' => $row->title,
-            'destination' => $row->destination,
-            'places' => $row->places,
-            'durationHours' => $row->duration_hours,
-            'durationLabel' => $row->duration_label ?: (($row->duration_hours ?? 0).' hours'),
-            'kmIncluded' => $row->km_included,
-            'vehicleLabel' => $row->vehicle_label,
-            'driverLabel' => $row->driver_label ?? 'Dedicated driver',
-            'pricePaise' => $price,
-            'priceRupees' => $price / 100,
-            'inclusions' => $row->inclusions ?? '',
-            'exclusions' => $row->exclusions ?? '',
-            'availableDates' => $dates,
-            'status' => $row->status ?? 'PUBLISHED',
-        ];
-    }
-
-    private function presentTravelBooking(object $row, ?object $pkg): array
-    {
-        $total = (int) ($row->quote_paise ?? 0);
-
-        return [
-            'id' => (string) $row->id,
-            'publicRef' => $row->public_ref,
-            'status' => $row->status,
-            'paymentStatus' => $row->payment_status,
-            'guests' => $row->guests,
-            'travelDate' => $row->travel_date,
-            'package' => $pkg ? $this->presentTravelPackage($pkg) : null,
-            'fare' => ['totalPaise' => $total, 'totalRupees' => $total / 100, 'currency' => 'INR'],
         ];
     }
 }

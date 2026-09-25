@@ -98,6 +98,7 @@ final class BookingStatus
     {
         return match (strtoupper($status)) {
             self::PENDING => 'pending',
+            'CONFIRMED' => 'confirmed',
             self::SEARCHING, self::LEGACY_REQUESTED, 'DRIVER_SEARCHING' => 'driver_searching',
             self::DRIVER_ACCEPTED, self::LEGACY_ASSIGNED, 'DRIVER_ASSIGNED', 'DRIVER_ARRIVING' => 'driver_assigned',
             self::DRIVER_ARRIVED => 'driver_arrived',

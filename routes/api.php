@@ -25,6 +25,7 @@ Route::get('/v1/travel/packages', [PlatformController::class, 'travelPackages'])
 Route::get('/v1/travel/packages/{id}', [PlatformController::class, 'travelPackages']);
 Route::get('/v1/parcels/catalog', [PlatformController::class, 'parcelCatalog']);
 Route::get('/v1/bulk/catalog', [PlatformController::class, 'bulkCatalog']);
+Route::get('/v1/corporate/catalog', [PlatformController::class, 'corporateCatalog']);
 Route::get('/v1/ads/catalog', fn () => ['ok' => true, 'module' => 'ads']);
 Route::get('/v1/support/catalog', [PlatformController::class, 'supportFaqs']);
 Route::get('/v1/support/faqs', [PlatformController::class, 'supportFaqs']);
@@ -168,6 +169,7 @@ Route::middleware('jwt')->group(function () {
     Route::get('/v1/safety/bookings/{bookingId}/verify', fn () => ['ok' => true]);
     Route::patch('/v1/safety/emergency-contact', [AuthController::class, 'profile']);
     Route::post('/v1/parcels/quote', [PlatformController::class, 'parcelsQuote']);
+    Route::post('/v1/parcels/quote-options', [PlatformController::class, 'parcelsQuoteOptions']);
     Route::get('/v1/parcels', [PlatformController::class, 'parcelsList']);
     Route::post('/v1/parcels', [PlatformController::class, 'parcelsCreate']);
     Route::get('/v1/parcels/{id}', [PlatformController::class, 'parcelsOne']);
@@ -179,6 +181,8 @@ Route::middleware('jwt')->group(function () {
     Route::post('/v1/travel/bookings/{id}/pay', [PlatformController::class, 'travelPay']);
     Route::post('/v1/bulk/quote', [PlatformController::class, 'bulkQuote']);
     Route::post('/v1/bulk', [PlatformController::class, 'bulkCreate']);
+    Route::post('/v1/corporate/quote', [PlatformController::class, 'corporateQuote']);
+    Route::post('/v1/corporate/book', [PlatformController::class, 'corporateBook']);
 
     Route::get('/v1/operator/onboarding', [OperatorController::class, 'onboarding']);
     Route::put('/v1/operator/onboarding', [OperatorController::class, 'saveOnboarding']);

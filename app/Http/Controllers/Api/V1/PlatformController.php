@@ -163,10 +163,20 @@ class PlatformController extends Controller
                     'product' => $request->input('product', 'LOCAL_CAB'),
                     'category' => $vehicle['key'],
                 ]));
-                $catalogVehicle = Schema::hasTable('catalog_services')
-                    ? DB::table('catalog_services')->where('active', 1)->where('category_key', $vehicle['key'])->first()
-                    : null;
-                $image = '';
+            } catch (\Throwable $e) {
+                Log::notice('quote.option_skipped', ['category' => $vehicle['key'], 'message' => $e->getMessage()]);
+                continue;
+            }
+            $catalogVehicle = null;
+            $image = '';
+            try {
+                if (Schema::hasTable('catalog_services') && Schema::hasColumn('catalog_services', 'category_key')) {
+                    $catalogQuery = DB::table('catalog_services')->where('category_key', $vehicle['key']);
+                    if (Schema::hasColumn('catalog_services', 'active')) {
+                        $catalogQuery->where('active', 1);
+                    }
+                    $catalogVehicle = $catalogQuery->first();
+                }
                 if ($catalogVehicle && Schema::hasColumn('catalog_services', 'image_url')) {
                     $path = (string) ($catalogVehicle->image_url ?? '');
                     if ($path !== '') {
@@ -175,41 +185,42 @@ class PlatformController extends Controller
                             : rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnacab.in'), '/').'/'.ltrim($path, '/');
                     }
                 }
-                $billedKm = (float) ($quote['billedKm'] ?? $request->input('distanceKm') ?? 5);
-                $durationMinutes = max(1, (int) round($billedKm * 2.3));
-                $etaMinutes = match ($vehicle['key']) {
-                    'BIKE' => 3,
-                    'AUTO' => 4,
-                    'E_RICKSHAW' => 6,
-                    'MINI' => 5,
-                    'SEDAN' => 8,
-                    'SUV' => 8,
-                    'TRAVELLER' => 10,
-                    default => 7,
-                };
-                $blurbs = [
-                    'BIKE' => 'Best for single rider',
-                    'AUTO' => 'Quick & affordable',
-                    'E_RICKSHAW' => 'Eco-friendly ride',
-                    'MINI' => 'Best for small group',
-                    'SEDAN' => 'Comfortable & spacious',
-                    'SUV' => 'For family & group',
-                    'TRAVELLER' => 'Best for large group',
-                ];
-                $subtitle = trim((string) ($catalogVehicle?->subtitle ?? ''));
-                $options[] = array_merge($quote, [
-                    'label' => $catalogVehicle?->title ?? $vehicle['label'],
-                    'seats' => $vehicle['seats'],
-                    'icon' => $vehicle['key'],
-                    'imageUrl' => $image,
-                    'blurb' => $subtitle !== '' ? $subtitle : ($blurbs[$vehicle['key']] ?? ''),
-                    'etaMinutes' => $etaMinutes,
-                    'durationMinutes' => $durationMinutes,
-                    'distanceKm' => $billedKm,
-                ]);
             } catch (\Throwable $e) {
-                Log::notice('quote.option_skipped', ['category' => $vehicle['key'], 'message' => $e->getMessage()]);
+                Log::notice('quote.catalog_skipped', ['category' => $vehicle['key'], 'message' => $e->getMessage()]);
             }
+            $billedKm = (float) ($quote['billedKm'] ?? $request->input('distanceKm') ?? 5);
+            $routeMinutes = (int) ($request->input('durationMinutes') ?? 0);
+            $durationMinutes = $routeMinutes > 0 ? $routeMinutes : max(1, (int) round($billedKm * 2.3));
+            $etaMinutes = match ($vehicle['key']) {
+                'BIKE' => 3,
+                'AUTO' => 4,
+                'E_RICKSHAW' => 6,
+                'MINI' => 5,
+                'SEDAN' => 8,
+                'SUV' => 8,
+                'TRAVELLER' => 10,
+                default => 7,
+            };
+            $blurbs = [
+                'BIKE' => 'Best for single rider',
+                'AUTO' => 'Quick & affordable',
+                'E_RICKSHAW' => 'Eco-friendly ride',
+                'MINI' => 'Best for small group',
+                'SEDAN' => 'Comfortable & spacious',
+                'SUV' => 'For family & group',
+                'TRAVELLER' => 'Best for large group',
+            ];
+            $subtitle = trim((string) ($catalogVehicle?->subtitle ?? ''));
+            $options[] = array_merge($quote, [
+                'label' => $catalogVehicle?->title ?? $vehicle['label'],
+                'seats' => $vehicle['seats'],
+                'icon' => $vehicle['key'],
+                'imageUrl' => $image,
+                'blurb' => $subtitle !== '' ? $subtitle : ($blurbs[$vehicle['key']] ?? ''),
+                'etaMinutes' => $etaMinutes,
+                'durationMinutes' => $durationMinutes,
+                'distanceKm' => $billedKm,
+            ]);
         }
         usort($options, function ($a, $b) use ($requested) {
             $ak = strtoupper((string) ($a['category'] ?? ''));
@@ -776,6 +787,11 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
         return $this->surface->parcelQuote($request->all());
     }
 
+    public function parcelsQuoteOptions(Request $request)
+    {
+        return $this->surface->parcelQuoteOptions($request->all());
+    }
+
     public function parcelsOne(string $id)
     {
         return $this->surface->parcelOne($id);
@@ -834,6 +850,21 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
     public function bulkCreate(Request $request)
     {
         return $this->surface->bulkCreate($request->user(), $request->all());
+    }
+
+    public function corporateCatalog()
+    {
+        return $this->surface->corporateCatalog();
+    }
+
+    public function corporateQuote(Request $request)
+    {
+        return $this->surface->corporateQuote($request->all());
+    }
+
+    public function corporateBook(Request $request)
+    {
+        return $this->surface->corporateBook($request->user(), $request->all());
     }
 
     public function session(Request $request)

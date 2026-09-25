@@ -56,8 +56,8 @@ class FareService
         $waitingPaise = ((int) ($input['waitMinutes'] ?? 0)) * $rule->waiting_paise_per_min;
         $extraHours = $product === 'RENTAL' ? max(0, (int) ($input['extraHours'] ?? 0)) : 0;
         $rentalExtraPaise = $extraHours * ($rule->extra_hour_paise ?? 15000);
-        $stopCount = $product === 'MULTI_STOP' ? max(0, (int) ($input['stopCount'] ?? 0)) : 0;
-        $stopPaise = $stopCount * ($rule->stop_paise ?? 0);
+        $stopCount = in_array($product, ['MULTI_STOP', 'RENTAL'], true) ? max(0, (int) ($input['stopCount'] ?? 0)) : 0;
+        $stopPaise = $stopCount * ($rule->stop_paise ?? 5000);
         $nights = $product === 'ROUND_WAY' ? max(0, (int) ($input['nightStayNights'] ?? 0)) : 0;
         $nightStayPaise = $nights * ($rule->night_stay_paise ?? 0);
         $driverAllowPaise = $product === 'ROUND_WAY' ? (int) $rule->driver_allow_paise : 0;
@@ -90,6 +90,9 @@ class FareService
                 'parkingPaise' => $parking,
                 'gstPaise' => $gstPaise,
                 'discountPaise' => $discountPaise,
+                'stopPaise' => $stopPaise,
+                'extraHourPaise' => $rentalExtraPaise,
+                'driverAllowPaise' => $driverAllowPaise,
                 'totalPaise' => $totalPaise,
             ],
             'totalPaise' => $totalPaise,
@@ -162,7 +165,12 @@ class FareService
         }
         $poly = $response->json('routes.0.overview_polyline.points');
 
-        return ['distanceKm' => max(1, round($legKm, 2)), 'durationSeconds' => $seconds, 'polyline' => $poly];
+        return [
+            'distanceKm' => max(1, round($legKm, 2)),
+            'durationSeconds' => $seconds,
+            'durationMinutes' => max(1, (int) round($seconds / 60) ?: (int) max(1, round($legKm * 2))),
+            'polyline' => $poly,
+        ];
     }
 
     public function autocomplete(string $q, ?string $types = null): array
@@ -171,17 +179,29 @@ class FareService
         if ($key === '' || $q === '') {
             return ['suggestions' => []];
         }
-        $response = Http::timeout(8)->get('https://maps.googleapis.com/maps/api/place/autocomplete/json', [
+        $params = [
             'input' => $q,
             'key' => $key,
             'components' => 'country:in',
-            'types' => $types,
-        ]);
+            'language' => 'en',
+        ];
+        if (is_string($types) && trim($types) !== '') {
+            $params['types'] = $types;
+        }
+        $response = Http::timeout(8)->get('https://maps.googleapis.com/maps/api/place/autocomplete/json', $params);
 
-        return ['suggestions' => collect($response->json('predictions') ?? [])->map(fn ($row) => [
-            'placeId' => $row['place_id'] ?? null,
-            'description' => $row['description'] ?? '',
-        ])->all()];
+        return ['suggestions' => collect($response->json('predictions') ?? [])->map(function ($row) {
+            $fmt = is_array($row['structured_formatting'] ?? null) ? $row['structured_formatting'] : [];
+            $description = (string) ($row['description'] ?? '');
+
+            return [
+                'placeId' => $row['place_id'] ?? null,
+                'title' => (string) ($fmt['main_text'] ?? explode(',', $description)[0] ?? $description),
+                'subtitle' => (string) ($fmt['secondary_text'] ?? ''),
+                'address' => $description,
+                'description' => $description,
+            ];
+        })->all()];
     }
 
     public function placeDetails(string $placeId): array

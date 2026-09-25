@@ -63,6 +63,10 @@ class BookingService
 
         $timeout = $this->settings->requestTimeoutSeconds();
         $radius = $this->settings->radiusKm();
+        $product = strtoupper((string) ($dto['product'] ?? 'LOCAL_CAB'));
+        if ($product === 'RENTAL' && empty($dto['scheduledAt'])) {
+            $dto['scheduledAt'] = now()->addHour()->toIso8601String();
+        }
         $scheduled = ! empty($dto['scheduledAt']);
         $status = $scheduled ? 'CONFIRMED' : BookingStatus::SEARCHING;
 
@@ -112,6 +116,8 @@ class BookingService
             'end_otp' => (string) random_int(1000, 9999),
             'payment_mode' => $mode,
         ]));
+
+        $this->storeStops($booking, is_array($dto['stops'] ?? null) ? $dto['stops'] : []);
 
         if (! $scheduled) {
             $this->writeOffers($booking, $matches);
@@ -845,6 +851,46 @@ class BookingService
             return $booking;
         }
         abort(403, 'Forbidden');
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $stops
+     */
+    private function storeStops(Booking $booking, array $stops): void
+    {
+        if ($stops === [] || ! Schema::hasTable('booking_stops')) {
+            return;
+        }
+        foreach (array_values($stops) as $index => $stop) {
+            if (! is_array($stop)) {
+                continue;
+            }
+            $label = (string) ($stop['label'] ?? $stop['title'] ?? $stop['address'] ?? ('Stop '.($index + 1)));
+            $lat = isset($stop['lat']) ? (float) $stop['lat'] : null;
+            $lng = isset($stop['lng']) ? (float) $stop['lng'] : null;
+            if ($lat === null || $lng === null) {
+                continue;
+            }
+            $row = array_filter(
+                [
+                    'booking_id' => $booking->id,
+                    'label' => $label,
+                    'title' => $label,
+                    'address' => (string) ($stop['address'] ?? $label),
+                    'lat' => $lat,
+                    'lng' => $lng,
+                    'sort_order' => $index,
+                    'seq' => $index,
+                    'position' => $index,
+                    'created_at' => now(),
+                ],
+                fn ($key) => Schema::hasColumn('booking_stops', $key),
+                ARRAY_FILTER_USE_KEY,
+            );
+            if ($row !== []) {
+                DB::table('booking_stops')->insert($row);
+            }
+        }
     }
 
     /**
