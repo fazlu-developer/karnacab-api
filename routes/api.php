@@ -109,7 +109,7 @@ Route::middleware('jwt')->group(function () {
     Route::get('/v1/drivers/me/trips', [PlatformController::class, 'driversTrips']);
     Route::get('/v1/drivers/me/documents', [PlatformController::class, 'driversDocuments']);
     Route::get('/v1/drivers/me/incentives', fn () => ['incentives' => []]);
-    Route::get('/v1/drivers/me/ratings', fn () => ['ratings' => []]);
+    Route::get('/v1/drivers/me/ratings', [PlatformController::class, 'driversRatings']);
     Route::get('/v1/drivers/me/support', [PlatformController::class, 'driverSupport']);
     Route::post('/v1/drivers/me/support/tickets', [PlatformController::class, 'driverSupport']);
     Route::get('/v1/drivers/me/sos', fn () => ['ok' => true]);

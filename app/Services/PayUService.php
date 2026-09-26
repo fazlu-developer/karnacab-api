@@ -50,9 +50,12 @@ class PayUService
             'sdk' => [
                 'key' => $this->key(),
                 'txnid' => $txnid,
+                'transactionId' => $txnid,
                 'amount' => $amount,
                 'productinfo' => $productinfo,
+                'productInfo' => $productinfo,
                 'firstname' => $firstname,
+                'firstName' => $firstname,
                 'email' => $email,
                 'phone' => $phone,
                 'hash' => $hash,
@@ -127,8 +130,14 @@ HTML;
     {
         $hashString = (string) $request->input('hashString', '');
         $hashName = (string) $request->input('hashName', 'payment_hash');
-        abort_unless($hashString !== '', 422, 'hashString required');
-        abort_unless($this->salt() !== '', 422, 'PayU salt is not configured');
+        $missing = [];
+        if ($hashString === '') {
+            $missing[] = 'hashString';
+        }
+        if ($this->salt() === '') {
+            $missing[] = 'PAYU_SALT';
+        }
+        abort_if($missing !== [], 422, 'PayU missing parameter: '.implode(', ', $missing));
 
         return [
             'hashName' => $hashName,

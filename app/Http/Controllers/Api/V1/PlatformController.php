@@ -557,6 +557,11 @@ class PlatformController extends Controller
         return $this->drivers->documents($request->user());
     }
 
+    public function driversRatings(Request $request)
+    {
+        return $this->drivers->ratings($request->user());
+    }
+
     public function driversEarnings(Request $request)
     {
         return $this->drivers->earnings($request->user());

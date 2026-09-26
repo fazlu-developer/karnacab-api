@@ -53,9 +53,18 @@ class DriverOpsService
         $todayParcels = Schema::hasTable('parcel_shipments')
             ? DB::table('parcel_shipments')->where('driver_id', $driver->id)->where('status', 'delivered')->where('updated_at', '>=', $todayStart)->count()
             : 0;
-        $pending = $canReceive
-            ? count(app(\App\Services\BookingService::class)->offersForDriver($actor))
-            : 0;
+        $pending = 0;
+        $offerIds = [];
+        if ($canReceive) {
+            foreach (app(\App\Services\BookingService::class)->offersForDriver($actor) as $row) {
+                $offerIds[(string) ($row['id'] ?? '')] = true;
+            }
+        }
+        foreach ($this->scheduledOffers($actor) as $row) {
+            $offerIds[(string) ($row['id'] ?? '')] = true;
+        }
+        $pending = count(array_filter(array_keys($offerIds)));
+        $rating = $this->rideRatingAverage((int) $driver->id);
         $activeRide = \App\Models\Booking::query()
             ->where('driver_id', $driver->id)
             ->whereIn('status', \App\Support\BookingStatus::openForDriver())
@@ -113,7 +122,8 @@ class DriverOpsService
             'canReceiveOffers' => $canReceive,
             'offerBlockReason' => $canReceive ? null : ($blocked ? 'Account is blocked' : ($approved ? 'Tap Go online when you are ready.' : 'Complete KYC onboarding to go online.')),
             'nextStep' => $approved ? 'HOME' : ($kyc === 'under_review' ? 'KYC_REVIEW' : ($blocked ? 'KYC_BLOCKED' : 'KYC')),
-            'ratingAvg' => (float) $driver->rating_avg,
+            'ratingAvg' => (float) $rating['average'],
+            'ratingCount' => (int) $rating['count'],
             'vehicles' => $driver->vehicles,
             'documents' => $documents,
             'today' => [
@@ -148,62 +158,78 @@ class DriverOpsService
     public function offers(User $actor): array
     {
         $dash = $this->dashboard($actor);
-        if (! $dash['canReceiveOffers']) {
-            return ['offers' => []];
-        }
-        $rides = app(BookingService::class)->offersForDriver($actor);
+        $rides = [];
         $parcels = [];
-        if (Schema::hasTable('parcel_shipments')) {
-            $driver = Driver::query()->where('user_id', $actor->id)->first();
-            $lat = $actor->last_lat !== null ? (float) $actor->last_lat : null;
-            $lng = $actor->last_lng !== null ? (float) $actor->last_lng : null;
-            $radius = app(\App\Services\RideSettingsService::class)->radiusKm();
-            $parcels = DB::table('parcel_shipments')
-                ->whereNull('driver_id')
-                ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
-                ->where('created_at', '>=', now()->subMinutes(20))
-                ->orderByDesc('id')
-                ->limit(20)
-                ->get()
-                ->filter(function ($row) use ($driver, $lat, $lng, $radius) {
-                    if ($driver && Schema::hasColumn('parcel_shipments', 'pickup_lat') && $row->pickup_lat && $lat !== null) {
-                        $km = \App\Support\Geo::haversineKm($lat, $lng, (float) $row->pickup_lat, (float) $row->pickup_lng);
-                        if ($km > $radius) {
-                            return false;
+        if ($dash['canReceiveOffers']) {
+            $rides = app(BookingService::class)->offersForDriver($actor);
+            if (Schema::hasTable('parcel_shipments')) {
+                $driver = Driver::query()->where('user_id', $actor->id)->first();
+                $lat = $actor->last_lat !== null ? (float) $actor->last_lat : null;
+                $lng = $actor->last_lng !== null ? (float) $actor->last_lng : null;
+                $radius = app(\App\Services\RideSettingsService::class)->radiusKm();
+                $parcels = DB::table('parcel_shipments')
+                    ->whereNull('driver_id')
+                    ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
+                    ->where('created_at', '>=', now()->subMinutes(20))
+                    ->orderByDesc('id')
+                    ->limit(20)
+                    ->get()
+                    ->filter(function ($row) use ($driver, $lat, $lng, $radius) {
+                        if ($driver && Schema::hasColumn('parcel_shipments', 'pickup_lat') && $row->pickup_lat && $lat !== null) {
+                            $km = \App\Support\Geo::haversineKm($lat, $lng, (float) $row->pickup_lat, (float) $row->pickup_lng);
+                            if ($km > $radius) {
+                                return false;
+                            }
                         }
-                    }
-                    if ($driver?->state_id && Schema::hasColumn('users', 'state_id')) {
-                        // keep same-state when both known; skip filter if parcel has no geo state
-                    }
 
-                    return true;
-                })
-                ->map(fn ($row) => array_merge(app(AppSurfaceService::class)->presentParcel($row), [
-                    'actions' => ['accept', 'reject'],
-                ]))
-                ->values()
-                ->all();
+                        return true;
+                    })
+                    ->map(fn ($row) => array_merge(app(AppSurfaceService::class)->presentParcel($row), [
+                        'actions' => ['accept', 'reject'],
+                    ]))
+                    ->values()
+                    ->all();
+            }
+        }
+        $scheduled = $this->scheduledOffers($actor);
+        $merged = [];
+        foreach (array_merge($scheduled, $rides, $parcels) as $row) {
+            $key = ($row['kind'] ?? 'ride').':'.($row['id'] ?? '');
+            $merged[$key] = $row;
         }
 
-        return ['offers' => array_values(array_merge($rides, $parcels))];
+        return ['offers' => array_values($merged)];
     }
 
     public function trips(User $actor): array
     {
         $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
-        $rides = \App\Models\Booking::query()->where('driver_id', $driver->id)->orderByDesc('id')->limit(40)->get()->map(fn ($row) => [
-            'kind' => 'ride',
-            'id' => (string) $row->id,
-            'publicRef' => $row->public_ref,
-            'status' => $row->status,
-            'pickupText' => $row->pickup_text,
-            'dropText' => $row->drop_text,
-            'product' => $row->product,
-            'category' => $row->category,
-            'quotePaise' => (int) $row->quote_paise,
-            'quoteRupees' => ((int) $row->quote_paise) / 100,
-            'updatedAt' => optional($row->updated_at)?->toIso8601String(),
-        ])->all();
+        $rides = \App\Models\Booking::query()->where('driver_id', $driver->id)->orderByDesc('id')->limit(40)->get()->map(function ($row) {
+            $stars = null;
+            if (Schema::hasTable('booking_ratings')) {
+                $q = DB::table('booking_ratings')->where('booking_id', $row->id);
+                if (Schema::hasColumn('booking_ratings', 'from_role')) {
+                    $q->where('from_role', 'CUSTOMER');
+                }
+                $stars = $q->avg('stars');
+            }
+
+            return [
+                'kind' => 'ride',
+                'id' => (string) $row->id,
+                'publicRef' => $row->public_ref,
+                'status' => $row->status,
+                'pickupText' => $row->pickup_text,
+                'dropText' => $row->drop_text,
+                'product' => $row->product,
+                'category' => $row->category,
+                'quotePaise' => (int) $row->quote_paise,
+                'quoteRupees' => ((int) $row->quote_paise) / 100,
+                'scheduledAt' => optional($row->scheduled_at)?->toIso8601String(),
+                'updatedAt' => optional($row->updated_at)?->toIso8601String(),
+                'customerRating' => $stars !== null ? round((float) $stars, 1) : null,
+            ];
+        })->all();
         $parcels = [];
         if (Schema::hasTable('parcel_shipments')) {
             $parcels = DB::table('parcel_shipments')->where('driver_id', $driver->id)->orderByDesc('id')->limit(40)->get()->map(fn ($row) => [
@@ -455,6 +481,100 @@ class DriverOpsService
         }
 
         return ['id' => (string) $driver->id, 'kycStatus' => $driver->kyc_status];
+    }
+
+    public function ratings(User $actor): array
+    {
+        $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
+        $stats = $this->rideRatingAverage((int) $driver->id);
+        $ids = \App\Models\Booking::query()->where('driver_id', $driver->id)->pluck('id');
+        $list = [];
+        if ($ids->isNotEmpty() && Schema::hasTable('booking_ratings')) {
+            $q = DB::table('booking_ratings')->whereIn('booking_id', $ids);
+            if (Schema::hasColumn('booking_ratings', 'from_role')) {
+                $q->where('from_role', 'CUSTOMER');
+            }
+            $list = $q->orderByDesc('id')->limit(40)->get()->map(function ($row) {
+                $booking = \App\Models\Booking::query()->find($row->booking_id);
+
+                return [
+                    'id' => (string) $row->id,
+                    'stars' => (int) ($row->stars ?? 0),
+                    'comment' => $row->comment ?? null,
+                    'publicRef' => $booking?->public_ref,
+                    'pickupText' => $booking?->pickup_text,
+                    'dropText' => $booking?->drop_text,
+                    'createdAt' => $row->created_at,
+                ];
+            })->all();
+        }
+
+        return [
+            'average' => $stats['average'],
+            'count' => $stats['count'],
+            'ratings' => $list,
+        ];
+    }
+
+    /**
+     * @return array{average: float, count: int}
+     */
+    private function rideRatingAverage(int $driverId): array
+    {
+        $ids = \App\Models\Booking::query()->where('driver_id', $driverId)->pluck('id');
+        if ($ids->isEmpty() || ! Schema::hasTable('booking_ratings')) {
+            return ['average' => 0.0, 'count' => 0];
+        }
+        $q = DB::table('booking_ratings')->whereIn('booking_id', $ids);
+        if (Schema::hasColumn('booking_ratings', 'from_role')) {
+            $q->where('from_role', 'CUSTOMER');
+        }
+        $count = (int) (clone $q)->count();
+        $avg = $count > 0 ? round((float) (clone $q)->avg('stars'), 2) : 0.0;
+        if (Schema::hasColumn('drivers', 'rating_avg')) {
+            Driver::query()->where('id', $driverId)->update(['rating_avg' => $avg]);
+        }
+
+        return ['average' => $avg, 'count' => $count];
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function scheduledOffers(User $actor): array
+    {
+        $driver = Driver::query()->where('user_id', $actor->id)->with('vehicles')->first();
+        if (! $driver) {
+            return [];
+        }
+        $category = $driver->vehicles->first()?->category;
+        $rows = \App\Models\Booking::query()
+            ->whereNotNull('scheduled_at')
+            ->whereNotIn('status', \App\Support\BookingStatus::terminal())
+            ->where(function ($inner) use ($driver, $category) {
+                $inner->where('driver_id', $driver->id)
+                    ->orWhere(function ($open) use ($category) {
+                        $open->whereNull('driver_id')
+                            ->whereIn('status', array_merge(\App\Support\BookingStatus::searching(), ['CONFIRMED']));
+                        if ($category) {
+                            $open->where(function ($cat) use ($category) {
+                                $cat->where('category', $category)->orWhereNull('category');
+                            });
+                        }
+                    });
+            })
+            ->orderBy('scheduled_at')
+            ->limit(40)
+            ->get();
+
+        return $rows->map(function ($row) use ($actor) {
+            $presented = app(BookingService::class)->present($row, $actor);
+            $presented['kind'] = 'ride';
+            $presented['scheduled'] = true;
+            $presented['actions'] = $row->driver_id ? ['view'] : ['accept', 'reject'];
+
+            return $presented;
+        })->all();
     }
 
     private function upsertVehicle(Driver $driver, array $data): void

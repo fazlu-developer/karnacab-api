@@ -94,6 +94,8 @@ class KycDocumentService
             'originalName' => $doc->original_name,
             'mime' => $doc->mime,
             'previewUrl' => $this->previewUrl($doc->storage_key),
+            'fileUrl' => $this->previewUrl($doc->storage_key),
+            'label' => ucwords(strtolower(str_replace('_', ' ', (string) $doc->type))),
             'rejectionReason' => $doc->rejection_reason,
         ];
     }
