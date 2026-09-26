@@ -15,13 +15,13 @@ class PayUService
     {
         abort_unless($rupees >= 1, 422, 'Enter at least ₹1');
         abort_unless($rupees <= 50000, 422, 'Maximum top-up is ₹50,000');
+        abort_unless($this->key() !== '' && $this->salt() !== '', 422, 'PayU is not configured');
         $this->ensureTables();
         $txnid = 'KC'.strtoupper(Str::random(14));
         $amount = number_format($rupees, 2, '.', '');
-        $email = $actor->email && ! str_ends_with((string) $actor->email, '@otp.karnacab.local')
-            ? (string) $actor->email
-            : 'rider'.$actor->id.'@karnacab.in';
-        $firstname = $actor->name ?: 'Customer';
+        $email = $this->email($actor);
+        $firstname = $this->firstName($actor);
+        $phone = $this->phone($actor);
         $productinfo = 'KarnaCab wallet top-up';
         $hash = $this->requestHash($txnid, $amount, $productinfo, $firstname, $email);
         $payload = [
@@ -54,11 +54,21 @@ class PayUService
                 'productinfo' => $productinfo,
                 'firstname' => $firstname,
                 'email' => $email,
-                'phone' => (string) ($actor->phone ?: '9999999999'),
+                'phone' => $phone,
                 'hash' => $hash,
                 'surl' => $base.'/api/v1/payments/webhooks/payu',
                 'furl' => $base.'/api/v1/payments/webhooks/payu',
                 'environment' => env('PAYU_MODE', 'test') === 'live' ? '0' : '1',
+                'userCredential' => $this->key().':'.$email,
+                'android_surl' => $base.'/api/v1/payments/webhooks/payu',
+                'android_furl' => $base.'/api/v1/payments/webhooks/payu',
+                'ios_surl' => $base.'/api/v1/payments/webhooks/payu',
+                'ios_furl' => $base.'/api/v1/payments/webhooks/payu',
+                'udf1' => '',
+                'udf2' => '',
+                'udf3' => '',
+                'udf4' => '',
+                'udf5' => '',
             ],
         ];
     }
@@ -70,19 +80,20 @@ class PayUService
         $user = User::query()->find($row->user_id);
         abort_unless($user, 404, 'Customer not found');
         $amount = number_format(((int) $row->amount_paise) / 100, 2, '.', '');
-        $email = $user->email && ! str_ends_with((string) $user->email, '@otp.karnacab.local')
-            ? (string) $user->email
-            : 'rider'.$user->id.'@karnacab.in';
-        $firstname = e($user->name ?: 'Customer');
+        $email = $this->email($user);
+        $firstname = $this->firstName($user);
+        $phone = $this->phone($user);
         $productinfo = 'KarnaCab wallet top-up';
-        $hash = $this->requestHash($txnid, $amount, $productinfo, $user->name ?: 'Customer', $email);
+        $hash = $this->requestHash($txnid, $amount, $productinfo, $firstname, $email);
         $action = $this->payuUrl();
         $returnHost = rtrim((string) (request()?->getSchemeAndHttpHost() ?: config('app.url')), '/');
         $surl = $returnHost.'/api/v1/payments/webhooks/payu';
         $key = e($this->key());
-        $phone = e((string) ($user->phone ?: '9999999999'));
+        $firstnameEsc = e($firstname);
+        $phoneEsc = e($phone);
         $emailEsc = e($email);
         $txn = e($txnid);
+        $productEsc = e($productinfo);
 
         return <<<HTML
 <!DOCTYPE html>
@@ -93,18 +104,36 @@ class PayUService
     <input type="hidden" name="key" value="{$key}">
     <input type="hidden" name="txnid" value="{$txn}">
     <input type="hidden" name="amount" value="{$amount}">
-    <input type="hidden" name="productinfo" value="{$productinfo}">
-    <input type="hidden" name="firstname" value="{$firstname}">
+    <input type="hidden" name="productinfo" value="{$productEsc}">
+    <input type="hidden" name="firstname" value="{$firstnameEsc}">
     <input type="hidden" name="email" value="{$emailEsc}">
-    <input type="hidden" name="phone" value="{$phone}">
+    <input type="hidden" name="phone" value="{$phoneEsc}">
     <input type="hidden" name="surl" value="{$surl}">
     <input type="hidden" name="furl" value="{$surl}">
     <input type="hidden" name="hash" value="{$hash}">
+    <input type="hidden" name="udf1" value="">
+    <input type="hidden" name="udf2" value="">
+    <input type="hidden" name="udf3" value="">
+    <input type="hidden" name="udf4" value="">
+    <input type="hidden" name="udf5" value="">
     <input type="hidden" name="service_provider" value="payu_paisa">
   </form>
   <script>document.getElementById('payu').submit();</script>
 </body></html>
 HTML;
+    }
+
+    public function sdkHash(Request $request): array
+    {
+        $hashString = (string) $request->input('hashString', '');
+        $hashName = (string) $request->input('hashName', 'payment_hash');
+        abort_unless($hashString !== '', 422, 'hashString required');
+        abort_unless($this->salt() !== '', 422, 'PayU salt is not configured');
+
+        return [
+            'hashName' => $hashName,
+            'hash' => strtolower(hash('sha512', $hashString.$this->salt())),
+        ];
     }
 
     public function handleWebhook(Request $request): array
@@ -224,6 +253,30 @@ HTML;
         $seq = $this->salt().'|'.$status.'||||||'.implode('|', $udf).'|'.$email.'|'.$firstname.'|'.$productinfo.'|'.$amount.'|'.$txnid.'|'.$this->key();
 
         return hash_equals(strtolower(hash('sha512', $seq)), strtolower($hash));
+    }
+
+    private function email(User $actor): string
+    {
+        $email = (string) ($actor->email ?: '');
+        if ($email !== '' && ! str_ends_with($email, '@otp.karnacab.local') && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            return $email;
+        }
+
+        return 'rider'.$actor->id.'@karnacab.in';
+    }
+
+    private function firstName(User $actor): string
+    {
+        $name = preg_replace('/[^A-Za-z ]/', '', (string) ($actor->name ?: 'Customer')) ?: 'Customer';
+
+        return substr(trim($name), 0, 50) ?: 'Customer';
+    }
+
+    private function phone(User $actor): string
+    {
+        $digits = preg_replace('/\D/', '', (string) ($actor->phone ?: '')) ?: '9999999999';
+
+        return substr($digits, -10);
     }
 
     private function payuUrl(): string

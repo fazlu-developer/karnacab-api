@@ -96,9 +96,7 @@ class AppSurfaceService
         $code = strtoupper(trim((string) ($data['code'] ?? '')));
         $farePaise = (int) ($data['farePaise'] ?? $data['discountPaise'] ?? 0);
         $row = Schema::hasTable('coupons') ? DB::table('coupons')->whereRaw('UPPER(code) = ?', [$code])->where('active', 1)->first() : null;
-        if (! $row) {
-            return ['ok' => false, 'message' => 'Coupon not found', 'discountPaise' => 0, 'payablePaise' => $farePaise];
-        }
+        abort_unless($row, 422, 'Coupon not found');
         $discount = (int) ($row->amount_paise ?? 0);
         if (($row->kind ?? 'percent') === 'percent') {
             $discount = (int) floor($farePaise * ((int) ($row->percent ?? 0)) / 100);

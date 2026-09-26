@@ -128,7 +128,10 @@ class FareService
         return [
             'rideTypes' => config('karnacab.ride_types'),
             'vehicleTypes' => config('karnacab.vehicle_types'),
-            'rentalHours' => [2, 4, 6, 8, 12],
+            'rentalHours' => array_values(array_unique(array_filter(array_map(
+                fn ($row) => (int) ($row['hours'] ?? 0),
+                $this->rentalPackages(),
+            )))) ?: [2, 4, 6, 8, 12],
             'rentalPackages' => $this->rentalPackages(),
             'schedule' => ['reminderMinutes' => 60],
             'transfer' => [

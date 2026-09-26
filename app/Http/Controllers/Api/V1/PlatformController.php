@@ -291,7 +291,7 @@ class PlatformController extends Controller
             ->where('user_id', $request->user()->id)
             ->where('kind', $kind)
             ->orderByDesc('id')
-            ->when($kind === 'RECENT', fn ($q) => $q->limit(5))
+            ->when($kind === 'RECENT', fn ($q) => $q->limit(8))
             ->get();
         $key = $kind === 'SAVED' ? 'saved' : 'recents';
 
@@ -336,7 +336,13 @@ class PlatformController extends Controller
             UserPlace::query()
                 ->where('user_id', $request->user()->id)
                 ->where('kind', 'RECENT')
-                ->where('title', $title)
+                ->where(function ($query) use ($title, $data) {
+                    $query->where('title', $title)
+                        ->orWhere(function ($inner) use ($data) {
+                            $inner->whereRaw('ROUND(lat, 4) = ?', [round((float) $data['lat'], 4)])
+                                ->whereRaw('ROUND(lng, 4) = ?', [round((float) $data['lng'], 4)]);
+                        });
+                })
                 ->delete();
         }
         $place = UserPlace::query()->create($payload);
@@ -345,7 +351,7 @@ class PlatformController extends Controller
                 ->where('user_id', $request->user()->id)
                 ->where('kind', 'RECENT')
                 ->orderByDesc('id')
-                ->limit(5)
+                ->limit(8)
                 ->pluck('id');
             UserPlace::query()
                 ->where('user_id', $request->user()->id)
@@ -653,6 +659,11 @@ class PlatformController extends Controller
         return response(app(\App\Services\PayUService::class)->checkoutPage($txnid), 200, [
             'Content-Type' => 'text/html; charset=UTF-8',
         ]);
+    }
+
+    public function payuHash(Request $request)
+    {
+        return app(\App\Services\PayUService::class)->sdkHash($request);
     }
 
     public function payuWebhook(Request $request)
