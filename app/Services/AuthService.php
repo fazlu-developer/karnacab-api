@@ -333,7 +333,14 @@ class AuthService
         } elseif ($user->role === 'DRIVER') {
             $kyc = strtolower((string) ($user->driver?->kyc_status ?? 'pending'));
             if (in_array($kyc, ['verified', 'approved', 'active'], true)) {
-                $next = (! $needsLocation && ! $inArea) ? 'COMING_SOON' : 'HOME';
+                $hasVehicle = Schema::hasTable('vehicles')
+                    && $user->driver
+                    && DB::table('vehicles')->where('driver_id', $user->driver->id)->exists();
+                if (! $hasVehicle) {
+                    $next = 'NEED_VEHICLE';
+                } else {
+                    $next = (! $needsLocation && ! $inArea) ? 'COMING_SOON' : 'HOME';
+                }
             } elseif ($kyc === 'under_review') {
                 $next = 'KYC_REVIEW';
             } elseif (in_array($kyc, ['rejected', 'suspended'], true)) {
@@ -347,6 +354,10 @@ class AuthService
             $next = 'LOCATION';
         } elseif ($user->role === 'CUSTOMER') {
             $next = 'HOME';
+        }
+
+        if ($user->role === 'DRIVER' && in_array(strtolower((string) ($user->driver?->kyc_status ?? '')), ['verified', 'approved', 'active'], true)) {
+            $this->sendWelcomeMail($user, 'welcome-mail-driver-kyc');
         }
 
         return [
@@ -383,7 +394,10 @@ class AuthService
             'serviceStates' => ServiceArea::states(),
             'comingSoon' => $needsLocation || ($user->role === 'DRIVER' && ! $needsLocation && ! $inArea),
             'detectedState' => $area['state'],
-            'message' => $area['message'],
+            'message' => $next === 'NEED_VEHICLE'
+                ? 'Please contact admin to assign a vehicle before you can go online.'
+                : $area['message'],
+            'needVehicle' => $next === 'NEED_VEHICLE',
         ];
     }
 
@@ -440,12 +454,12 @@ class AuthService
             abort_if($taken, 409, 'Email already registered');
             $payload['email'] = $email;
         }
-        $emailChanged = isset($payload['email']) && $payload['email'] !== $user->email;
+        $emailChanged = isset($payload['email']) && strtolower((string) $payload['email']) !== strtolower((string) $user->email);
+        if ($emailChanged) {
+            abort(422, 'Verify the new email with OTP before it is updated.');
+        }
         if ($payload) {
             $user->update($payload);
-        }
-        if ($emailChanged || (isset($payload['email']) && $user->wasChanged('email'))) {
-            $this->sendWelcomeMail($user->fresh());
         }
 
         return $this->present($user->fresh());
@@ -457,20 +471,23 @@ class AuthService
         abort_unless(filter_var($email, FILTER_VALIDATE_EMAIL), 422, 'Enter a valid email address');
         $taken = User::query()->where('email', $email)->where('id', '!=', $user->id)->exists();
         abort_if($taken, 409, 'Email already registered');
-        $code = (string) random_int(100000, 999999);
+        $demo = filter_var(env('STATIC_TEST_OTP_ENABLED', false), FILTER_VALIDATE_BOOLEAN);
+        $code = $demo ? (string) env('DEMO_OTP_CODE', '123456') : (string) random_int(100000, 999999);
         Cache::put('email-otp:'.$user->id.':'.$email, hash('sha256', $user->id.':'.$email.':'.$code), 300);
         try {
             Mail::to($email)->send(new EmailVerifyOtpMail($code));
         } catch (\Throwable $e) {
             Log::warning('email.otp_failed', ['userId' => $user->id, 'error' => $e->getMessage()]);
-            abort(422, 'Could not send the verification email. Try again.');
+            if (! $demo) {
+                abort(422, 'Could not send the verification email. Try again.');
+            }
         }
 
         $payload = [
             'ok' => true,
             'expiresInSeconds' => 300,
         ];
-        if (config('app.debug')) {
+        if (config('app.debug') || $demo) {
             $payload['devCode'] = $code;
         }
 
@@ -483,6 +500,10 @@ class AuthService
         $code = preg_replace('/\D+/', '', $code) ?? '';
         $hash = Cache::get('email-otp:'.$user->id.':'.$email);
         $matches = is_string($hash) && hash_equals($hash, hash('sha256', $user->id.':'.$email.':'.$code));
+        $demo = filter_var(env('STATIC_TEST_OTP_ENABLED', false), FILTER_VALIDATE_BOOLEAN);
+        if (! $matches && $demo && hash_equals((string) env('DEMO_OTP_CODE', '123456'), $code)) {
+            $matches = true;
+        }
         abort_unless($matches, 422, 'Invalid email verification code');
         $taken = User::query()->where('email', $email)->where('id', '!=', $user->id)->exists();
         abort_if($taken, 409, 'Email already registered');
@@ -494,13 +515,13 @@ class AuthService
         return $this->present($fresh) + ['emailVerified' => true];
     }
 
-    public function sendWelcomeMail(User $user): void
+    public function sendWelcomeMail(User $user, string $lockKey = 'welcome-mail'): void
     {
         $email = (string) $user->email;
         if ($email === '' || str_ends_with($email, '@otp.karnacab.local')) {
             return;
         }
-        $lock = 'welcome-mail:'.$user->id;
+        $lock = $lockKey.':'.$user->id;
         if (! Cache::add($lock, 1, now()->addYear())) {
             return;
         }

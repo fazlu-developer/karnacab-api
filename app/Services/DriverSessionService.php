@@ -43,6 +43,27 @@ class DriverSessionService
         }
     }
 
+    public function bumpSession(User $user, bool $suspend = false): void
+    {
+        $this->ensureColumns();
+        $updates = ['updated_at' => now()];
+        if (Schema::hasColumn('users', 'session_epoch')) {
+            $updates['session_epoch'] = ((int) ($user->session_epoch ?? 0)) + 1;
+        }
+        if (Schema::hasColumn('users', 'force_logout_pending')) {
+            $updates['force_logout_pending'] = 0;
+        }
+        if ($suspend && Schema::hasColumn('users', 'status')) {
+            $updates['status'] = 'SUSPENDED';
+        }
+        User::query()->where('id', $user->id)->update($updates);
+        Driver::query()->where('user_id', $user->id)->update([
+            'online' => 0,
+            'duty_status' => 'offline',
+            'updated_at' => now(),
+        ]);
+    }
+
     public function deactivateOrDefer(User $user, Driver $driver, string $reason): string
     {
         $this->ensureColumns();

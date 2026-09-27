@@ -97,6 +97,29 @@ class AppSurfaceService
         $code = strtoupper(trim((string) ($data['code'] ?? '')));
         $farePaise = (int) ($data['farePaise'] ?? $data['discountPaise'] ?? 0);
         $row = Schema::hasTable('coupons') ? DB::table('coupons')->whereRaw('UPPER(code) = ?', [$code])->where('active', 1)->first() : null;
+        if (! $row && Schema::hasTable('cms_home_offers')) {
+            $offerQ = DB::table('cms_home_offers');
+            $offerQ->where(function ($inner) use ($code) {
+                if (Schema::hasColumn('cms_home_offers', 'coupon_code')) {
+                    $inner->orWhereRaw('UPPER(coupon_code) = ?', [$code]);
+                }
+                if (Schema::hasColumn('cms_home_offers', 'code')) {
+                    $inner->orWhereRaw('UPPER(code) = ?', [$code]);
+                }
+            });
+            $offer = $offerQ->first();
+            if ($offer) {
+                $row = (object) [
+                    'code' => $code,
+                    'title' => $offer->title ?? 'Offer',
+                    'amount_paise' => $offer->amount_paise ?? 0,
+                    'kind' => $offer->kind ?? 'percent',
+                    'percent' => $offer->percent ?? 10,
+                    'max_discount_paise' => $offer->max_discount_paise ?? 0,
+                    'subtitle' => $offer->subtitle ?? 'Coupon applied',
+                ];
+            }
+        }
         abort_unless($row, 422, 'Coupon not found');
         $discount = (int) ($row->amount_paise ?? 0);
         if (($row->kind ?? 'percent') === 'percent') {
@@ -1335,7 +1358,7 @@ class AppSurfaceService
                 'transactionId' => $item->public_ref ?? ('WL'.$item->id),
                 'kind' => $item->kind ?? 'entry',
                 'type' => $item->kind ?? 'entry',
-                'direction' => $item->direction ?? '',
+                'direction' => strtolower((string) ($item->direction ?? '')),
                 'amountPaise' => (int) ($item->amount_paise ?? 0),
                 'amountRupees' => ((int) ($item->amount_paise ?? 0)) / 100,
                 'commissionPaise' => (int) ($item->commission_paise ?? 0),

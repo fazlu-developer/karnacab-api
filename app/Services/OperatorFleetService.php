@@ -368,6 +368,7 @@ class OperatorFleetService
         ]);
         $this->openAssignment($fleet, $vehicleId, $driverId, $actor->id, $reason ?? 'assigned');
         $this->audit($actor, $fleet, 'driver.assigned', 'vehicle', $vehicleId, ['driverId' => $vehicle->driver_id], ['driverId' => $driverId]);
+        $this->restoreDriverAccount($driverId);
 
         return $this->vehicle($actor, $vehicleId);
     }
@@ -383,6 +384,9 @@ class OperatorFleetService
             'updated_at' => now(),
         ]);
         $this->audit($actor, $fleet, 'driver.unassigned', 'vehicle', $vehicleId, ['driverId' => $vehicle->driver_id], null);
+        if ($vehicle->driver_id) {
+            $this->kickDriverSession((int) $vehicle->driver_id);
+        }
 
         return $this->vehicle($actor, $vehicleId);
     }
@@ -617,17 +621,22 @@ class OperatorFleetService
                 $percent = (float) $rule->percent;
             }
         }
-        $commissionTotal = (int) round($grossTotal * $percent / 100);
+        $commissionTotal = (int) round($grossTotal * 0.10);
+        $fleetCommission = (int) round($grossTotal * 0.05);
 
         return [
             'todayRupees' => $grossToday / 100,
             'weeklyRupees' => $grossWeek / 100,
             'monthlyRupees' => $grossMonth / 100,
             'totalRupees' => $grossTotal / 100,
-            'commissionPercent' => $percent,
-            'commissionRupees' => $commissionTotal / 100,
-            'netRupees' => ($grossTotal - $commissionTotal) / 100,
-            'pendingSettlementRupees' => ($grossTotal - $commissionTotal) / 100,
+            'adminCommissionPercent' => 10,
+            'fleetCommissionPercent' => 5,
+            'commissionPercent' => 5,
+            'commissionRupees' => $fleetCommission / 100,
+            'adminCommissionRupees' => $commissionTotal / 100,
+            'fleetCommissionRupees' => $fleetCommission / 100,
+            'netRupees' => $fleetCommission / 100,
+            'pendingSettlementRupees' => $fleetCommission / 100,
             'paidSettlementRupees' => 0,
         ];
     }
@@ -1160,6 +1169,30 @@ class OperatorFleetService
             $payload['created_at'] = now();
             DB::table($table)->insert($payload);
         }
+    }
+
+    private function kickDriverSession(int $driverId): void
+    {
+        $driver = DB::table('drivers')->where('id', $driverId)->first();
+        if (! $driver) {
+            return;
+        }
+        $user = User::query()->find($driver->user_id);
+        if ($user) {
+            app(DriverSessionService::class)->bumpSession($user, false);
+        }
+    }
+
+    private function restoreDriverAccount(int $driverId): void
+    {
+        $driver = DB::table('drivers')->where('id', $driverId)->first();
+        if (! $driver) {
+            return;
+        }
+        DB::table('users')->where('id', $driver->user_id)->where('status', 'SUSPENDED')->update([
+            'status' => 'ACTIVE',
+            'updated_at' => now(),
+        ]);
     }
 
     /**

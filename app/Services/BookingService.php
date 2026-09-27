@@ -62,6 +62,19 @@ class BookingService
             'pickupLat' => $pickupLat,
             'pickupLng' => $pickupLng,
         ]);
+        $couponCode = strtoupper(trim((string) ($dto['couponCode'] ?? $dto['coupon_code'] ?? '')));
+        if ($couponCode !== '') {
+            try {
+                $preview = app(AppSurfaceService::class)->previewCoupon($actor, [
+                    'code' => $couponCode,
+                    'farePaise' => (int) ($quote['totalPaise'] ?? 0),
+                ]);
+                $quote['totalPaise'] = (int) ($preview['payablePaise'] ?? $quote['totalPaise']);
+                $quote['coupon'] = $preview;
+            } catch (\Throwable) {
+                abort(422, 'Coupon could not be applied.');
+            }
+        }
 
         $timeout = $this->settings->requestTimeoutSeconds();
         $radius = $this->settings->radiusKm();
@@ -202,18 +215,27 @@ class BookingService
     public function accept(User $actor, string $id): array
     {
         abort_unless($actor->role === 'DRIVER', 403, 'Only drivers can accept bookings');
-        $this->expireSearching();
+        $this->expireSearching((int) $id);
         $driver = Driver::query()->where('user_id', $actor->id)->with('vehicles')->firstOrFail();
-        abort_unless((bool) $driver->online, 422, 'Driver is no longer available.');
-        abort_unless(in_array(strtolower((string) $driver->duty_status), ['online'], true), 422, 'Driver is no longer available.');
         $busy = Booking::query()->where('driver_id', $driver->id)->whereIn('status', BookingStatus::openForDriver())->exists();
-        abort_if($busy, 422, 'Driver is no longer available.');
-
-        $vehicle = $driver->vehicles->first();
-        abort_unless($vehicle, 422, 'Add a vehicle before accepting rides.');
+        abort_if($busy, 422, 'Finish your current trip before accepting another booking.');
+        $duty = strtolower((string) ($driver->duty_status ?? 'online'));
+        if ($duty === 'on_trip' || $duty === 'busy' || $duty === '') {
+            $driver->update(['duty_status' => 'online', 'online' => 1]);
+            $driver->refresh();
+        }
+        abort_unless((bool) $driver->online, 422, 'Go online before accepting bookings.');
+        abort_unless(in_array(strtolower((string) $driver->duty_status), ['online', 'available'], true), 422, 'Go online before accepting bookings.');
 
         $preview = Booking::query()->find($id);
         abort_unless($preview, 404, 'Booking not found');
+        $vehicles = $driver->vehicles;
+        if ($vehicles->isEmpty()) {
+            $vehicles = \App\Models\Vehicle::query()->where('driver_id', $driver->id)->get();
+        }
+        $wanted = strtoupper((string) $preview->category);
+        $vehicle = $vehicles->first(fn ($row) => strtoupper((string) $row->category) === $wanted) ?? $vehicles->first();
+        abort_unless($vehicle, 422, 'Add a vehicle before accepting rides.');
         $wallet = Schema::hasTable('wallets')
             ? DB::table('wallets')->where('owner_user_id', $actor->id)->where(function ($q) {
                 if (Schema::hasColumn('wallets', 'owner_type')) {
@@ -228,13 +250,6 @@ class BookingService
         DB::transaction(function () use ($id, $driver, $vehicle, &$assigned) {
             $booking = Booking::query()->where('id', $id)->lockForUpdate()->first();
             abort_unless($booking, 404, 'Booking not found');
-            if (Schema::hasColumn('bookings', 'search_expires_at')
-                && $booking->search_expires_at
-                && $booking->search_expires_at->isPast()
-                && BookingStatus::isSearching((string) $booking->status)) {
-                $booking->update(['status' => BookingStatus::EXPIRED]);
-                abort(422, 'Booking has expired.');
-            }
             abort_unless(BookingStatus::isSearching((string) $booking->status) && ! $booking->driver_id, 409, 'Booking has already been accepted by another driver.');
             abort_unless(strcasecmp((string) $vehicle->category, (string) $booking->category) === 0, 422, 'Vehicle category does not match this booking.');
 
@@ -466,7 +481,16 @@ class BookingService
         $totalPaise = (int) ($quote['totalPaise'] ?? $booking->quote_paise);
         $commissionPercent = (float) (DB::table('commission_rules')->where('active', 1)->orderBy('id')->value('percent') ?? 10);
         $commission = (int) round($totalPaise * ($commissionPercent / 100));
-        $earning = max(0, $totalPaise - $commission);
+        $fleetShare = 0;
+        $fleetOwnerId = null;
+        $vehicleRow = $booking->vehicle_id
+            ? DB::table('vehicles')->where('id', $booking->vehicle_id)->first()
+            : ($driver->id ? DB::table('vehicles')->where('driver_id', $driver->id)->orderByDesc('id')->first() : null);
+        if ($vehicleRow && ! empty($vehicleRow->fleet_owner_id)) {
+            $fleetOwnerId = (int) $vehicleRow->fleet_owner_id;
+            $fleetShare = (int) round($totalPaise * 0.05);
+        }
+        $earning = max(0, $totalPaise - $commission - $fleetShare);
 
         $booking->update($this->filterColumns([
             'status' => BookingStatus::COMPLETED,
@@ -482,12 +506,16 @@ class BookingService
                 'commissionPercent' => $commissionPercent,
                 'commissionPaise' => $commission,
                 'driverEarningPaise' => $earning,
+                'fleetCommissionPaise' => $fleetShare,
                 'durationSeconds' => $duration,
                 'waitMinutes' => $wait,
             ]),
         ]));
         Driver::query()->where('id', $driver->id)->update(['duty_status' => 'online']);
         $this->creditDriverWallet((int) $driver->user_id, (int) $booking->id, $earning, $commission, $totalPaise);
+        if ($fleetOwnerId && $fleetShare > 0) {
+            $this->creditFleetWallet($fleetOwnerId, (int) $booking->id, $fleetShare, $totalPaise);
+        }
         $this->debitCustomerWallet((int) $booking->customer_id, (int) $booking->id, $totalPaise, (string) ($booking->payment_mode ?? 'CASH'));
         $invoiceRef = $this->writeInvoice($booking->fresh(), $totalPaise);
         $this->emailInvoice($booking->fresh(), $totalPaise, $invoiceRef);
@@ -509,13 +537,31 @@ class BookingService
         return $this->present($booking->fresh(), $actor);
     }
 
-    public function expireSearching(): int
+    public function expireSearching(?int $exceptId = null): int
     {
+        $timeout = $this->settings->requestTimeoutSeconds();
+        $q = Booking::query()->whereIn('status', BookingStatus::searching());
+        if ($exceptId) {
+            $q->where('id', '!=', $exceptId);
+        }
         if (! Schema::hasColumn('bookings', 'search_expires_at')) {
-            $q = Booking::query()->whereIn('status', BookingStatus::searching())->where('created_at', '<', now()->subSeconds($this->settings->requestTimeoutSeconds()));
+            $q->where('created_at', '<', now()->subSeconds($timeout));
         } else {
-            $q = Booking::query()->whereIn('status', BookingStatus::searching())->where(function ($inner) {
-                $inner->whereNotNull('search_expires_at')->where('search_expires_at', '<=', now());
+            $q->where(function ($inner) use ($timeout) {
+                $inner->where(function ($expired) {
+                    $expired->whereNotNull('search_expires_at')->where('search_expires_at', '<=', now());
+                })->orWhere(function ($scheduled) use ($timeout) {
+                    if (Schema::hasColumn('bookings', 'scheduled_at')) {
+                        $scheduled->whereNotNull('scheduled_at')->where('scheduled_at', '<=', now()->subSeconds($timeout));
+                    } else {
+                        $scheduled->whereRaw('0 = 1');
+                    }
+                });
+            });
+        }
+        if (Schema::hasColumn('bookings', 'scheduled_at')) {
+            $q->where(function ($inner) {
+                $inner->whereNull('scheduled_at')->orWhere('scheduled_at', '<=', now());
             });
         }
         $ids = $q->pluck('id');
@@ -1188,6 +1234,60 @@ class BookingService
                     'kind' => 'trip',
                     'status' => 'posted',
                     'note' => 'Trip earning',
+                    'created_at' => now(),
+                ]));
+            }
+        }
+    }
+
+    private function creditFleetWallet(int $fleetOwnerId, int $bookingId, int $amountPaise, int $grossPaise): void
+    {
+        if ($amountPaise <= 0 || ! Schema::hasTable('wallets') || ! Schema::hasTable('fleet_owners')) {
+            return;
+        }
+        $userId = (int) DB::table('fleet_owners')->where('id', $fleetOwnerId)->value('user_id');
+        if ($userId < 1) {
+            return;
+        }
+        $q = DB::table('wallets')->where('owner_user_id', $userId);
+        if (Schema::hasColumn('wallets', 'owner_type')) {
+            $q->whereIn('owner_type', ['FLEET', 'FLEET_OWNER']);
+        }
+        $wallet = $q->orderBy('id')->first();
+        if (! $wallet) {
+            $id = DB::table('wallets')->insertGetId($this->filterWallet([
+                'owner_user_id' => $userId,
+                'owner_type' => 'FLEET',
+                'balance_paise' => 0,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]));
+            $wallet = DB::table('wallets')->where('id', $id)->first();
+        }
+        if (! $wallet) {
+            return;
+        }
+        $before = (int) $wallet->balance_paise;
+        $after = $before + $amountPaise;
+        DB::table('wallets')->where('id', $wallet->id)->update($this->filterWallet(['balance_paise' => $after, 'updated_at' => now()]));
+        if (Schema::hasTable('wallet_ledger')) {
+            $exists = DB::table('wallet_ledger')->where('booking_id', $bookingId)->where('wallet_id', $wallet->id)->where('kind', 'fleet_commission')->exists();
+            if (! $exists) {
+                DB::table('wallet_ledger')->insert($this->filterLedger([
+                    'public_ref' => 'FL'.strtoupper(Str::random(10)),
+                    'wallet_id' => $wallet->id,
+                    'booking_id' => $bookingId,
+                    'owner_user_id' => $userId,
+                    'account' => 'FLEET',
+                    'direction' => 'credit',
+                    'amount_paise' => $amountPaise,
+                    'commission_paise' => $amountPaise,
+                    'gross_paise' => $grossPaise,
+                    'balance_before_paise' => $before,
+                    'balance_after_paise' => $after,
+                    'kind' => 'fleet_commission',
+                    'status' => 'posted',
+                    'note' => 'Fleet owner commission 5%',
                     'created_at' => now(),
                 ]));
             }
