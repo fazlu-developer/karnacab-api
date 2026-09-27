@@ -105,6 +105,11 @@ class PlatformController extends Controller
         return $this->cms->page($slug);
     }
 
+    public function cmsAppPages()
+    {
+        return $this->cms->appPages();
+    }
+
     public function cmsAdminPages()
     {
         return $this->cms->adminList();
@@ -121,7 +126,7 @@ class PlatformController extends Controller
     public function cmsPatchPage(Request $request, string $id)
     {
         $page = CmsPage::query()->findOrFail($id);
-        $page->update($request->only(['title', 'eyebrow', 'seo_title', 'seo_description', 'lede', 'body', 'published', 'nav_label', 'sort_order']));
+        $page->update($request->only(['title', 'eyebrow', 'seo_title', 'seo_description', 'lede', 'body', 'image_url', 'published', 'nav_label', 'sort_order']));
 
         return $this->cms->page($page->slug);
     }

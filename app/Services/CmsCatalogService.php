@@ -11,6 +11,7 @@ class CmsCatalogService
 {
     public function site(): array
     {
+        $this->ensureAppPages();
         $pages = CmsPage::query()->where('published', 1)->orderBy('sort_order')->get();
         $presented = $pages->map(fn ($row) => $this->presentPage($row))->all();
         $settings = DB::table('system_settings')->whereIn('key', ['cms_site', 'cms_home_promo'])->pluck('value', 'key');
@@ -36,9 +37,60 @@ class CmsCatalogService
 
     public function page(string $slug): array
     {
+        $this->ensureAppPages();
         $row = CmsPage::query()->where('slug', $slug)->where('published', 1)->firstOrFail();
 
         return $this->presentPage($row);
+    }
+
+    public function appPages(): array
+    {
+        $this->ensureAppPages();
+        $slugs = array_column(self::appPageCatalog(), 'slug');
+        $pages = CmsPage::query()->whereIn('slug', $slugs)->where('published', 1)->orderBy('sort_order')->get()
+            ->map(fn ($row) => $this->presentPage($row))
+            ->all();
+
+        return ['pages' => $pages];
+    }
+
+    /**
+     * @return list<array{slug: string, title: string, lede: string, body: string}>
+     */
+    public static function appPageCatalog(): array
+    {
+        return [
+            [
+                'slug' => 'about-us',
+                'title' => 'About Us',
+                'lede' => 'KarnaCab is a ride and delivery network for cities across India.',
+                'body' => "KarnaCab connects riders with verified drivers for city rides, outstation trips, rentals, parcels and more.\n\nWe operate with local partners so pickup, fare and support stay close to the city you book in.",
+            ],
+            [
+                'slug' => 'privacy-policy',
+                'title' => 'Privacy Policy',
+                'lede' => 'How KarnaCab collects, uses and protects your information.',
+                'body' => "We collect your name, phone number, trip locations and payment details to complete bookings and keep your account secure.\n\nWe do not sell personal data. You can request access or deletion through in-app Support.",
+            ],
+            [
+                'slug' => 'terms-conditions',
+                'title' => 'Terms & Conditions',
+                'lede' => 'Rules for using the KarnaCab customer application.',
+                'body' => "By using KarnaCab you agree to book trips in good faith, pay the quoted fare, and follow driver and safety instructions.\n\nCancellations, waiting charges and tolls follow the fare shown before you confirm the ride.",
+            ],
+            [
+                'slug' => 'return-refund',
+                'title' => 'Return & Refund',
+                'lede' => 'Wallet top-ups, cancelled trips and fare adjustments.',
+                'body' => "Unused wallet balance stays in your KarnaCab wallet.\n\nIf a trip is cancelled as per policy or a fare is charged in error, the amount is returned to the original payment method or wallet after review. Open Support with the booking ID to request a refund.",
+            ],
+            [
+                'slug' => 'software-license',
+                'title' => 'Software License',
+                'lede' => 'Licence to use the KarnaCab mobile application.',
+                'body' => "KarnaCab grants you a personal, non-exclusive licence to use this app for booking transport and related services.\n\nYou may not copy, reverse engineer, or misuse the software. Brand names and content remain the property of KarnaCab.",
+            ],
+        ];
     }
 
     public function adminList(): array
@@ -84,6 +136,8 @@ class CmsCatalogService
 
     private function presentPage($row): array
     {
+        $html = $this->bodyHtml($row->body);
+
         return [
             'id' => (string) $row->id,
             'slug' => $row->slug,
@@ -93,7 +147,10 @@ class CmsCatalogService
             'seoTitle' => $row->seo_title ?: $row->title.' | KarnaCab',
             'seoDescription' => $row->seo_description ?: $row->lede,
             'lede' => $row->lede,
+            'description' => $row->lede,
             'body' => $row->body,
+            'bodyHtml' => $html,
+            'imageUrl' => $this->publicUpload($row->image_url ?? null),
             'template' => $row->template,
             'leadType' => $row->lead_type,
             'registerKind' => $row->register_kind,
@@ -104,6 +161,81 @@ class CmsCatalogService
             'published' => (bool) $row->published,
             'updatedAt' => optional($row->updated_at)?->toIso8601String(),
         ];
+    }
+
+    private function bodyHtml(mixed $body): string
+    {
+        if (is_string($body)) {
+            return $body;
+        }
+        if (! is_array($body)) {
+            return '';
+        }
+        if (isset($body['html'])) {
+            return (string) $body['html'];
+        }
+        if (isset($body['text'])) {
+            return (string) $body['text'];
+        }
+        $parts = [];
+        foreach ($body as $block) {
+            if (is_string($block)) {
+                $parts[] = $block;
+            } elseif (is_array($block)) {
+                $parts[] = (string) ($block['html'] ?? $block['text'] ?? $block['lede'] ?? '');
+            }
+        }
+
+        return trim(implode("\n\n", array_filter($parts)));
+    }
+
+    public function ensureAppPages(): void
+    {
+        if (! Schema::hasTable('cms_pages')) {
+            Schema::create('cms_pages', function ($table) {
+                $table->id();
+                $table->string('slug')->unique();
+                $table->string('title');
+                $table->string('eyebrow')->nullable();
+                $table->string('seo_title')->nullable();
+                $table->string('seo_description', 500)->nullable();
+                $table->text('lede')->nullable();
+                $table->json('body')->nullable();
+                $table->string('image_url', 500)->nullable();
+                $table->string('template')->nullable();
+                $table->string('lead_type')->nullable();
+                $table->string('register_kind')->nullable();
+                $table->string('product_key')->nullable();
+                $table->string('nav_group')->nullable();
+                $table->string('nav_label')->nullable();
+                $table->unsignedInteger('sort_order')->default(0);
+                $table->boolean('published')->default(true);
+                $table->timestamps();
+            });
+        }
+        if (! Schema::hasColumn('cms_pages', 'image_url')) {
+            Schema::table('cms_pages', function ($table) {
+                $table->string('image_url', 500)->nullable();
+            });
+        }
+        $sort = 80;
+        foreach (self::appPageCatalog() as $item) {
+            $exists = CmsPage::query()->where('slug', $item['slug'])->exists();
+            if ($exists) {
+                continue;
+            }
+            CmsPage::query()->create([
+                'slug' => $item['slug'],
+                'title' => $item['title'],
+                'lede' => $item['lede'],
+                'body' => ['html' => $item['body']],
+                'nav_group' => 'legal',
+                'nav_label' => $item['title'],
+                'sort_order' => $sort++,
+                'published' => true,
+                'template' => 'app_legal',
+            ]);
+        }
     }
 
     private function nav(array $pages): array
