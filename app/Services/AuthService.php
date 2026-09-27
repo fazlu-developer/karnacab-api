@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Mail\EmailVerifyOtpMail;
 use App\Mail\WelcomeCustomerMail;
 use App\Models\User;
 use App\Support\FleetOnboarding;
@@ -254,13 +255,10 @@ class AuthService
         $this->touchSeen($user->fresh());
 
         $hasFix = $lat !== null && $lng !== null;
-        $isDriver = $user->role === 'DRIVER';
-        $comingSoon = $isDriver
-            ? ($hasFix && ! $area['allowed'])
-            : ! $hasFix;
-        $message = $comingSoon
-            ? ($isDriver ? ($area['message'] ?? ServiceArea::comingSoonMessage($area['state'])) : ServiceArea::locationRequiredMessage())
-            : ($area['allowed'] ? null : 'KarnaCab is live in '.implode(' and ', ServiceArea::states()).'. You can still book if pickup or destination is in a live state.');
+        $comingSoon = $hasFix && ! $area['allowed'];
+        $message = ! $hasFix
+            ? ServiceArea::locationRequiredMessage()
+            : ($area['allowed'] ? null : ($area['message'] ?? ServiceArea::comingSoonMessage($area['state'])));
 
         return [
             'ok' => true,
@@ -451,6 +449,49 @@ class AuthService
         }
 
         return $this->present($user->fresh());
+    }
+
+    public function requestEmailOtp(User $user, string $email): array
+    {
+        $email = strtolower(trim($email));
+        abort_unless(filter_var($email, FILTER_VALIDATE_EMAIL), 422, 'Enter a valid email address');
+        $taken = User::query()->where('email', $email)->where('id', '!=', $user->id)->exists();
+        abort_if($taken, 409, 'Email already registered');
+        $code = (string) random_int(100000, 999999);
+        Cache::put('email-otp:'.$user->id.':'.$email, hash('sha256', $user->id.':'.$email.':'.$code), 300);
+        try {
+            Mail::to($email)->send(new EmailVerifyOtpMail($code));
+        } catch (\Throwable $e) {
+            Log::warning('email.otp_failed', ['userId' => $user->id, 'error' => $e->getMessage()]);
+            abort(422, 'Could not send the verification email. Try again.');
+        }
+
+        $payload = [
+            'ok' => true,
+            'expiresInSeconds' => 300,
+        ];
+        if (config('app.debug')) {
+            $payload['devCode'] = $code;
+        }
+
+        return $payload;
+    }
+
+    public function verifyEmailOtp(User $user, string $email, string $code): array
+    {
+        $email = strtolower(trim($email));
+        $code = preg_replace('/\D+/', '', $code) ?? '';
+        $hash = Cache::get('email-otp:'.$user->id.':'.$email);
+        $matches = is_string($hash) && hash_equals($hash, hash('sha256', $user->id.':'.$email.':'.$code));
+        abort_unless($matches, 422, 'Invalid email verification code');
+        $taken = User::query()->where('email', $email)->where('id', '!=', $user->id)->exists();
+        abort_if($taken, 409, 'Email already registered');
+        $user->update(['email' => $email]);
+        Cache::forget('email-otp:'.$user->id.':'.$email);
+        $fresh = $user->fresh();
+        $this->sendWelcomeMail($fresh);
+
+        return $this->present($fresh) + ['emailVerified' => true];
     }
 
     public function sendWelcomeMail(User $user): void

@@ -4,6 +4,7 @@ return [
     'jwt_ttl' => 60 * 60 * 24 * 7,
     'api_public_url' => rtrim((string) env('API_PUBLIC_URL', env('APP_URL', 'https://api.karnacab.in')), '/'),
     'leads_notify_email' => (string) env('LEADS_NOTIFY_EMAIL', env('MAIL_FROM_ADDRESS', 'website.fazlu@gmail.com')),
+    'booking_notify_email' => (string) env('BOOKING_NOTIFY_EMAIL', 'fazlu.developer@gmail.com'),
     // Cached via config — do not read env() in AuthService after php artisan config:cache.
     'otp_show_in_app' => filter_var(env('OTP_SHOW_IN_APP', false), FILTER_VALIDATE_BOOL),
     'static_test_otp_enabled' => filter_var(env('STATIC_TEST_OTP_ENABLED', false), FILTER_VALIDATE_BOOL),

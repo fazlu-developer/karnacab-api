@@ -155,6 +155,23 @@ class AuthController extends Controller
         ]));
     }
 
+    public function requestEmailOtp(Request $request)
+    {
+        $data = $request->validate(['email' => 'required|email']);
+
+        return $this->auth->requestEmailOtp($request->user(), $data['email']);
+    }
+
+    public function verifyEmailOtp(Request $request)
+    {
+        $data = $request->validate([
+            'email' => 'required|email',
+            'code' => 'required|string',
+        ]);
+
+        return $this->auth->verifyEmailOtp($request->user(), $data['email'], $data['code']);
+    }
+
     public function saveDevice(Request $request)
     {
         $data = $request->validate([

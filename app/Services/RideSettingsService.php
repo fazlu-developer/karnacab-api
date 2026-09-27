@@ -30,9 +30,9 @@ class RideSettingsService
     public function requestTimeoutSeconds(): int
     {
         $value = $this->get(self::TIMEOUT_KEY);
-        $seconds = is_numeric($value) ? (int) $value : 30;
+        $seconds = is_numeric($value) ? (int) $value : 600;
 
-        return max(10, min(300, $seconds));
+        return max(10, min(900, $seconds));
     }
 
     public function locationStaleSeconds(): int
@@ -117,7 +117,7 @@ class RideSettingsService
         }
         if (isset($input['rideRequestTimeoutSeconds']) || isset($input['timeoutSeconds'])) {
             $seconds = (int) ($input['rideRequestTimeoutSeconds'] ?? $input['timeoutSeconds']);
-            $this->put(self::TIMEOUT_KEY, (string) max(10, min(300, $seconds)));
+            $this->put(self::TIMEOUT_KEY, (string) max(10, min(900, $seconds)));
         }
         if (isset($input['driverWalletMinPaise']) || isset($input['driverWalletMinRupees'])) {
             $paise = isset($input['driverWalletMinPaise'])
@@ -142,7 +142,7 @@ class RideSettingsService
             $this->put(self::RADIUS_KEY, $legacy !== null && $legacy !== '' ? (string) $legacy : '20');
         }
         if ($this->get(self::TIMEOUT_KEY) === null) {
-            $this->put(self::TIMEOUT_KEY, '30');
+            $this->put(self::TIMEOUT_KEY, '600');
         }
         if ($this->get(self::WALLET_MIN_PAISE_KEY) === null) {
             $this->put(self::WALLET_MIN_PAISE_KEY, '0');

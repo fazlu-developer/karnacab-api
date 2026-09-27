@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Driver;
 use App\Models\User;
+use App\Support\BookingProductSchema;
 use App\Support\BulkSchema;
 use App\Support\CorporatePlanSchema;
 use App\Support\Geo;
@@ -143,7 +144,9 @@ class AppSurfaceService
     {
         $bookings = collect();
         if (Schema::hasTable('bookings')) {
-            $q = DB::table('bookings')->whereIn('status', ['COMPLETED', 'TRIP_COMPLETED', 'completed']);
+            $q = DB::table('bookings')->whereIn('status', [
+                'COMPLETED', 'TRIP_COMPLETED', 'completed', 'SETTLED', 'PAID',
+            ]);
             if ($actor->role === 'DRIVER') {
                 $driverId = Driver::query()->where('user_id', $actor->id)->value('id');
                 $q->where('driver_id', $driverId ?: 0);
@@ -418,17 +421,38 @@ class AppSurfaceService
         if (! Schema::hasTable('ad_campaigns')) {
             return ['ads' => [], 'placement' => $placement];
         }
-        $rows = DB::table('ad_campaigns')->where('status', 'published')->orderByDesc('id')->limit(20)->get();
+        $q = DB::table('ad_campaigns')->whereIn('status', ['published', 'active', 'PUBLISHED', 'ACTIVE']);
+        if (Schema::hasColumn('ad_campaigns', 'starts_on')) {
+            $q->where(function ($inner) {
+                $inner->whereNull('starts_on')->orWhere('starts_on', '<=', now());
+            });
+        }
+        if (Schema::hasColumn('ad_campaigns', 'ends_on')) {
+            $q->where(function ($inner) {
+                $inner->whereNull('ends_on')->orWhere('ends_on', '>=', now());
+            });
+        }
+        $rows = $q->orderByDesc('id')->limit(20)->get();
 
         return [
             'placement' => $placement,
-            'ads' => $rows->map(fn ($row) => [
-                'id' => (string) $row->id,
-                'title' => $row->title ?? $row->name ?? 'Ad',
-                'imageUrl' => $row->image_url ?? $row->creative_url ?? null,
-                'clickUrl' => $row->click_url ?? $row->target_url ?? null,
-                'placement' => $placement,
-            ])->all(),
+            'ads' => $rows->map(function ($row) use ($placement) {
+                $image = $row->image_url ?? $row->creative_url ?? null;
+                $title = $row->title ?? $row->name ?? 'Ad';
+
+                return [
+                    'id' => (string) $row->id,
+                    'title' => $title,
+                    'business' => $row->business_name ?? 'KarnaCab',
+                    'campaign' => $title,
+                    'category' => $row->category ?? 'banner',
+                    'imageUrl' => $image,
+                    'bannerUrl' => $image,
+                    'clickUrl' => $row->click_url ?? $row->cta_url ?? $row->target_url ?? null,
+                    'ctaUrl' => $row->cta_url ?? $row->click_url ?? null,
+                    'placement' => $placement,
+                ];
+            })->all(),
         ];
     }
 
@@ -744,7 +768,12 @@ class AppSurfaceService
             $q->where('destination', 'like', '%'.$request->query('destination').'%');
         }
         if ($request->query('origin')) {
-            $q->where('origin', 'like', '%'.$request->query('origin').'%');
+            $origin = (string) $request->query('origin');
+            $q->where(function ($inner) use ($origin) {
+                $inner->where('origin', 'like', '%'.$origin.'%')
+                    ->orWhereNull('origin')
+                    ->orWhere('origin', '');
+            });
         }
         if ($request->query('region')) {
             $q->where('region', $request->query('region'));
@@ -1238,6 +1267,7 @@ class AppSurfaceService
         if (! Schema::hasTable('bookings')) {
             return null;
         }
+        BookingProductSchema::ensure();
         if (! empty($corp->ride_booking_id)) {
             return (int) $corp->ride_booking_id;
         }
@@ -1573,6 +1603,7 @@ class AppSurfaceService
         if (! Schema::hasTable('bookings')) {
             return null;
         }
+        BookingProductSchema::ensure();
         $existing = $bulk->ride_booking_id ?? null;
         if ($existing) {
             return (int) $existing;
@@ -1832,6 +1863,7 @@ class AppSurfaceService
         if (! Schema::hasTable('bookings')) {
             return null;
         }
+        BookingProductSchema::ensure();
         $existing = $travel->ride_booking_id ?? null;
         if ($existing) {
             return (int) $existing;

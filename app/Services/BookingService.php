@@ -8,6 +8,7 @@ use App\Models\Booking;
 use App\Models\Driver;
 use App\Models\DriverDocument;
 use App\Models\User;
+use App\Support\BookingProductSchema;
 use App\Support\BookingStatus;
 use App\Support\Geo;
 use App\Support\ServiceArea;
@@ -29,6 +30,7 @@ class BookingService
     public function create(User $actor, array $dto): array
     {
         abort_unless(in_array($actor->role, ['CUSTOMER', 'CORPORATE', 'ADMIN', 'SUPER_ADMIN'], true), 403, 'Only customers can request a ride');
+        BookingProductSchema::ensure();
         $pickupLat = isset($dto['pickupLat']) ? (float) $dto['pickupLat'] : null;
         $pickupLng = isset($dto['pickupLng']) ? (float) $dto['pickupLng'] : null;
         $dropLat = isset($dto['dropLat']) ? (float) $dto['dropLat'] : null;
@@ -139,6 +141,7 @@ class BookingService
             'nearby' => count($matches),
             'radiusKm' => $radius,
         ]);
+        $this->notifyOps($booking, $scheduled ? 'Scheduled booking received' : 'New ride request');
 
         return $this->present($booking->fresh(), $actor);
     }
@@ -254,6 +257,7 @@ class BookingService
         abort_unless($assigned, 409, 'Booking has already been accepted by another driver.');
         $booking = Booking::query()->findOrFail($id);
         Log::info('booking.accepted', ['bookingId' => $booking->id, 'driverId' => $driver->id]);
+        $this->notifyOps($booking, 'Driver found for booking '.$booking->public_ref);
         $notice = app(NotificationTemplates::class)->definition('driver_assigned', [
             'title' => 'Your booking is accepted',
             'body' => '{name} accepted your booking {ref}.',
@@ -440,12 +444,15 @@ class BookingService
         if ($booking->arrived_at && $booking->trip_started_at) {
             $wait = max(0, (int) floor($booking->arrived_at->diffInSeconds($booking->trip_started_at) / 60));
         }
-        $actualKm = (float) ($booking->distance_km ?: Geo::haversineKm(
+        $quotedKm = (float) ($booking->distance_km ?: 0);
+        $trackedKm = (float) ($booking->actual_distance_km ?: 0);
+        $straightKm = Geo::haversineKm(
             (float) $booking->pickup_lat,
             (float) $booking->pickup_lng,
             (float) $booking->drop_lat,
             (float) $booking->drop_lng,
-        ));
+        );
+        $actualKm = max($trackedKm, $quotedKm, $straightKm);
         $quote = $this->fares->quote([
             'product' => $booking->product,
             'category' => $booking->category,
@@ -727,6 +734,13 @@ class BookingService
         }
         $now = now();
         foreach ($matches as $match) {
+            $existing = DB::table('booking_driver_requests')
+                ->where('booking_id', $booking->id)
+                ->where('driver_id', $match['driverId'])
+                ->first();
+            if ($existing && in_array((string) $existing->status, ['REJECTED', 'ACCEPTED', 'EXPIRED'], true)) {
+                continue;
+            }
             DB::table('booking_driver_requests')->updateOrInsert(
                 ['booking_id' => $booking->id, 'driver_id' => $match['driverId']],
                 [
@@ -746,11 +760,16 @@ class BookingService
         if (! Schema::hasTable('booking_driver_requests')) {
             return;
         }
-        DB::table('booking_driver_requests')->where('booking_id', $bookingId)->where('driver_id', $driverId)->update([
-            'status' => $status,
-            'responded_at' => now(),
-            'updated_at' => now(),
-        ]);
+        $now = now();
+        DB::table('booking_driver_requests')->updateOrInsert(
+            ['booking_id' => $bookingId, 'driver_id' => $driverId],
+            [
+                'status' => $status,
+                'responded_at' => $now,
+                'updated_at' => $now,
+                'created_at' => $now,
+            ],
+        );
     }
 
     private function closeOtherOffers(int $bookingId, int $winnerDriverId): void
@@ -991,6 +1010,70 @@ class BookingService
         }
 
         return null;
+    }
+
+    public function trackTripProgress(User $actor, string $bookingId, float $lat, float $lng): void
+    {
+        if (! Schema::hasColumn('bookings', 'actual_distance_km')) {
+            return;
+        }
+        try {
+            $booking = $this->findVisible($actor, $bookingId);
+        } catch (\Throwable) {
+            return;
+        }
+        if (! in_array($booking->status, BookingStatus::inTrip(), true)) {
+            return;
+        }
+        $prevLat = $actor->last_lat !== null ? (float) $actor->last_lat : (float) $booking->pickup_lat;
+        $prevLng = $actor->last_lng !== null ? (float) $actor->last_lng : (float) $booking->pickup_lng;
+        $delta = Geo::haversineKm($prevLat, $prevLng, $lat, $lng);
+        if ($delta <= 0.03 || $delta > 8) {
+            return;
+        }
+        $tracked = (float) ($booking->actual_distance_km ?? 0) + $delta;
+        $patch = ['actual_distance_km' => round($tracked, 3)];
+        if ($tracked > (float) ($booking->distance_km ?? 0) + 0.4) {
+            $quote = $this->fares->quote([
+                'product' => $booking->product,
+                'category' => $booking->category,
+                'distanceKm' => $tracked,
+                'districtId' => $booking->district_id,
+                'pickupLat' => $booking->pickup_lat,
+                'pickupLng' => $booking->pickup_lng,
+            ]);
+            $patch['distance_km'] = $tracked;
+            $patch['quote_paise'] = (int) ($quote['totalPaise'] ?? $booking->quote_paise);
+            $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+            $snapshot['live'] = $quote;
+            $patch['quote_snapshot'] = $snapshot;
+        }
+        $booking->update($this->filterColumns($patch));
+    }
+
+    private function notifyOps(Booking $booking, string $title): void
+    {
+        $email = (string) (DB::table('system_settings')->where('key', 'booking_notify_email')->value('value')
+            ?? config('karnacab.booking_notify_email', 'fazlu.developer@gmail.com'));
+        if ($email === '' || ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            return;
+        }
+        $body = 'Booking '.$booking->public_ref.' · '.($booking->product ?? '').' · '.($booking->status ?? '')."\n"
+            .($booking->pickup_text ?? 'Pickup').' → '.($booking->drop_text ?? 'Drop');
+        try {
+            Mail::to($email)->send(new EventNoticeMail($title, $body));
+        } catch (\Throwable $e) {
+            Log::warning('booking.ops_mail_failed', ['bookingId' => $booking->id, 'error' => $e->getMessage()]);
+        }
+        $adminIds = User::query()->whereIn('role', ['ADMIN', 'SUPER_ADMIN'])->pluck('id')->map(fn ($id) => (int) $id)->all();
+        if ($adminIds !== []) {
+            $this->push->notifyUsers(
+                $adminIds,
+                $title,
+                $body,
+                ['type' => 'ops_booking', 'event' => 'new_booking', 'bookingId' => (string) $booking->id],
+            );
+        }
     }
 
     private function emailCustomer(int $userId, string $title, string $body): void

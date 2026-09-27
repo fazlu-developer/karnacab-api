@@ -16,7 +16,7 @@ class KycDocumentService
 {
     public const MULTI_TYPES = ['VEHICLE_PHOTO', 'VEHICLE_DRIVER_PHOTO'];
 
-    public const DATED_TYPES = ['LICENSE', 'LICENSE_FRONT', 'LICENSE_BACK', 'INSURANCE', 'POLLUTION', 'PUC', 'PERMIT'];
+    public const DATED_TYPES = ['LICENSE', 'LICENSE_FRONT', 'LICENSE_BACK', 'INSURANCE', 'RC', 'POLLUTION', 'PUC', 'PERMIT'];
 
     public function catalog(): array
     {

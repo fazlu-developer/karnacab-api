@@ -10,8 +10,8 @@ final class CorporatePlanSchema
 {
     public static function ensure(?string $connection = null): void
     {
-        $schema = $connection ? Schema::connection($connection) : Schema::connection();
-        $db = $connection ? DB::connection($connection) : DB::connection();
+        $schema = filled($connection) ? Schema::connection($connection) : Schema::getConnection()->getSchemaBuilder();
+        $db = filled($connection) ? DB::connection($connection) : DB::connection();
         if (! $schema->hasTable('corporate_plans')) {
             $schema->create('corporate_plans', function (Blueprint $table) {
                 $table->id();

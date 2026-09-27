@@ -63,6 +63,8 @@ Route::middleware('jwt')->group(function () {
     Route::post('/v1/auth/avatar', [AuthController::class, 'avatar']);
     Route::patch('/v1/auth/location', [AuthController::class, 'location']);
     Route::post('/v1/auth/heartbeat', [AuthController::class, 'heartbeat']);
+    Route::post('/v1/auth/email/otp/request', [AuthController::class, 'requestEmailOtp']);
+    Route::post('/v1/auth/email/otp/verify', [AuthController::class, 'verifyEmailOtp']);
     Route::post('/v1/notifications/devices', [AuthController::class, 'saveDevice']);
     Route::post('/v1/notifications/devices/unregister', [AuthController::class, 'clearDevice']);
     Route::delete('/v1/notifications/devices', [AuthController::class, 'clearDevice']);

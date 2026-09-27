@@ -308,6 +308,7 @@ class DriverOpsService
         $live = null;
         if ($bookingId) {
             try {
+                app(BookingService::class)->trackTripProgress($actor, $bookingId, $lat, $lng);
                 $live = app(BookingService::class)->live($actor, $bookingId);
             } catch (\Throwable $e) {
                 Log::warning('booking.live_after_location_failed', ['message' => $e->getMessage()]);
