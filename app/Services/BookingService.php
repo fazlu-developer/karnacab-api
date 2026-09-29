@@ -147,34 +147,42 @@ class BookingService
 
         $this->storeStops($booking, is_array($dto['stops'] ?? null) ? $dto['stops'] : []);
 
-        if ($driverDispatch && $matches !== []) {
-            $this->writeOffers($booking, $matches);
-            $this->push->notifyUsers(
-                array_map(fn ($row) => (int) ($row['userId'] ?? 0), $matches),
-                'New KarnaCab booking',
-                trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
-                [
-                    'type' => 'booking_offer',
-                    'event' => 'new_booking',
-                    'bookingId' => (string) $booking->id,
-                ],
-            );
-        }
-
         Log::info('booking.created', [
             'bookingId' => $booking->id,
             'status' => $booking->status,
             'nearby' => count($matches),
             'radiusKm' => $radius,
         ]);
-        $this->notifyOps(
-            $booking,
-            $driverDispatch
-                ? 'New ride request'
-                : 'Assign a driver · '.str_replace('_', ' ', $product),
-        );
 
-        return $this->present($booking->fresh(), $actor);
+        $presented = $this->present($booking->fresh(), $actor);
+        $opsTitle = $driverDispatch
+            ? 'New ride request'
+            : 'Assign a driver · '.str_replace('_', ' ', $product);
+        app()->terminating(function () use ($booking, $matches, $driverDispatch, $opsTitle) {
+            try {
+                if ($driverDispatch && $matches !== []) {
+                    $this->writeOffers($booking, $matches);
+                    $this->push->notifyUsers(
+                        array_map(fn ($row) => (int) ($row['userId'] ?? 0), $matches),
+                        'New KarnaCab booking',
+                        trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
+                        [
+                            'type' => 'booking_offer',
+                            'event' => 'new_booking',
+                            'bookingId' => (string) $booking->id,
+                        ],
+                    );
+                }
+                $this->notifyOps($booking, $opsTitle);
+            } catch (\Throwable $e) {
+                Log::warning('booking.notify_failed', [
+                    'bookingId' => $booking->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        });
+
+        return $presented;
     }
 
     public function list(User $actor)
@@ -482,7 +490,7 @@ class BookingService
         }
 
         if (in_array($action, ['complete', 'completed'], true)) {
-            $result = $this->complete($actor, $id);
+            $result = $this->complete($actor, $id, $otp);
             app(DriverSessionService::class)->finishPendingLogout($actor);
 
             return $result;
@@ -491,12 +499,14 @@ class BookingService
         abort(422, 'Unsupported booking action');
     }
 
-    public function complete(User $actor, string $id): array
+    public function complete(User $actor, string $id, ?string $otp = null): array
     {
         $booking = $this->assignedToDriver($actor, $id);
         abort_unless(in_array($booking->status, [BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', BookingStatus::OTP_VERIFIED], true), 422, 'Trip has not started.');
         $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
         abort_unless((int) $booking->driver_id === (int) $driver->id, 403, 'Driver is not assigned to this booking.');
+        $pin = preg_replace('/\D+/', '', (string) $otp) ?? '';
+        abort_unless($pin !== '' && hash_equals((string) $booking->end_otp, $pin), 422, 'Invalid completion PIN');
 
         $started = $booking->trip_started_at ?: $booking->updated_at;
         $duration = max(1, now()->diffInSeconds($started));
@@ -549,24 +559,35 @@ class BookingService
             $this->creditFleetWallet($fleetOwnerId, (int) $booking->id, $fleetShare, $totalPaise);
         }
         $this->debitCustomerWallet((int) $booking->customer_id, (int) $booking->id, $totalPaise, (string) ($booking->payment_mode ?? 'CASH'));
-        $invoiceRef = $this->writeInvoice($booking->fresh(), $totalPaise);
-        $this->emailInvoice($booking->fresh(), $totalPaise, $invoiceRef);
-        $this->push->notifyUsers(
-            [(int) $booking->customer_id],
-            'Trip completed',
-            'Please rate your ride.',
-            ['type' => 'trip', 'event' => 'completed', 'bookingId' => (string) $booking->id],
-        );
-        $this->push->notifyUsers(
-            [(int) $driver->user_id],
-            'Trip completed',
-            'Earning ₹'.number_format($earning / 100, 0).' after commission.',
-            ['type' => 'wallet', 'event' => 'trip_completed', 'bookingId' => (string) $booking->id],
-        );
+        $fresh = $booking->fresh();
+        $invoiceRef = $this->writeInvoice($fresh, $totalPaise);
+        $presented = $this->present($fresh, $actor);
+        $customerId = (int) $booking->customer_id;
+        $driverUserId = (int) $driver->user_id;
+        $bookingId = (string) $booking->id;
+        app()->terminating(function () use ($fresh, $totalPaise, $invoiceRef, $earning, $customerId, $driverUserId, $bookingId) {
+            try {
+                $this->emailInvoice($fresh, $totalPaise, $invoiceRef);
+                $this->push->notifyUsers(
+                    [$customerId],
+                    'Trip completed',
+                    'Please rate your ride.',
+                    ['type' => 'trip', 'event' => 'completed', 'bookingId' => $bookingId],
+                );
+                $this->push->notifyUsers(
+                    [$driverUserId],
+                    'Trip completed',
+                    'Earning ₹'.number_format($earning / 100, 0).' after commission.',
+                    ['type' => 'wallet', 'event' => 'trip_completed', 'bookingId' => $bookingId],
+                );
+            } catch (\Throwable $e) {
+                Log::warning('booking.complete_notify_failed', ['bookingId' => $bookingId, 'error' => $e->getMessage()]);
+            }
+        });
         Log::info('booking.completed', ['bookingId' => $booking->id, 'farePaise' => $totalPaise, 'earningPaise' => $earning]);
         app(DriverSessionService::class)->finishPendingLogout($actor);
 
-        return $this->present($booking->fresh(), $actor);
+        return $presented;
     }
 
     public function expireSearching(?int $exceptId = null): int

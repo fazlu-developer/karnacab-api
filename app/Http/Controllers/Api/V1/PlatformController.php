@@ -434,7 +434,9 @@ class PlatformController extends Controller
 
     public function bookingsComplete(Request $request, string $id)
     {
-        return $this->bookings->complete($request->user(), $id);
+        $data = $request->validate(['otp' => 'nullable|string|max:8']);
+
+        return $this->bookings->complete($request->user(), $id, $data['otp'] ?? null);
     }
 
     public function bookingsLifecycle(Request $request, string $id)

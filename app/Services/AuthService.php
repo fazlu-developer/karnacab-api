@@ -475,13 +475,6 @@ class AuthService
         $code = $demo ? (string) env('DEMO_OTP_CODE', '123456') : (string) random_int(100000, 999999);
         Cache::put('email-otp:'.$user->id.':'.$email, hash('sha256', $user->id.':'.$email.':'.$code), 300);
         $audience = $user->role === 'DRIVER' ? 'driver' : 'customer';
-        try {
-            Mail::to($email)->send(new EmailVerifyOtpMail($code, $audience));
-        } catch (\Throwable $e) {
-            Log::warning('email.otp_failed', ['userId' => $user->id, 'error' => $e->getMessage()]);
-            abort(422, 'Could not send the verification email. Try again.');
-        }
-
         $payload = [
             'ok' => true,
             'expiresInSeconds' => 300,
@@ -489,6 +482,13 @@ class AuthService
         if (config('app.debug') || $demo) {
             $payload['devCode'] = $code;
         }
+        app()->terminating(function () use ($user, $email, $code, $audience) {
+            try {
+                Mail::to($email)->send(new EmailVerifyOtpMail($code, $audience));
+            } catch (\Throwable $e) {
+                Log::warning('email.otp_failed', ['userId' => $user->id, 'error' => $e->getMessage()]);
+            }
+        });
 
         return $payload;
     }
@@ -519,6 +519,13 @@ class AuthService
     }
 
     public function sendWelcomeMail(User $user, string $lockKey = 'welcome-mail'): void
+    {
+        app()->terminating(function () use ($user, $lockKey) {
+            $this->deliverWelcomeMail($user, $lockKey);
+        });
+    }
+
+    private function deliverWelcomeMail(User $user, string $lockKey): void
     {
         $email = (string) $user->email;
         if ($email === '' || str_ends_with($email, '@otp.karnacab.local')) {
