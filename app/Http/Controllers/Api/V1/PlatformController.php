@@ -279,6 +279,14 @@ class PlatformController extends Controller
         return $this->fares->placeDetails((string) $request->query('placeId', ''));
     }
 
+    public function placesReverse(Request $request)
+    {
+        return $this->fares->reverseGeocode(
+            (float) $request->query('lat'),
+            (float) $request->query('lng'),
+        );
+    }
+
     public function placesDirections(Request $request)
     {
         return $this->fares->directions(
@@ -828,9 +836,9 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
         return $this->surface->parcelAccept($request->user(), $id);
     }
 
-    public function parcelsReject(string $id)
+    public function parcelsReject(Request $request, string $id)
     {
-        return $this->surface->parcelReject($id);
+        return $this->surface->parcelReject($request->user(), $id);
     }
 
     public function parcelsLifecycle(Request $request, string $id)

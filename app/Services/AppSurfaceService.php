@@ -607,6 +607,13 @@ class AppSurfaceService
             ? DB::table('parcel_fare_rules')->where('active', 1)->pluck('category')->unique()->values()->all()
             : [];
         $categories = $fromRules ?: ['BIKE', 'AUTO', 'SEDAN', 'TRAVELLER', 'TRUCK'];
+        $order = ['BIKE', 'AUTO', 'E_RICKSHAW', 'MINI', 'SEDAN', 'SUV', 'TRAVELLER', 'TRUCK'];
+        usort($categories, function ($a, $b) use ($order) {
+            $ai = array_search(strtoupper((string) $a), $order, true);
+            $bi = array_search(strtoupper((string) $b), $order, true);
+
+            return ($ai === false ? 99 : $ai) <=> ($bi === false ? 99 : $bi);
+        });
         $options = [];
         foreach ($categories as $category) {
             $options[] = $this->parcelQuote([...$data, 'category' => (string) $category]);
@@ -717,8 +724,13 @@ class AppSurfaceService
         return $this->parcelOne($id);
     }
 
-    public function parcelReject(string $id): array
+    public function parcelReject(User $actor, string $id): array
     {
+        $driver = Driver::query()->where('user_id', $actor->id)->first();
+        if ($driver) {
+            app(OfferDismissal::class)->record((int) $driver->id, 'parcel', $id);
+        }
+
         return $this->parcelOne($id);
     }
 

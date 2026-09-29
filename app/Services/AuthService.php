@@ -474,13 +474,12 @@ class AuthService
         $demo = filter_var(env('STATIC_TEST_OTP_ENABLED', false), FILTER_VALIDATE_BOOLEAN);
         $code = $demo ? (string) env('DEMO_OTP_CODE', '123456') : (string) random_int(100000, 999999);
         Cache::put('email-otp:'.$user->id.':'.$email, hash('sha256', $user->id.':'.$email.':'.$code), 300);
+        $audience = $user->role === 'DRIVER' ? 'driver' : 'customer';
         try {
-            Mail::to($email)->send(new EmailVerifyOtpMail($code));
+            Mail::to($email)->send(new EmailVerifyOtpMail($code, $audience));
         } catch (\Throwable $e) {
             Log::warning('email.otp_failed', ['userId' => $user->id, 'error' => $e->getMessage()]);
-            if (! $demo) {
-                abort(422, 'Could not send the verification email. Try again.');
-            }
+            abort(422, 'Could not send the verification email. Try again.');
         }
 
         $payload = [
@@ -507,7 +506,11 @@ class AuthService
         abort_unless($matches, 422, 'Invalid email verification code');
         $taken = User::query()->where('email', $email)->where('id', '!=', $user->id)->exists();
         abort_if($taken, 409, 'Email already registered');
-        $user->update(['email' => $email]);
+        $verified = ['email' => $email];
+        if (Schema::hasColumn('users', 'email_verified_at')) {
+            $verified['email_verified_at'] = now();
+        }
+        $user->update($verified);
         Cache::forget('email-otp:'.$user->id.':'.$email);
         $fresh = $user->fresh();
         $this->sendWelcomeMail($fresh);

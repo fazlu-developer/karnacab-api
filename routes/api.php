@@ -19,6 +19,7 @@ Route::get('/v1/ride-engine/catalog', [PlatformController::class, 'rideEngineCat
 Route::get('/v1/ride-engine/rental-packages', [PlatformController::class, 'rentalPackages']);
 Route::get('/v1/places/autocomplete', [PlatformController::class, 'placesAutocomplete']);
 Route::get('/v1/places/details', [PlatformController::class, 'placesDetails']);
+Route::get('/v1/places/reverse', [PlatformController::class, 'placesReverse']);
 Route::get('/v1/places/directions', [PlatformController::class, 'placesDirections']);
 Route::get('/v1/kyc/catalog', [PlatformController::class, 'kycCatalog']);
 Route::get('/v1/travel/catalog', [PlatformController::class, 'travelCatalog']);

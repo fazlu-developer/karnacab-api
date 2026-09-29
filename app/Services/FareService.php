@@ -16,6 +16,9 @@ class FareService
         if (in_array($product, ['LOCAL', 'TRIP', 'CAB'], true)) {
             $product = 'LOCAL_CAB';
         }
+        if (empty($input['lockProduct'])) {
+            $product = self::cityOrOutstation($product, (float) ($input['distanceKm'] ?? 0));
+        }
         $category = strtoupper((string) ($input['category'] ?? 'BIKE'));
         $hours = ($product === 'RENTAL') ? ($input['hours'] ?? 8) : ($input['hours'] ?? null);
         $query = DB::table('fare_rules')->where('product', $product)->where('category', $category)->where('active', 1);
@@ -145,6 +148,43 @@ class FareService
         ];
     }
 
+    /**
+     * City ride is 30 km or less. A longer trip is an outstation one-way ride.
+     */
+    public static function cityOrOutstation(string $product, float $distanceKm): string
+    {
+        $product = strtoupper($product);
+        if (! in_array($product, ['LOCAL_CAB', 'ONE_WAY', 'OUTSTATION'], true) || $distanceKm <= 0) {
+            return $product === 'OUTSTATION' ? 'ONE_WAY' : $product;
+        }
+
+        return $distanceKm > 30 ? 'ONE_WAY' : 'LOCAL_CAB';
+    }
+
+    public function roadDistanceKm(float $oLat, float $oLng, float $dLat, float $dLng): ?float
+    {
+        $key = (string) env('GOOGLE_MAPS_API', '');
+        if ($key === '') {
+            return null;
+        }
+        try {
+            $response = Http::timeout(8)->get('https://maps.googleapis.com/maps/api/directions/json', [
+                'origin' => $oLat.','.$oLng,
+                'destination' => $dLat.','.$dLng,
+                'key' => $key,
+                'mode' => 'driving',
+            ]);
+        } catch (\Throwable) {
+            return null;
+        }
+        $meters = $response->json('routes.0.legs.0.distance.value');
+        if (! is_numeric($meters)) {
+            return null;
+        }
+
+        return round(((float) $meters) / 1000, 2);
+    }
+
     public function directions(float $oLat, float $oLng, float $dLat, float $dLng, array $waypoints = []): array
     {
         $key = (string) env('GOOGLE_MAPS_API', '');
@@ -223,6 +263,53 @@ class FareService
             'address' => $result['formatted_address'] ?? '',
             'lat' => $result['geometry']['location']['lat'] ?? null,
             'lng' => $result['geometry']['location']['lng'] ?? null,
+        ];
+    }
+
+    public function reverseGeocode(float $lat, float $lng): array
+    {
+        $empty = [
+            'title' => '',
+            'subtitle' => '',
+            'address' => '',
+            'lat' => $lat,
+            'lng' => $lng,
+            'state' => null,
+        ];
+        $key = (string) env('GOOGLE_MAPS_API', '');
+        if ($key === '') {
+            return $empty;
+        }
+        $response = Http::timeout(8)->get('https://maps.googleapis.com/maps/api/geocode/json', [
+            'latlng' => $lat.','.$lng,
+            'key' => $key,
+            'language' => 'en',
+        ]);
+        $results = $response->json('results');
+        if (! is_array($results) || $results === []) {
+            return $empty;
+        }
+        $row = $results[0];
+        $formatted = trim((string) ($row['formatted_address'] ?? ''));
+        $parts = array_values(array_filter(array_map('trim', explode(',', $formatted))));
+        $title = $parts[0] ?? '';
+        $subtitle = implode(', ', array_slice($parts, 1));
+        $state = null;
+        foreach ($row['address_components'] ?? [] as $component) {
+            $types = $component['types'] ?? [];
+            if (is_array($types) && in_array('administrative_area_level_1', $types, true)) {
+                $state = $component['long_name'] ?? null;
+                break;
+            }
+        }
+
+        return [
+            'title' => $title,
+            'subtitle' => $subtitle,
+            'address' => $formatted,
+            'lat' => $lat,
+            'lng' => $lng,
+            'state' => $state,
         ];
     }
 }

@@ -20,7 +20,7 @@ class WelcomeCustomerMail extends Mailable
         $partner = $this->user->role === 'DRIVER';
 
         return new Envelope(
-            subject: $partner ? 'Welcome to KarnaCab Driver' : 'Welcome to KarnaCab',
+            subject: $partner ? 'Welcome to KarnaCab Driver' : 'You registered successfully',
         );
     }
 
@@ -28,10 +28,10 @@ class WelcomeCustomerMail extends Mailable
     {
         $name = e($this->user->name ?: 'there');
         $partner = $this->user->role === 'DRIVER';
-        $headline = $partner ? 'You are on the road with KarnaCab.' : 'Your KarnaCab account is ready.';
+        $headline = $partner ? 'You are on the road with KarnaCab.' : 'You registered successfully.';
         $body = $partner
-            ? 'Complete KYC when you can, then go online in Bihar and Delhi to receive trip requests.'
-            : 'Book bikes, autos and cabs in Bihar and Delhi from the KarnaCab app.';
+            ? 'Complete KYC when you can. We will email you when your driver account is active.'
+            : 'Your KarnaCab account is ready. Book bikes, autos and cabs from the KarnaCab app.';
 
         $html = <<<HTML
 <!DOCTYPE html>

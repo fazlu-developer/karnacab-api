@@ -2,11 +2,13 @@
 
 namespace App\Services;
 
+use App\Mail\EventNoticeMail;
 use App\Models\Driver;
 use App\Models\User;
 use App\Models\Vehicle;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Schema;
 
 class DriverOpsService
@@ -59,11 +61,21 @@ class DriverOpsService
             foreach (app(\App\Services\BookingService::class)->offersForDriver($actor) as $row) {
                 $offerIds[(string) ($row['id'] ?? '')] = true;
             }
+            if (Schema::hasTable('parcel_shipments') && $driver) {
+                $dismissals = app(OfferDismissal::class);
+                $parcelCount = DB::table('parcel_shipments')
+                    ->whereNull('driver_id')
+                    ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
+                    ->where('created_at', '>=', now()->subMinutes(20))
+                    ->pluck('id')
+                    ->filter(fn ($id) => ! $dismissals->hidden((int) $driver->id, 'parcel', (string) $id))
+                    ->count();
+                $pending = count(array_filter(array_keys($offerIds))) + $parcelCount;
+            }
         }
-        foreach ($this->scheduledOffers($actor) as $row) {
-            $offerIds[(string) ($row['id'] ?? '')] = true;
+        if (! isset($pending) || $pending === 0) {
+            $pending = count(array_filter(array_keys($offerIds)));
         }
-        $pending = count(array_filter(array_keys($offerIds)));
         $rating = $this->rideRatingAverage((int) $driver->id);
         $activeRide = \App\Models\Booking::query()
             ->where('driver_id', $driver->id)
@@ -167,6 +179,7 @@ class DriverOpsService
                 $lat = $actor->last_lat !== null ? (float) $actor->last_lat : null;
                 $lng = $actor->last_lng !== null ? (float) $actor->last_lng : null;
                 $radius = app(\App\Services\RideSettingsService::class)->radiusKm();
+                $dismissals = app(OfferDismissal::class);
                 $parcels = DB::table('parcel_shipments')
                     ->whereNull('driver_id')
                     ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
@@ -174,7 +187,10 @@ class DriverOpsService
                     ->orderByDesc('id')
                     ->limit(20)
                     ->get()
-                    ->filter(function ($row) use ($driver, $lat, $lng, $radius) {
+                    ->filter(function ($row) use ($driver, $lat, $lng, $radius, $dismissals) {
+                        if ($driver && $dismissals->hidden((int) $driver->id, 'parcel', (string) $row->id)) {
+                            return false;
+                        }
                         if ($driver && Schema::hasColumn('parcel_shipments', 'pickup_lat') && $row->pickup_lat && $lat !== null) {
                             $km = \App\Support\Geo::haversineKm($lat, $lng, (float) $row->pickup_lat, (float) $row->pickup_lng);
                             if ($km > $radius) {
@@ -191,9 +207,8 @@ class DriverOpsService
                     ->all();
             }
         }
-        $scheduled = $this->scheduledOffers($actor);
         $merged = [];
-        foreach (array_merge($scheduled, $rides, $parcels) as $row) {
+        foreach (array_merge($rides, $parcels) as $row) {
             $key = ($row['kind'] ?? 'ride').':'.($row['id'] ?? '');
             $merged[$key] = $row;
         }
@@ -461,12 +476,53 @@ class DriverOpsService
             'application_submitted_at' => Schema::hasColumn('drivers', 'application_submitted_at') ? now() : null,
         ], fn ($v) => $v !== null));
 
+        $this->sendOnboardingSubmittedMail($actor->fresh() ?? $actor);
+
         return $this->me($actor);
     }
 
     public function kycSnapshot(User $actor): array
     {
         return $this->me($actor);
+    }
+
+    private function sendOnboardingSubmittedMail(User $actor): void
+    {
+        $email = strtolower(trim((string) $actor->email));
+        $title = 'Onboarding submitted successfully';
+        $body = 'Your KarnaCab driver onboarding was submitted successfully. We are reviewing your documents. You will receive another email when your account is active.';
+        if ($email === '' || str_ends_with($email, '@otp.karnacab.local')) {
+            $this->logMailDelivery((int) $actor->id, 'kyc_submitted', $title, $body, 'skipped', 'no_email');
+
+            return;
+        }
+        try {
+            Mail::to($email)->send(new EventNoticeMail($title, $body));
+            $this->logMailDelivery((int) $actor->id, 'kyc_submitted', $title, $body, 'sent', 'smtp');
+            Log::info('kyc.submitted_mail_sent', ['userId' => $actor->id]);
+        } catch (\Throwable $e) {
+            $this->logMailDelivery((int) $actor->id, 'kyc_submitted', $title, $body, 'failed', substr($e->getMessage(), 0, 150));
+            Log::warning('kyc.submitted_mail_failed', ['userId' => $actor->id, 'error' => $e->getMessage()]);
+        }
+    }
+
+    private function logMailDelivery(int $userId, string $event, string $title, string $body, string $status, string $note): void
+    {
+        if (! Schema::hasTable('notification_deliveries')) {
+            return;
+        }
+        DB::table('notification_deliveries')->insert([
+            'user_id' => $userId,
+            'event' => $event,
+            'channel' => 'email',
+            'title' => $title,
+            'body' => $body,
+            'status' => $status,
+            'provider_note' => $note,
+            'entity_type' => 'kyc',
+            'entity_id' => (string) $userId,
+            'created_at' => now(),
+        ]);
     }
 
     public function reviewKyc(string $driverId, string $status, ?string $reason = null): array

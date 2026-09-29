@@ -47,6 +47,7 @@ class BookingService
         ]);
 
         $distanceKm = (float) ($dto['distanceKm'] ?? Geo::haversineKm($pickupLat, $pickupLng, $dropLat, $dropLng));
+        $dto['product'] = FareService::cityOrOutstation((string) ($dto['product'] ?? 'LOCAL_CAB'), $distanceKm);
         $quote = $this->fares->quote([
             'product' => $dto['product'],
             'category' => $dto['category'],
@@ -76,16 +77,16 @@ class BookingService
             }
         }
 
-        $timeout = $this->settings->requestTimeoutSeconds();
+        $timeout = 600;
         $radius = $this->settings->radiusKm();
         $product = strtoupper((string) ($dto['product'] ?? 'LOCAL_CAB'));
+        $driverDispatch = self::driverCanAccept($product);
         if ($product === 'RENTAL' && empty($dto['scheduledAt'])) {
             $dto['scheduledAt'] = now()->addHour()->toIso8601String();
         }
-        $scheduled = ! empty($dto['scheduledAt']);
-        $status = $scheduled ? 'CONFIRMED' : BookingStatus::SEARCHING;
+        $status = $driverDispatch ? BookingStatus::SEARCHING : 'CONFIRMED';
 
-        $matches = $scheduled ? [] : $this->nearby->search(
+        $matches = $driverDispatch ? $this->nearby->search(
             $pickupLat,
             $pickupLng,
             (string) $dto['category'],
@@ -93,8 +94,7 @@ class BookingService
             false,
             isset($dto['districtId']) ? (int) $dto['districtId'] : ($actor->district_id ? (int) $actor->district_id : null),
             (string) ($dto['product'] ?? 'LOCAL_CAB'),
-        );
-        abort_if(! $scheduled && $matches === [], 422, 'No nearby drivers found.');
+        ) : [];
         $mode = $this->normalizePaymentMode($dto['paymentMode'] ?? $dto['payment_mode'] ?? 'CASH');
         if ($mode === 'WALLET') {
             $balance = app(CustomerWallet::class)->balancePaise((int) $actor->id);
@@ -108,7 +108,7 @@ class BookingService
             'product' => $dto['product'],
             'category' => $dto['category'],
             'status' => $status,
-            'search_expires_at' => $scheduled ? null : now()->addSeconds($timeout),
+            'search_expires_at' => $driverDispatch ? now()->addSeconds($timeout) : null,
             'pickup_text' => $dto['pickupText'] ?? $dto['pickup'] ?? 'Pickup',
             'drop_text' => $dto['dropText'] ?? $dto['drop'] ?? 'Drop',
             'pickup_lat' => $pickupLat,
@@ -117,7 +117,20 @@ class BookingService
             'drop_lng' => $dropLng,
             'distance_km' => $quote['billedKm'] ?? $distanceKm,
             'quote_paise' => $quote['totalPaise'],
-            'quote_snapshot' => $quote,
+            'quote_snapshot' => array_merge($quote, [
+                'bookedDistanceKm' => $distanceKm,
+                'fareInputs' => [
+                    'hours' => $dto['hours'] ?? null,
+                    'extraHours' => $dto['extraHours'] ?? 0,
+                    'stopCount' => isset($dto['stops']) ? count($dto['stops']) : ($dto['stopCount'] ?? 0),
+                    'roundTrip' => $dto['roundTrip'] ?? ($dto['product'] === 'ROUND_WAY'),
+                    'nightStayNights' => $dto['nightStayNights'] ?? 0,
+                    'waitMinutes' => $dto['waitMinutes'] ?? 0,
+                    'night' => $dto['night'] ?? false,
+                    'tollPaise' => $dto['tollPaise'] ?? 0,
+                    'parkingPaise' => $dto['parkingPaise'] ?? 0,
+                ],
+            ]),
             'scheduled_at' => $dto['scheduledAt'] ?? null,
             'return_at' => $dto['returnAt'] ?? null,
             'flight_number' => $dto['flightNumber'] ?? null,
@@ -134,7 +147,7 @@ class BookingService
 
         $this->storeStops($booking, is_array($dto['stops'] ?? null) ? $dto['stops'] : []);
 
-        if (! $scheduled) {
+        if ($driverDispatch && $matches !== []) {
             $this->writeOffers($booking, $matches);
             $this->push->notifyUsers(
                 array_map(fn ($row) => (int) ($row['userId'] ?? 0), $matches),
@@ -154,7 +167,12 @@ class BookingService
             'nearby' => count($matches),
             'radiusKm' => $radius,
         ]);
-        $this->notifyOps($booking, $scheduled ? 'Scheduled booking received' : 'New ride request');
+        $this->notifyOps(
+            $booking,
+            $driverDispatch
+                ? 'New ride request'
+                : 'Assign a driver · '.str_replace('_', ' ', $product),
+        );
 
         return $this->present($booking->fresh(), $actor);
     }
@@ -304,11 +322,38 @@ class BookingService
     {
         abort_unless($actor->role === 'DRIVER', 403, 'Only drivers can reject bookings');
         $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
-        $booking = Booking::query()->findOrFail($id);
-        abort_unless(BookingStatus::isSearching((string) $booking->status), 422, 'This booking is no longer available.');
-        $this->markRequest((int) $booking->id, (int) $driver->id, 'REJECTED');
+        $booking = Booking::query()->find($id);
+        if (! $booking || (string) $booking->status !== BookingStatus::SEARCHING || $booking->driver_id) {
+            return ['available' => false, 'id' => (string) $id];
+        }
+        $this->ensureOfferColumns();
+        $now = now();
+        $row = Schema::hasTable('booking_driver_requests')
+            ? DB::table('booking_driver_requests')->where('booking_id', $booking->id)->where('driver_id', $driver->id)->first()
+            : null;
+        $count = ((int) ($row->reject_count ?? 0)) + 1;
+        $final = $count >= 2;
+        if (Schema::hasTable('booking_driver_requests')) {
+            DB::table('booking_driver_requests')->updateOrInsert(
+                ['booking_id' => $booking->id, 'driver_id' => $driver->id],
+                [
+                    'user_id' => $actor->id,
+                    'status' => $final ? 'REJECTED' : 'SNOOZED',
+                    'reject_count' => $count,
+                    'snooze_until' => $final ? null : $now->copy()->addMinutes(2),
+                    'responded_at' => $now,
+                    'updated_at' => $now,
+                    'created_at' => $row->created_at ?? $now,
+                ],
+            );
+        }
 
         return $this->present($booking, $actor);
+    }
+
+    public static function driverCanAccept(string $product): bool
+    {
+        return in_array(strtoupper($product), ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'SCHEDULE'], true);
     }
 
     public function cancel(User $actor, string $id, array $data = []): array
@@ -459,26 +504,13 @@ class BookingService
         if ($booking->arrived_at && $booking->trip_started_at) {
             $wait = max(0, (int) floor($booking->arrived_at->diffInSeconds($booking->trip_started_at) / 60));
         }
-        $quotedKm = (float) ($booking->distance_km ?: 0);
         $trackedKm = (float) ($booking->actual_distance_km ?: 0);
-        $straightKm = Geo::haversineKm(
-            (float) $booking->pickup_lat,
-            (float) $booking->pickup_lng,
-            (float) $booking->drop_lat,
-            (float) $booking->drop_lng,
-        );
-        $actualKm = max($trackedKm, $quotedKm, $straightKm);
-        $quote = $this->fares->quote([
-            'product' => $booking->product,
-            'category' => $booking->category,
-            'distanceKm' => $actualKm,
-            'districtId' => $booking->district_id,
-            'waitMinutes' => $wait,
-            'pickupLat' => $booking->pickup_lat,
-            'pickupLng' => $booking->pickup_lng,
-        ]);
+        $this->applyRouteFare($booking, $trackedKm, 0, $wait);
+        $booking->refresh();
         $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        $quote = is_array($snapshot['live'] ?? null) ? $snapshot['live'] : $snapshot;
         $totalPaise = (int) ($quote['totalPaise'] ?? $booking->quote_paise);
+        $actualKm = (float) ($booking->actual_distance_km ?: $trackedKm);
         $commissionPercent = (float) (DB::table('commission_rules')->where('active', 1)->orderBy('id')->value('percent') ?? 10);
         $commission = (int) round($totalPaise * ($commissionPercent / 100));
         $fleetShare = 0;
@@ -561,7 +593,11 @@ class BookingService
         }
         if (Schema::hasColumn('bookings', 'scheduled_at')) {
             $q->where(function ($inner) {
-                $inner->whereNull('scheduled_at')->orWhere('scheduled_at', '<=', now());
+                $inner->whereNull('scheduled_at')
+                    ->orWhere('scheduled_at', '<=', now())
+                    ->orWhere(function ($searchWindow) {
+                        $searchWindow->whereNotNull('search_expires_at')->where('search_expires_at', '<=', now());
+                    });
             });
         }
         $ids = $q->pluck('id');
@@ -644,6 +680,8 @@ class BookingService
             'searchRadiusKm' => $radius,
             'nearbyDriverCount' => $nearbyCount,
             'expiresAt' => optional($expires)?->toIso8601String(),
+            'searchExpiresAt' => optional($expires)?->toIso8601String(),
+            'createdAt' => optional($row->created_at)?->toIso8601String(),
             'secondsRemaining' => $secondsLeft,
             'startOtp' => $isCustomer ? $row->start_otp : null,
             'endOtp' => $isCustomer && in_array($row->status, [BookingStatus::TRIP_STARTED, BookingStatus::COMPLETED], true) ? $row->end_otp : null,
@@ -784,7 +822,7 @@ class BookingService
                 ->where('booking_id', $booking->id)
                 ->where('driver_id', $match['driverId'])
                 ->first();
-            if ($existing && in_array((string) $existing->status, ['REJECTED', 'ACCEPTED', 'EXPIRED'], true)) {
+            if ($existing && in_array((string) $existing->status, ['REJECTED', 'ACCEPTED', 'EXPIRED', 'SNOOZED'], true)) {
                 continue;
             }
             DB::table('booking_driver_requests')->updateOrInsert(
@@ -850,12 +888,39 @@ class BookingService
             return [];
         }
 
+        $this->ensureOfferColumns();
+
         return DB::table('booking_driver_requests')
             ->where('driver_id', $driverId)
-            ->where('status', 'OFFERED')
+            ->where(function ($query) {
+                $query->where('status', 'OFFERED')
+                    ->orWhere(function ($snoozed) {
+                        $snoozed->where('status', 'SNOOZED')
+                            ->whereNotNull('snooze_until')
+                            ->where('snooze_until', '<=', now());
+                    });
+            })
             ->pluck('booking_id')
             ->map(fn ($id) => (int) $id)
             ->all();
+    }
+
+    private function ensureOfferColumns(): void
+    {
+        if (! Schema::hasTable('booking_driver_requests')) {
+            return;
+        }
+        if (Schema::hasColumn('booking_driver_requests', 'reject_count') && Schema::hasColumn('booking_driver_requests', 'snooze_until')) {
+            return;
+        }
+        Schema::table('booking_driver_requests', function ($table) {
+            if (! Schema::hasColumn('booking_driver_requests', 'reject_count')) {
+                $table->unsignedTinyInteger('reject_count')->default(0);
+            }
+            if (! Schema::hasColumn('booking_driver_requests', 'snooze_until')) {
+                $table->timestamp('snooze_until')->nullable();
+            }
+        });
     }
 
     public function offersForDriver(User $actor): array
@@ -872,7 +937,9 @@ class BookingService
 
         return Booking::query()
             ->whereIn('id', $ids)
-            ->whereIn('status', BookingStatus::searching())
+            ->where('status', BookingStatus::SEARCHING)
+            ->whereNull('driver_id')
+            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'SCHEDULE'])
             ->orderByDesc('id')
             ->get()
             ->map(function (Booking $row) use ($actor, $driver) {
@@ -1074,27 +1141,95 @@ class BookingService
         $prevLat = $actor->last_lat !== null ? (float) $actor->last_lat : (float) $booking->pickup_lat;
         $prevLng = $actor->last_lng !== null ? (float) $actor->last_lng : (float) $booking->pickup_lng;
         $delta = Geo::haversineKm($prevLat, $prevLng, $lat, $lng);
-        if ($delta <= 0.03 || $delta > 8) {
-            return;
+        $tracked = (float) ($booking->actual_distance_km ?? 0);
+        if ($delta > 0.03 && $delta <= 8) {
+            $tracked += $delta;
         }
-        $tracked = (float) ($booking->actual_distance_km ?? 0) + $delta;
-        $patch = ['actual_distance_km' => round($tracked, 3)];
-        if ($tracked > (float) ($booking->distance_km ?? 0) + 0.4) {
+        $remaining = $this->remainingRouteKm($booking, $lat, $lng);
+        $this->applyRouteFare($booking, $tracked, $remaining);
+    }
+
+    /**
+     * Reprice every service from the current route. A 20 km booking that
+     * becomes a 24 km route is billed at 24 km. The fare never drops below
+     * the distance the customer booked.
+     */
+    private function applyRouteFare(Booking $booking, float $drivenKm, float $remainingKm, ?int $waitMinutes = null): void
+    {
+        $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        $inputs = is_array($snapshot['fareInputs'] ?? null) ? $snapshot['fareInputs'] : [];
+        $bookedKm = (float) ($snapshot['bookedDistanceKm'] ?? 0);
+        if ($bookedKm <= 0) {
+            $bookedKm = (float) ($booking->distance_km ?: 0);
+        }
+        $product = strtoupper((string) $booking->product);
+        $projected = $drivenKm + max(0, $remainingKm);
+        $roundTrip = (bool) ($inputs['roundTrip'] ?? $product === 'ROUND_WAY');
+        if ($product === 'ROUND_WAY' && $drivenKm > max(1, $bookedKm * 2)) {
+            $fareKm = $drivenKm;
+            $roundTrip = false;
+        } else {
+            $fareKm = max($bookedKm, $projected);
+        }
+        $lastBilled = (float) ($snapshot['liveBilledKm'] ?? $snapshot['billedKm'] ?? $bookedKm);
+        $patch = ['actual_distance_km' => round(max(0, $drivenKm), 3)];
+        if (abs($fareKm - $lastBilled) >= 0.3) {
+            $wait = $waitMinutes ?? (int) ($inputs['waitMinutes'] ?? $booking->wait_minutes ?? 0);
             $quote = $this->fares->quote([
-                'product' => $booking->product,
+                'lockProduct' => true,
+                'product' => $product,
                 'category' => $booking->category,
-                'distanceKm' => $tracked,
+                'distanceKm' => $fareKm,
                 'districtId' => $booking->district_id,
+                'hours' => $inputs['hours'] ?? null,
+                'extraHours' => $inputs['extraHours'] ?? 0,
+                'stopCount' => $inputs['stopCount'] ?? 0,
+                'roundTrip' => $roundTrip,
+                'nightStayNights' => $inputs['nightStayNights'] ?? 0,
+                'waitMinutes' => $wait,
+                'night' => $inputs['night'] ?? false,
+                'tollPaise' => $inputs['tollPaise'] ?? 0,
+                'parkingPaise' => $inputs['parkingPaise'] ?? 0,
                 'pickupLat' => $booking->pickup_lat,
                 'pickupLng' => $booking->pickup_lng,
             ]);
-            $patch['distance_km'] = $tracked;
-            $patch['quote_paise'] = (int) ($quote['totalPaise'] ?? $booking->quote_paise);
-            $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+            $discount = (int) ($snapshot['coupon']['discountPaise'] ?? 0);
+            if ($discount > 0) {
+                $quote['totalPaise'] = max(0, (int) $quote['totalPaise'] - $discount);
+                $quote['totalRupees'] = $quote['totalPaise'] / 100;
+            }
+            $snapshot = array_merge($snapshot, $quote);
+            $snapshot['fareInputs'] = $inputs;
+            $snapshot['bookedDistanceKm'] = $bookedKm;
+            $snapshot['liveBilledKm'] = (float) ($quote['billedKm'] ?? $fareKm);
             $snapshot['live'] = $quote;
+            $patch['distance_km'] = $quote['billedKm'] ?? $fareKm;
+            $patch['quote_paise'] = (int) $quote['totalPaise'];
+            $patch['quote_snapshot'] = $snapshot;
+        } elseif ($remainingKm > 0 || isset($snapshot['remainingKm'])) {
+            $snapshot['remainingKm'] = round($remainingKm, 2);
             $patch['quote_snapshot'] = $snapshot;
         }
         $booking->update($this->filterColumns($patch));
+    }
+
+    private function remainingRouteKm(Booking $booking, float $lat, float $lng): float
+    {
+        if ($booking->drop_lat === null || $booking->drop_lng === null) {
+            return 0;
+        }
+        $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        $checkedAt = (int) ($snapshot['routeCheckedAt'] ?? 0);
+        if ((time() - $checkedAt) < 20 && isset($snapshot['remainingKm'])) {
+            return (float) $snapshot['remainingKm'];
+        }
+        $road = $this->fares->roadDistanceKm($lat, $lng, (float) $booking->drop_lat, (float) $booking->drop_lng);
+        $remaining = $road ?? Geo::haversineKm($lat, $lng, (float) $booking->drop_lat, (float) $booking->drop_lng);
+        $snapshot['routeCheckedAt'] = time();
+        $snapshot['remainingKm'] = round($remaining, 2);
+        $booking->quote_snapshot = $snapshot;
+
+        return $remaining;
     }
 
     private function notifyOps(Booking $booking, string $title): void
