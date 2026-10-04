@@ -295,6 +295,13 @@ class DriverOpsService
             'online' => $online,
             'duty_status' => $online ? 'online' : 'offline',
         ]);
+        if ($online) {
+            try {
+                app(BookingService::class)->offerWaitingToDriver($actor->fresh() ?? $actor);
+            } catch (\Throwable $e) {
+                Log::warning('booking.offer_on_online_failed', ['userId' => $actor->id, 'error' => $e->getMessage()]);
+            }
+        }
 
         return $this->me($actor);
     }
@@ -327,6 +334,13 @@ class DriverOpsService
                 $live = app(BookingService::class)->live($actor, $bookingId);
             } catch (\Throwable $e) {
                 Log::warning('booking.live_after_location_failed', ['message' => $e->getMessage()]);
+            }
+        }
+        if ($driver && $driver->online && in_array(strtolower((string) $driver->duty_status), ['online', 'available'], true)) {
+            try {
+                app(BookingService::class)->offerWaitingToDriver($actor, $lat, $lng);
+            } catch (\Throwable $e) {
+                Log::warning('booking.offer_on_ping_failed', ['userId' => $actor->id, 'error' => $e->getMessage()]);
             }
         }
 

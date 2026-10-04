@@ -16,6 +16,24 @@ class FcmPushService
         if ($ids === []) {
             return;
         }
+        $event = (string) ($data['event'] ?? '');
+        if ($event === 'new_booking' && Schema::hasTable('drivers')) {
+            $offline = DB::table('drivers')
+                ->whereIn('user_id', $ids)
+                ->get(['user_id', 'online', 'duty_status'])
+                ->filter(function ($row) {
+                    $duty = strtolower((string) $row->duty_status);
+
+                    return (int) $row->online !== 1 || ! in_array($duty, ['online', 'available'], true);
+                })
+                ->pluck('user_id')
+                ->map(fn ($id) => (int) $id)
+                ->all();
+            $ids = array_values(array_diff($ids, $offline));
+            if ($ids === []) {
+                return;
+            }
+        }
         $this->persistInbox($ids, $title, $body, $data);
         $tokens = $this->tokensFor($ids);
         foreach ($tokens as $token) {

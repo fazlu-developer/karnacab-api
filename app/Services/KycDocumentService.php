@@ -9,7 +9,6 @@ use App\Models\Vehicle;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 class KycDocumentService
@@ -163,6 +162,10 @@ class KycDocumentService
         $doc->forceFill($fill)->save();
 
         if (in_array($type, ['LIVE_PHOTO', 'SELFIE', 'PROFILE_PHOTO'], true) && Schema::hasColumn('users', 'avatar_path')) {
+            $previousAvatar = (string) ($actor->avatar_path ?? '');
+            if ($previousAvatar !== '' && $previousAvatar !== $path) {
+                $this->deleteFile($previousAvatar);
+            }
             $actor->update(['avatar_path' => $path]);
         }
 
@@ -174,6 +177,9 @@ class KycDocumentService
         $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
         $doc = DriverDocument::query()->where('driver_id', $driver->id)->where('id', $id)->firstOrFail();
         $this->deleteFile($doc->storage_key);
+        if (Schema::hasColumn('users', 'avatar_path') && (string) ($actor->avatar_path ?? '') === (string) $doc->storage_key) {
+            $actor->update(['avatar_path' => null]);
+        }
         $doc->delete();
 
         return app(DriverOpsService::class)->kycSnapshot($actor);
@@ -231,10 +237,23 @@ class KycDocumentService
         abort_unless($wrote, 500, 'Could not save the attachment');
     }
 
-    private function deleteFile(?string $key): void
+    public function deleteFile(?string $key): void
     {
-        if ($key && ! str_starts_with($key, 'http') && Storage::disk('public')->exists($key)) {
-            Storage::disk('public')->delete($key);
+        $key = ltrim(str_replace('\\', '/', (string) $key), '/');
+        if ($key === '' || str_contains($key, '..') || str_starts_with($key, 'http://') || str_starts_with($key, 'https://')) {
+            return;
+        }
+        $roots = [
+            storage_path('app/public'),
+            storage_path('app/private'),
+            base_path('../management-admin/storage/app/public'),
+            dirname(base_path()).'/management-admin/storage/app/public',
+        ];
+        foreach ($roots as $root) {
+            $full = rtrim(str_replace('\\', '/', $root), '/').'/'.$key;
+            if (is_file($full)) {
+                @unlink($full);
+            }
         }
     }
 }

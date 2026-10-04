@@ -430,6 +430,10 @@ class AuthService
         }
         abort_unless($binary, 422, 'Choose a profile photo');
         $ext = str_contains($mime, 'png') ? 'png' : 'jpg';
+        $docs = app(KycDocumentService::class);
+        if (! empty($user->avatar_path)) {
+            $docs->deleteFile((string) $user->avatar_path);
+        }
         $path = 'avatars/'.$user->id.'/'.uniqid('p', true).'.'.$ext;
         app(KycDocumentService::class)->writePublicFile($path, $binary);
         User::query()->where('id', $user->id)->update(['avatar_path' => $path, 'updated_at' => now()]);
@@ -471,26 +475,21 @@ class AuthService
         abort_unless(filter_var($email, FILTER_VALIDATE_EMAIL), 422, 'Enter a valid email address');
         $taken = User::query()->where('email', $email)->where('id', '!=', $user->id)->exists();
         abort_if($taken, 409, 'Email already registered');
-        $demo = filter_var(env('STATIC_TEST_OTP_ENABLED', false), FILTER_VALIDATE_BOOLEAN);
-        $code = $demo ? (string) env('DEMO_OTP_CODE', '123456') : (string) random_int(100000, 999999);
+        $code = (string) random_int(100000, 999999);
         Cache::put('email-otp:'.$user->id.':'.$email, hash('sha256', $user->id.':'.$email.':'.$code), 300);
         $audience = $user->role === 'DRIVER' ? 'driver' : 'customer';
-        $payload = [
+        try {
+            Mail::to($email)->send(new EmailVerifyOtpMail($code, $audience));
+        } catch (\Throwable $e) {
+            Cache::forget('email-otp:'.$user->id.':'.$email);
+            Log::warning('email.otp_failed', ['userId' => $user->id, 'error' => $e->getMessage()]);
+            abort(503, 'Could not send the email verification code. Try again.');
+        }
+
+        return [
             'ok' => true,
             'expiresInSeconds' => 300,
         ];
-        if (config('app.debug') || $demo) {
-            $payload['devCode'] = $code;
-        }
-        app()->terminating(function () use ($user, $email, $code, $audience) {
-            try {
-                Mail::to($email)->send(new EmailVerifyOtpMail($code, $audience));
-            } catch (\Throwable $e) {
-                Log::warning('email.otp_failed', ['userId' => $user->id, 'error' => $e->getMessage()]);
-            }
-        });
-
-        return $payload;
     }
 
     public function verifyEmailOtp(User $user, string $email, string $code): array
@@ -499,10 +498,6 @@ class AuthService
         $code = preg_replace('/\D+/', '', $code) ?? '';
         $hash = Cache::get('email-otp:'.$user->id.':'.$email);
         $matches = is_string($hash) && hash_equals($hash, hash('sha256', $user->id.':'.$email.':'.$code));
-        $demo = filter_var(env('STATIC_TEST_OTP_ENABLED', false), FILTER_VALIDATE_BOOLEAN);
-        if (! $matches && $demo && hash_equals((string) env('DEMO_OTP_CODE', '123456'), $code)) {
-            $matches = true;
-        }
         abort_unless($matches, 422, 'Invalid email verification code');
         $taken = User::query()->where('email', $email)->where('id', '!=', $user->id)->exists();
         abort_if($taken, 409, 'Email already registered');

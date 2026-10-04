@@ -12,6 +12,7 @@ use App\Support\BookingProductSchema;
 use App\Support\BookingStatus;
 use App\Support\Geo;
 use App\Support\ServiceArea;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
@@ -298,32 +299,41 @@ class BookingService
         abort_unless($assigned, 409, 'Booking has already been accepted by another driver.');
         $booking = Booking::query()->findOrFail($id);
         Log::info('booking.accepted', ['bookingId' => $booking->id, 'driverId' => $driver->id]);
-        $this->notifyOps($booking, 'Driver found for booking '.$booking->public_ref);
-        $notice = app(NotificationTemplates::class)->definition('driver_assigned', [
-            'title' => 'Your booking is accepted',
-            'body' => '{name} accepted your booking {ref}.',
-            'channels' => ['in_app', 'push'],
-        ]);
-        $vars = [
-            'name' => $actor->name ?: 'Your driver',
-            'ref' => (string) $booking->public_ref,
-            'status' => 'accepted',
-        ];
-        $title = NotificationTemplates::fill($notice['title'], $vars);
-        $body = NotificationTemplates::fill($notice['body'], $vars);
-        if (in_array('in_app', $notice['channels'], true) || in_array('push', $notice['channels'], true)) {
-            $this->push->notifyUsers(
-                [(int) $booking->customer_id],
-                $title !== '' ? $title : 'Your booking is accepted',
-                $body !== '' ? $body : 'Your booking is accepted.',
-                ['type' => 'trip', 'event' => 'accepted', 'silent' => '1', 'bookingId' => (string) $booking->id],
-            );
-        }
-        if (in_array('email', $notice['channels'], true)) {
-            $this->emailCustomer((int) $booking->customer_id, $title, $body);
-        }
+        $presented = $this->present($booking, $actor);
+        $noticeBooking = $booking;
+        $driverName = $actor->name ?: 'Your driver';
+        app()->terminating(function () use ($noticeBooking, $driverName) {
+            try {
+                $this->notifyOps($noticeBooking, 'Driver found for booking '.$noticeBooking->public_ref);
+                $notice = app(NotificationTemplates::class)->definition('driver_assigned', [
+                    'title' => 'Your booking is accepted',
+                    'body' => '{name} accepted your booking {ref}.',
+                    'channels' => ['in_app', 'push'],
+                ]);
+                $vars = [
+                    'name' => $driverName,
+                    'ref' => (string) $noticeBooking->public_ref,
+                    'status' => 'accepted',
+                ];
+                $title = NotificationTemplates::fill($notice['title'], $vars);
+                $body = NotificationTemplates::fill($notice['body'], $vars);
+                if (in_array('in_app', $notice['channels'], true) || in_array('push', $notice['channels'], true)) {
+                    $this->push->notifyUsers(
+                        [(int) $noticeBooking->customer_id],
+                        $title !== '' ? $title : 'Your booking is accepted',
+                        $body !== '' ? $body : 'Your booking is accepted.',
+                        ['type' => 'trip', 'event' => 'accepted', 'silent' => '1', 'bookingId' => (string) $noticeBooking->id],
+                    );
+                }
+                if (in_array('email', $notice['channels'], true)) {
+                    $this->emailCustomer((int) $noticeBooking->customer_id, $title, $body);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('booking.accept_notify_failed', ['bookingId' => $noticeBooking->id, 'error' => $e->getMessage()]);
+            }
+        });
 
-        return $this->present($booking, $actor);
+        return $presented;
     }
 
     public function reject(User $actor, string $id): array
@@ -944,6 +954,75 @@ class BookingService
         });
     }
 
+    /**
+     * A customer can be waiting while every driver is offline. When one comes
+     * online, attach that waiting search immediately.
+     */
+    public function offerWaitingToDriver(User $actor, ?float $lat = null, ?float $lng = null): void
+    {
+        if (! Cache::add('offer-wait:'.$actor->id, 1, now()->addSeconds(12))) {
+            return;
+        }
+        $driver = Driver::query()->where('user_id', $actor->id)->with('vehicles')->first();
+        if (! $driver || ! $driver->online) {
+            return;
+        }
+        $duty = strtolower((string) $driver->duty_status);
+        if (! in_array($duty, ['online', 'available'], true)) {
+            return;
+        }
+        $lat = $lat ?? ($actor->last_lat !== null ? (float) $actor->last_lat : null);
+        $lng = $lng ?? ($actor->last_lng !== null ? (float) $actor->last_lng : null);
+        if ($lat === null || $lng === null) {
+            return;
+        }
+        $category = strtoupper((string) ($driver->vehicles->first()?->category ?? ''));
+        if ($category === '') {
+            return;
+        }
+        $radius = $this->settings->radiusKm();
+        $rows = Booking::query()
+            ->where('status', BookingStatus::SEARCHING)
+            ->whereNull('driver_id')
+            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'SCHEDULE'])
+            ->orderByDesc('id')
+            ->limit(20)
+            ->get();
+        $pushes = [];
+        foreach ($rows as $booking) {
+            if (strcasecmp((string) $booking->category, $category) !== 0) {
+                continue;
+            }
+            $km = Geo::haversineKm($lat, $lng, (float) $booking->pickup_lat, (float) $booking->pickup_lng);
+            if ($km > $radius) {
+                continue;
+            }
+            $this->writeOffers($booking, [[
+                'driverId' => (int) $driver->id,
+                'userId' => (int) $actor->id,
+                'distanceKm' => round($km, 2),
+            ]]);
+            $pushes[] = [
+                'title' => 'New KarnaCab booking',
+                'body' => trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
+                'bookingId' => (string) $booking->id,
+            ];
+        }
+        if ($pushes === []) {
+            return;
+        }
+        $userId = (int) $actor->id;
+        app()->terminating(function () use ($pushes, $userId) {
+            foreach ($pushes as $push) {
+                $this->push->notifyUsers([$userId], $push['title'], $push['body'], [
+                    'type' => 'booking_offer',
+                    'event' => 'new_booking',
+                    'bookingId' => $push['bookingId'],
+                ]);
+            }
+        });
+    }
+
     public function offersForDriver(User $actor): array
     {
         $this->expireSearching();
@@ -1159,15 +1238,43 @@ class BookingService
         if (! in_array($booking->status, BookingStatus::inTrip(), true)) {
             return;
         }
-        $prevLat = $actor->last_lat !== null ? (float) $actor->last_lat : (float) $booking->pickup_lat;
-        $prevLng = $actor->last_lng !== null ? (float) $actor->last_lng : (float) $booking->pickup_lng;
+        $this->ensureTripKmLogs();
+        $prev = DB::table('trip_km_logs')->where('booking_id', $booking->id)->orderByDesc('id')->first();
+        $prevLat = $prev ? (float) $prev->lat : ($actor->last_lat !== null ? (float) $actor->last_lat : (float) $booking->pickup_lat);
+        $prevLng = $prev ? (float) $prev->lng : ($actor->last_lng !== null ? (float) $actor->last_lng : (float) $booking->pickup_lng);
         $delta = Geo::haversineKm($prevLat, $prevLng, $lat, $lng);
         $tracked = (float) ($booking->actual_distance_km ?? 0);
+        $counted = 0.0;
         if ($delta > 0.03 && $delta <= 8) {
+            $counted = $delta;
             $tracked += $delta;
         }
+        DB::table('trip_km_logs')->insert([
+            'booking_id' => $booking->id,
+            'lat' => $lat,
+            'lng' => $lng,
+            'delta_km' => round($counted, 3),
+            'tracked_km' => round(max(0, $tracked), 3),
+            'recorded_at' => now(),
+        ]);
         $remaining = $this->remainingRouteKm($booking, $lat, $lng);
         $this->applyRouteFare($booking, $tracked, $remaining);
+    }
+
+    private function ensureTripKmLogs(): void
+    {
+        if (Schema::hasTable('trip_km_logs')) {
+            return;
+        }
+        Schema::create('trip_km_logs', function ($table) {
+            $table->id();
+            $table->unsignedBigInteger('booking_id')->index();
+            $table->decimal('lat', 10, 7);
+            $table->decimal('lng', 10, 7);
+            $table->decimal('delta_km', 8, 3)->default(0);
+            $table->decimal('tracked_km', 8, 3)->default(0);
+            $table->timestamp('recorded_at')->nullable();
+        });
     }
 
     /**
