@@ -63,32 +63,32 @@ class CmsCatalogService
             [
                 'slug' => 'about-us',
                 'title' => 'About Us',
-                'lede' => 'KarnaCab is a ride and delivery network for cities across India.',
-                'body' => "KarnaCab connects riders with verified drivers for city rides, outstation trips, rentals, parcels and more.\n\nWe operate with local partners so pickup, fare and support stay close to the city you book in.",
+                'lede' => 'KarnaRide is a ride and delivery network for cities across India.',
+                'body' => "KarnaRide connects riders with verified drivers for city rides, outstation trips, rentals, parcels and more.\n\nWe operate with local partners so pickup, fare and support stay close to the city you book in.",
             ],
             [
                 'slug' => 'privacy-policy',
                 'title' => 'Privacy Policy',
-                'lede' => 'How KarnaCab collects, uses and protects your information.',
+                'lede' => 'How KarnaRide collects, uses and protects your information.',
                 'body' => "We collect your name, phone number, trip locations and payment details to complete bookings and keep your account secure.\n\nWe do not sell personal data. You can request access or deletion through in-app Support.",
             ],
             [
                 'slug' => 'terms-conditions',
                 'title' => 'Terms & Conditions',
-                'lede' => 'Rules for using the KarnaCab customer application.',
-                'body' => "By using KarnaCab you agree to book trips in good faith, pay the quoted fare, and follow driver and safety instructions.\n\nCancellations, waiting charges and tolls follow the fare shown before you confirm the ride.",
+                'lede' => 'Rules for using the KarnaRide customer application.',
+                'body' => "By using KarnaRide you agree to book trips in good faith, pay the quoted fare, and follow driver and safety instructions.\n\nCancellations, waiting charges and tolls follow the fare shown before you confirm the ride.",
             ],
             [
                 'slug' => 'return-refund',
                 'title' => 'Return & Refund',
                 'lede' => 'Wallet top-ups, cancelled trips and fare adjustments.',
-                'body' => "Unused wallet balance stays in your KarnaCab wallet.\n\nIf a trip is cancelled as per policy or a fare is charged in error, the amount is returned to the original payment method or wallet after review. Open Support with the booking ID to request a refund.",
+                'body' => "Unused wallet balance stays in your KarnaRide wallet.\n\nIf a trip is cancelled as per policy or a fare is charged in error, the amount is returned to the original payment method or wallet after review. Open Support with the booking ID to request a refund.",
             ],
             [
                 'slug' => 'software-license',
                 'title' => 'Software License',
-                'lede' => 'Licence to use the KarnaCab mobile application.',
-                'body' => "KarnaCab grants you a personal, non-exclusive licence to use this app for booking transport and related services.\n\nYou may not copy, reverse engineer, or misuse the software. Brand names and content remain the property of KarnaCab.",
+                'lede' => 'Licence to use the KarnaRide mobile application.',
+                'body' => "KarnaRide grants you a personal, non-exclusive licence to use this app for booking transport and related services.\n\nYou may not copy, reverse engineer, or misuse the software. Brand names and content remain the property of KarnaRide.",
             ],
         ];
     }
@@ -108,7 +108,7 @@ class CmsCatalogService
 
         return [
             'tabs' => [
-                ['key' => 'ride', 'title' => 'KarnaCab'],
+                ['key' => 'ride', 'title' => 'KarnaRide'],
                 ['key' => 'parcel', 'title' => 'Parcel'],
             ],
             'rideServices' => $ride->map(fn ($row) => $this->service($row))->all(),
@@ -151,7 +151,7 @@ class CmsCatalogService
             'path' => $row->slug === 'home' ? '/' : '/'.$row->slug,
             'title' => $row->title,
             'eyebrow' => $row->eyebrow,
-            'seoTitle' => $row->seo_title ?: $row->title.' | KarnaCab',
+            'seoTitle' => $row->seo_title ?: $row->title.' | KarnaRide',
             'seoDescription' => $row->seo_description ?: $row->lede,
             'lede' => $row->lede,
             'description' => $row->lede,

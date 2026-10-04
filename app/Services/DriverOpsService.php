@@ -504,7 +504,7 @@ class DriverOpsService
     {
         $email = strtolower(trim((string) $actor->email));
         $title = 'Onboarding submitted successfully';
-        $body = 'Your KarnaCab driver onboarding was submitted successfully. We are reviewing your documents. You will receive another email when your account is active.';
+        $body = 'Your KarnaRide driver onboarding was submitted successfully. We are reviewing your documents. You will receive another email when your account is active.';
         if ($email === '' || str_ends_with($email, '@otp.karnacab.local')) {
             $this->logMailDelivery((int) $actor->id, 'kyc_submitted', $title, $body, 'skipped', 'no_email');
 

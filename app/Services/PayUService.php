@@ -22,7 +22,7 @@ class PayUService
         $email = $this->email($actor);
         $firstname = $this->firstName($actor);
         $phone = $this->phone($actor);
-        $productinfo = 'KarnaCab wallet top-up';
+        $productinfo = 'KarnaRide wallet top-up';
         $hash = $this->requestHash($txnid, $amount, $productinfo, $firstname, $email);
         $payload = [
             'txnid' => $txnid,
@@ -86,7 +86,7 @@ class PayUService
         $email = $this->email($user);
         $firstname = $this->firstName($user);
         $phone = $this->phone($user);
-        $productinfo = 'KarnaCab wallet top-up';
+        $productinfo = 'KarnaRide wallet top-up';
         $hash = $this->requestHash($txnid, $amount, $productinfo, $firstname, $email);
         $action = $this->payuUrl();
         $returnHost = rtrim((string) (request()?->getSchemeAndHttpHost() ?: config('app.url')), '/');
@@ -229,7 +229,7 @@ HTML;
             app(FcmPushService::class)->notifyUsers(
                 [$userId],
                 'Wallet credited',
-                '₹'.number_format($paise / 100, 0).' added to your KarnaCab wallet.',
+                '₹'.number_format($paise / 100, 0).' added to your KarnaRide wallet.',
                 ['type' => 'wallet', 'event' => 'credited', 'txnid' => $txnid],
             );
         } catch (\Throwable) {

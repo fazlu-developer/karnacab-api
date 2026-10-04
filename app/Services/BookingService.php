@@ -165,7 +165,7 @@ class BookingService
                     $this->writeOffers($booking, $matches);
                     $this->push->notifyUsers(
                         array_map(fn ($row) => (int) ($row['userId'] ?? 0), $matches),
-                        'New KarnaCab booking',
+                        'New KarnaRide booking',
                         trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
                         [
                             'type' => 'booking_offer',
@@ -1003,7 +1003,7 @@ class BookingService
                 'distanceKm' => round($km, 2),
             ]]);
             $pushes[] = [
-                'title' => 'New KarnaCab booking',
+                'title' => 'New KarnaRide booking',
                 'body' => trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
                 'bookingId' => (string) $booking->id,
             ];
@@ -1363,7 +1363,7 @@ class BookingService
     private function notifyOps(Booking $booking, string $title): void
     {
         $email = (string) (DB::table('system_settings')->where('key', 'booking_notify_email')->value('value')
-            ?? config('karnacab.booking_notify_email', 'fazlu.developer@gmail.com'));
+            ?? config('karnacab.booking_notify_email', 'karnacabofficial@gmail.com'));
         if ($email === '' || ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
             return;
         }

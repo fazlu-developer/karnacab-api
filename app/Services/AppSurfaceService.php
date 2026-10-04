@@ -254,8 +254,8 @@ class AppSurfaceService
             'customerPhone' => $actor->role === 'DRIVER' ? ($row->passenger_phone ?? null) : $actor->phone,
             'customerEmail' => $actor->role === 'DRIVER' ? null : $actor->email,
             'driverName' => $actor->role === 'DRIVER' ? $actor->name : null,
-            'company' => 'KarnaCab',
-            'companyAddress' => 'KarnaCab Mobility Pvt Ltd, India',
+            'company' => 'KarnaRide',
+            'companyAddress' => 'KarnaRide Mobility Pvt Ltd, India',
             'gstin' => 'GSTIN applied as per fare rules',
         ];
     }
@@ -466,7 +466,7 @@ class AppSurfaceService
                 return [
                     'id' => (string) $row->id,
                     'title' => $title,
-                    'business' => $row->business_name ?? 'KarnaCab',
+                    'business' => $row->business_name ?? 'KarnaRide',
                     'campaign' => $title,
                     'category' => $row->category ?? 'banner',
                     'imageUrl' => $image,
@@ -540,7 +540,7 @@ class AppSurfaceService
                 'gstPercent' => (int) $row->gst_percent,
             ])->all(),
             'tracking' => ['Created', 'Assigned', 'Picked Up', 'In Transit', 'Destination', 'Out for Delivery', 'Delivered'],
-            'complianceText' => 'I confirm this parcel does not contain prohibited goods and complies with KarnaCab parcel policy.',
+            'complianceText' => 'I confirm this parcel does not contain prohibited goods and complies with KarnaRide parcel policy.',
         ];
     }
 

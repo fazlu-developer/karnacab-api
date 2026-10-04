@@ -56,7 +56,7 @@ class LaunchTestAccountsSeeder extends Seeder
         $driverUserId = $this->upsertUser([
             'role' => 'DRIVER',
             'status' => 'ACTIVE',
-            'name' => 'KarnaCab Driver',
+            'name' => 'KarnaRide Driver',
             'email' => self::DRIVER_PHONE.'@otp.karnacab.local',
             'phone' => self::DRIVER_PHONE,
             'password_hash' => $password,

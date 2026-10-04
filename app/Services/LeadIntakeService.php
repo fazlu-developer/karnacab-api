@@ -4,8 +4,10 @@ namespace App\Services;
 
 use App\Mail\WebsiteLeadMail;
 use App\Models\Lead;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Schema;
 
 class LeadIntakeService
 {
@@ -76,7 +78,13 @@ class LeadIntakeService
      */
     public function recipients(): array
     {
-        $raw = (string) config('karnacab.leads_notify_email', '');
+        $raw = '';
+        if (Schema::hasTable('system_settings')) {
+            $raw = (string) DB::table('system_settings')->where('key', 'leads_notify_email')->value('value');
+        }
+        if ($raw === '') {
+            $raw = (string) config('karnacab.leads_notify_email', 'karnacabofficial@gmail.com');
+        }
         $emails = array_values(array_filter(array_map('trim', explode(',', $raw)), fn ($email) => filter_var($email, FILTER_VALIDATE_EMAIL)));
 
         return $emails;

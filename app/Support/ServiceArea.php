@@ -153,17 +153,17 @@ class ServiceArea
 
     public static function comingSoonMessage(?string $detected = null): string
     {
-        $live = implode(' and ', self::states()) ?: 'live KarnaCab states';
+        $live = implode(' and ', self::states()) ?: 'live KarnaRide states';
         if ($detected) {
-            return 'Coming soon: KarnaCab is not live in '.$detected.' yet. Service is available when pickup or destination is in '.$live.'.';
+            return 'Coming soon: KarnaRide is not live in '.$detected.' yet. Service is available when pickup or destination is in '.$live.'.';
         }
 
-        return 'Coming soon: KarnaCab is not live for this pickup and destination. We currently operate in '.$live.'.';
+        return 'Coming soon: KarnaRide is not live for this pickup and destination. We currently operate in '.$live.'.';
     }
 
     public static function locationRequiredMessage(): string
     {
-        return 'Allow location access so KarnaCab can confirm whether your state is live. Otherwise this city stays Coming soon.';
+        return 'Allow location access so KarnaRide can confirm whether your state is live. Otherwise this city stays Coming soon.';
     }
 
     /**

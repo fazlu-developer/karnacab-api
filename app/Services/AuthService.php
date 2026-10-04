@@ -138,7 +138,7 @@ class AuthService
             $user = User::query()->create([
                 'role' => $role,
                 'status' => in_array($role, ['DRIVER', 'FLEET_OWNER'], true) ? 'PENDING' : 'ACTIVE',
-                'name' => $role === 'FLEET_OWNER' ? 'KarnaCab fleet owner' : 'KarnaCab user',
+                'name' => $role === 'FLEET_OWNER' ? 'KarnaRide fleet owner' : 'KarnaRide user',
                 'email' => $email,
                 'phone' => $phone,
                 'password_hash' => Hash::make(bin2hex(random_bytes(8))),
@@ -312,6 +312,7 @@ class AuthService
         $placeholderEmail = str_ends_with((string) $user->email, '@otp.karnacab.local');
         $needsProfile = $user->role === 'CUSTOMER' && (
             $placeholderEmail
+            || $user->name === 'KarnaRide user'
             || $user->name === 'KarnaCab user'
             || empty($user->gender)
             || empty($user->date_of_birth)

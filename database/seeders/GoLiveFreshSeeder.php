@@ -112,7 +112,7 @@ class GoLiveFreshSeeder extends Seeder
         $this->putSetting('cms_home_promo', json_encode([
             'title' => 'Ride more, save more',
             'cta' => 'View offers',
-            'subtitle' => 'Fresh KarnaCab launch offers on city, airport and tours',
+            'subtitle' => 'Fresh KarnaRide launch offers on city, airport and tours',
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
     }
 
@@ -158,22 +158,22 @@ class GoLiveFreshSeeder extends Seeder
         $now = now();
         $banners = [
             [
-                'title' => 'KarnaCab Launch — Ride Smart',
-                'business_name' => 'KarnaCab',
+                'title' => 'KarnaRide Launch — Ride Smart',
+                'business_name' => 'KarnaRide',
                 'category' => 'local_businesses',
                 'image' => 'https://images.unsplash.com/photo-1449965408869-eaa3f722e40d?auto=format&fit=crop&w=1600&q=80',
                 'cta' => 'https://karnacab.in',
             ],
             [
                 'title' => 'Safe Airport Pickups',
-                'business_name' => 'KarnaCab Airport',
+                'business_name' => 'KarnaRide Airport',
                 'category' => 'local_businesses',
                 'image' => 'https://images.unsplash.com/photo-1436491865332-7a61a109cc05?auto=format&fit=crop&w=1600&q=80',
                 'cta' => 'https://karnacab.in',
             ],
             [
                 'title' => 'Himalayan Weekend Packages',
-                'business_name' => 'KarnaCab Tours',
+                'business_name' => 'KarnaRide Tours',
                 'category' => 'local_businesses',
                 'image' => 'https://images.unsplash.com/photo-1626621341517-bbf3d9990a23?auto=format&fit=crop&w=1600&q=80',
                 'cta' => 'https://karnacab.in',

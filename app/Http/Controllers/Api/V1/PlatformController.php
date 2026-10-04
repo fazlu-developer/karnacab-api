@@ -39,7 +39,7 @@ class PlatformController extends Controller
 
         return [
             'status' => ($database['status'] ?? '') === 'up' ? 'ok' : 'degraded',
-            'service' => 'KarnaCab API',
+            'service' => 'KarnaRide API',
             'runtime' => 'laravel12',
             'version' => '1',
             'prefix' => '/api',
@@ -697,14 +697,14 @@ class PlatformController extends Controller
         $ok = in_array($result['status'] ?? '', ['captured', 'success'], true);
         $headline = $ok ? 'Payment received' : 'Payment not completed';
         $copy = $ok
-            ? 'Wallet balance will update in the KarnaCab app.'
+            ? 'Wallet balance will update in the KarnaRide app.'
             : 'You can close this window and try again from the app.';
 
         return response(<<<HTML
 <!DOCTYPE html>
 <html><body style="margin:0;background:#f4f1ea;font-family:Segoe UI,Arial,sans-serif;color:#10231c">
   <main id="karnacab-payu" data-status="{$status}" style="max-width:420px;margin:48px auto;background:#fff;border-radius:18px;padding:28px">
-    <p style="letter-spacing:.12em;text-transform:uppercase;color:#5c564c;font-size:12px">KarnaCab PayU</p>
+    <p style="letter-spacing:.12em;text-transform:uppercase;color:#5c564c;font-size:12px">KarnaRide PayU</p>
     <h1 style="margin:8px 0">{$headline}</h1>
     <p>{$copy}</p>
     <p style="color:#5c564c">Reference {$txn}</p>

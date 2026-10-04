@@ -685,7 +685,7 @@ class OperatorFleetService
 
         return ['notifications' => $rows->map(fn ($row) => [
             'id' => (int) $row->id,
-            'title' => $row->title ?? $row->subject ?? 'KarnaCab',
+            'title' => $row->title ?? $row->subject ?? 'KarnaRide',
             'body' => $row->body ?? $row->message ?? '',
             'createdAt' => $row->created_at,
         ])->all()];
@@ -719,7 +719,7 @@ class OperatorFleetService
             'email' => $actor->email,
             'phone' => $actor->phone,
             'role' => $actor->role,
-            'fleetName' => $fleet->trade_name ?? 'KarnaCab Fleet',
+            'fleetName' => $fleet->trade_name ?? 'KarnaRide Fleet',
             'city' => $actor->last_address,
             'stateId' => $actor->state_id,
             'districtId' => $actor->district_id,

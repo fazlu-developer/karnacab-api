@@ -347,7 +347,7 @@ class DemoSampleDataSeeder extends Seeder
         DB::table('user_notifications')->insert([
             [
                 'user_id' => $customerId,
-                'title' => 'Welcome to KarnaCab',
+                'title' => 'Welcome to KarnaRide',
                 'body' => 'On-screen OTP for this number is 123456.',
                 'kind' => 'info',
                 'created_at' => $now,

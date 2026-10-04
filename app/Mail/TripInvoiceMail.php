@@ -24,7 +24,7 @@ class TripInvoiceMail extends Mailable
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: 'KarnaCab invoice '.$this->invoiceRef,
+            subject: 'KarnaRide invoice '.$this->invoiceRef,
         );
     }
 
@@ -47,13 +47,13 @@ class TripInvoiceMail extends Mailable
     <tr><td align="center">
       <table role="presentation" width="560" cellspacing="0" cellpadding="0" style="background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #eadfcb">
         <tr><td style="background:#123328;color:#fff;padding:22px 28px">
-          <div style="font-size:22px;font-weight:800">Karna<span style="color:#f5a623">Cab</span></div>
+          <div style="font-size:22px;font-weight:800">Karna<span style="color:#f5a623">Ride</span></div>
           <div style="font-size:13px;opacity:.85;margin-top:4px">Transport Service Pvt Ltd</div>
         </td></tr>
         <tr><td style="padding:28px">
           <p style="margin:0 0 8px;font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:#5c564c">Trip invoice</p>
           <h1 style="margin:0 0 12px;font-size:26px">Hi {$name}, your trip is complete.</h1>
-          <p style="margin:0 0 18px;font-size:15px;line-height:1.55;color:#3d4a44">Thank you for riding with KarnaCab. This is your receipt for booking {$ref}.</p>
+          <p style="margin:0 0 18px;font-size:15px;line-height:1.55;color:#3d4a44">Thank you for riding with KarnaRide. This is your receipt for booking {$ref}.</p>
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f7f3ea;border-radius:14px">
             <tr><td style="padding:16px 18px;font-size:14px;line-height:1.7">
               <strong>Invoice</strong> {$invoice}<br>
@@ -65,7 +65,7 @@ class TripInvoiceMail extends Mailable
               <strong>Total</strong> ₹{$fare}
             </td></tr>
           </table>
-          <p style="margin:18px 0 0;font-size:13px;color:#5c564c">Rate the trip in the KarnaCab app. This is a computer-generated invoice.</p>
+          <p style="margin:18px 0 0;font-size:13px;color:#5c564c">Rate the trip in the KarnaRide app. This is a computer-generated invoice.</p>
         </td></tr>
       </table>
     </td></tr>
