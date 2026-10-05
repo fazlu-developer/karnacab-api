@@ -193,9 +193,11 @@ class AuthService
     {
         $this->ensureProfileColumns();
         $email = strtolower(trim((string) ($data['email'] ?? '')));
-        abort_unless(filter_var($email, FILTER_VALIDATE_EMAIL), 422, 'Enter a valid email address');
-        $taken = User::query()->where('email', $email)->where('id', '!=', $user->id)->exists();
-        abort_if($taken, 409, 'Email already registered');
+        if ($email !== '') {
+            abort_unless(filter_var($email, FILTER_VALIDATE_EMAIL), 422, 'Enter a valid email address');
+            $taken = User::query()->where('email', $email)->where('id', '!=', $user->id)->exists();
+            abort_if($taken, 409, 'Email already registered');
+        }
         $name = trim((string) ($data['name'] ?? ''));
         abort_unless(strlen($name) >= 2, 422, 'Enter your full name');
         $gender = strtoupper((string) ($data['gender'] ?? ''));
@@ -205,17 +207,21 @@ class AuthService
 
         $payload = [
             'name' => $name,
-            'email' => $email,
             'gender' => $gender,
             'date_of_birth' => $dob,
         ];
+        if ($email !== '') {
+            $payload['email'] = $email;
+        }
         if (Schema::hasColumn('users', 'profile_completed_at')) {
             $payload['profile_completed_at'] = now();
         }
         $user->update($payload);
         $user->refresh();
         $this->touchSeen($user);
-        $this->sendWelcomeMail($user);
+        if ($email !== '') {
+            $this->sendWelcomeMail($user, 'welcome-mail:'.$email);
+        }
 
         return $this->present($user);
     }
@@ -311,8 +317,7 @@ class AuthService
         $user->loadMissing('driver');
         $placeholderEmail = str_ends_with((string) $user->email, '@otp.karnacab.local');
         $needsProfile = $user->role === 'CUSTOMER' && (
-            $placeholderEmail
-            || $user->name === 'KarnaRide user'
+            $user->name === 'KarnaRide user'
             || $user->name === 'KarnaCab user'
             || empty($user->gender)
             || empty($user->date_of_birth)
@@ -460,14 +465,15 @@ class AuthService
             $payload['email'] = $email;
         }
         $emailChanged = isset($payload['email']) && strtolower((string) $payload['email']) !== strtolower((string) $user->email);
-        if ($emailChanged) {
-            abort(422, 'Verify the new email with OTP before it is updated.');
-        }
         if ($payload) {
             $user->update($payload);
         }
+        $fresh = $user->fresh();
+        if ($emailChanged) {
+            $this->sendWelcomeMail($fresh, 'profile-mail:'.$payload['email']);
+        }
 
-        return $this->present($user->fresh());
+        return $this->present($fresh);
     }
 
     public function requestEmailOtp(User $user, string $email): array

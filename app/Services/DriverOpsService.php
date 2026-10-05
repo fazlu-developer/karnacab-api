@@ -102,7 +102,9 @@ class DriverOpsService
             'userId' => (string) $driver->user_id,
             'name' => $driver->user?->name,
             'phone' => $driver->user?->phone,
-            'email' => $driver->user?->email,
+            'email' => str_ends_with((string) ($driver->user?->email ?? ''), '@otp.karnacab.local')
+                ? ''
+                : $driver->user?->email,
             'gender' => $driver->user?->gender,
             'avatarUrl' => app(KycDocumentService::class)->previewUrl($driver->user?->avatar_path ?? null),
             'dateOfBirth' => optional($driver->user?->date_of_birth)->toDateString() ?? $driver->user?->date_of_birth,
@@ -398,9 +400,16 @@ class DriverOpsService
             $data['firstName'] ?? null,
             $data['lastName'] ?? null,
         ])));
+        $email = strtolower(trim((string) ($data['email'] ?? '')));
+        if ($email !== '') {
+            abort_unless(filter_var($email, FILTER_VALIDATE_EMAIL), 422, 'Enter a valid email address');
+            $taken = User::query()->where('email', $email)->where('id', '!=', $actor->id)->exists();
+            abort_if($taken, 409, 'Email already registered');
+        }
+        $emailChanged = $email !== '' && strtolower((string) $actor->email) !== $email;
         $actor->update(array_filter([
             'name' => $data['name'] ?? ($name !== '' ? $name : null),
-            'email' => isset($data['email']) && $data['email'] !== '' ? strtolower((string) $data['email']) : null,
+            'email' => $email !== '' ? $email : null,
             'emergency_name' => $data['emergencyName'] ?? null,
             'emergency_phone' => $data['emergencyPhone'] ?? null,
             'last_address' => $data['address'] ?? null,
@@ -409,8 +418,8 @@ class DriverOpsService
             'gender' => isset($data['gender']) ? strtoupper((string) $data['gender']) : null,
             'date_of_birth' => $data['dateOfBirth'] ?? $data['date_of_birth'] ?? null,
         ], fn ($v) => $v !== null && $v !== ''));
-        if (! empty($data['email']) && filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
-            app(AuthService::class)->sendWelcomeMail($actor->fresh());
+        if ($emailChanged) {
+            app(AuthService::class)->sendWelcomeMail($actor->fresh(), 'profile-mail:'.$email);
         }
 
         $driver = Driver::query()->where('user_id', $actor->id)->first();

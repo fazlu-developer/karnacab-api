@@ -118,7 +118,6 @@ class AuthController extends Controller
         }
         $user = $request->user();
         $onboarding = filled($data['name'] ?? null)
-            && filled($data['email'] ?? null)
             && filled($data['gender'] ?? null)
             && filled($data['dateOfBirth'] ?? $data['date_of_birth'] ?? null)
             && empty($user->profile_completed_at);
