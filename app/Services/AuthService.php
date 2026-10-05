@@ -79,6 +79,9 @@ class AuthService
         if ($roles && ! in_array($user->role, $roles, true)) {
             throw new UnauthorizedHttpException('', 'Use the correct app for this account');
         }
+        if ($user->role === 'DRIVER') {
+            $this->assertDriverMaySignIn($user);
+        }
 
         return $this->issue($user);
     }
@@ -185,6 +188,9 @@ class AuthService
         }
 
         $this->touchSeen($user);
+        if ($role === 'DRIVER') {
+            $this->assertDriverMaySignIn($user);
+        }
 
         return $this->issue($user->fresh());
     }
@@ -311,6 +317,22 @@ class AuthService
         return $digits;
     }
 
+    private function assertDriverMaySignIn(User $user): void
+    {
+        $driver = DB::table('drivers')->where('user_id', $user->id)->first();
+        if (! $driver) {
+            return;
+        }
+        $kyc = strtolower((string) ($driver->kyc_status ?? ''));
+        if ($kyc === 'left_fleet') {
+            abort(403, 'You left the fleet company. Contact KarnaRide admin to complete KYC before you can sign in.');
+        }
+        if (! empty($driver->fleet_owner_id) && Schema::hasTable('vehicles')) {
+            $assigned = DB::table('vehicles')->where('driver_id', $driver->id)->exists();
+            abort_unless($assigned, 403, 'You are not assigned to a vehicle. You cannot sign in until your fleet owner assigns one.');
+        }
+    }
+
     public function present(User $user): array
     {
         $this->touchSeen($user);
@@ -338,7 +360,14 @@ class AuthService
             $next = FleetOnboarding::nextStep($fleet);
         } elseif ($user->role === 'DRIVER') {
             $kyc = strtolower((string) ($user->driver?->kyc_status ?? 'pending'));
-            if (in_array($kyc, ['verified', 'approved', 'active'], true)) {
+            $assigned = $user->driver
+                && Schema::hasTable('vehicles')
+                && DB::table('vehicles')->where('driver_id', $user->driver->id)->exists();
+            if ($kyc === 'left_fleet') {
+                $next = 'KYC_BLOCKED';
+            } elseif ($user->driver?->fleet_owner_id && ! $assigned) {
+                $next = 'KYC_BLOCKED';
+            } elseif (in_array($kyc, ['verified', 'approved', 'active'], true)) {
                 $hasVehicle = Schema::hasTable('vehicles')
                     && $user->driver
                     && DB::table('vehicles')->where('driver_id', $user->driver->id)->exists();
@@ -400,9 +429,13 @@ class AuthService
             'serviceStates' => ServiceArea::states(),
             'comingSoon' => $needsLocation || ($user->role === 'DRIVER' && ! $needsLocation && ! $inArea),
             'detectedState' => $area['state'],
-            'message' => $next === 'NEED_VEHICLE'
-                ? 'Please contact admin to assign a vehicle before you can go online.'
-                : $area['message'],
+            'message' => strtolower((string) ($user->driver?->kyc_status ?? '')) === 'left_fleet'
+                ? 'You left the fleet company. Contact KarnaRide admin to complete KYC before you can sign in.'
+                : ($user->role === 'DRIVER' && $user->driver?->fleet_owner_id && ! DB::table('vehicles')->where('driver_id', $user->driver->id)->exists()
+                    ? 'You are not assigned to a vehicle. You cannot sign in until your fleet owner assigns one.'
+                    : ($next === 'NEED_VEHICLE'
+                        ? 'Please contact admin to assign a vehicle before you can go online.'
+                        : $area['message'])),
             'needVehicle' => $next === 'NEED_VEHICLE',
         ];
     }

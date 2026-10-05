@@ -13,7 +13,7 @@ use Illuminate\Support\Str;
 class OperatorFleetService
 {
     public const VEHICLE_TYPES = [
-        'BIKE', 'AUTO', 'E_RICKSHAW', 'MINI', 'SEDAN', 'SUV', 'TRAVELLER', 'TEMPO', 'PICKUP', 'SMALL_TRUCK',
+        'BIKE', 'AUTO', 'E_RICKSHAW', 'MINI', 'SEDAN', 'SUV', 'TRAVELLER',
     ];
 
     public function capabilities(User $actor): array
@@ -194,39 +194,61 @@ class OperatorFleetService
     public function addVehicle(User $actor, array $data): array
     {
         $fleet = $this->requireFleet($actor);
-        $registration = strtoupper(preg_replace('/\s+/', '', (string) ($data['registrationNo'] ?? $data['registration_no'] ?? '')));
-        abort_unless(strlen($registration) >= 4, 422, 'Enter a valid registration number.');
-        $category = strtoupper((string) ($data['category'] ?? $data['vehicleType'] ?? 'SEDAN'));
-        $districtId = (int) ($data['districtId'] ?? $data['district_id'] ?? $actor->district_id ?? 0);
+        $registration = strtoupper(preg_replace('/\s+/', '', (string) ($data['registrationNo'] ?? $data['registration_no'] ?? '')) ?? '');
+        abort_unless((bool) preg_match('/^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$/', $registration), 422, 'Enter a valid registration number (BR01AB1234).');
+        $category = strtoupper((string) ($data['category'] ?? $data['vehicleType'] ?? ''));
+        abort_unless(in_array($category, self::VEHICLE_TYPES, true), 422, 'Select a vehicle type.');
+        $brand = trim((string) ($data['make'] ?? $data['brand'] ?? ''));
+        $model = trim((string) ($data['model'] ?? ''));
+        $color = trim((string) ($data['color'] ?? ''));
+        $year = (int) ($data['year'] ?? 0);
+        abort_unless($brand !== '', 422, 'Enter vehicle brand.');
+        abort_unless($model !== '', 422, 'Enter vehicle model.');
+        abort_unless($color !== '', 422, 'Enter vehicle colour.');
+        abort_unless($year >= 1990 && $year <= ((int) date('Y') + 1), 422, 'Enter a valid year.');
+        $documents = array_values(array_filter((array) ($data['documents'] ?? []), 'is_array'));
+        $docTypes = array_map(fn ($doc) => strtoupper((string) ($doc['type'] ?? '')), $documents);
+        $requiredDocs = ['RC', 'INSURANCE', 'POLLUTION', 'VEHICLE_PHOTO'];
+        if (! in_array($category, ['BIKE', 'E_RICKSHAW'], true)) {
+            $requiredDocs[] = 'PERMIT';
+        }
+        $docLabels = [
+            'RC' => 'registration certificate',
+            'INSURANCE' => 'insurance',
+            'POLLUTION' => 'PUC',
+            'VEHICLE_PHOTO' => 'vehicle photo',
+            'PERMIT' => 'permit',
+        ];
+        $missingDocs = array_values(array_filter($requiredDocs, fn ($type) => ! in_array($type, $docTypes, true)));
+        abort_if($missingDocs !== [], 422, 'Upload the '.implode(', ', array_map(fn ($type) => $docLabels[$type], $missingDocs)).'.');
+        $territory = $this->resolveTerritory($fleet, $actor, $data);
         $payload = [
             'fleet_owner_id' => $fleet->id,
             'registration_no' => $registration,
             'category' => $category,
             'status' => 'pending_review',
-            'brand' => $data['make'] ?? $data['brand'] ?? null,
-            'model' => $data['model'] ?? null,
-            'year' => $data['year'] ?? null,
-            'color' => $data['color'] ?? null,
+            'brand' => $brand,
+            'model' => $model,
+            'year' => $year,
+            'color' => $color,
             'fuel' => $data['fuelType'] ?? $data['fuel'] ?? null,
             'created_at' => now(),
             'updated_at' => now(),
+            'district_id' => $territory['districtId'],
         ];
-        if (Schema::hasColumn('vehicles', 'district_id') && $districtId > 0) {
-            $payload['district_id'] = $districtId;
+        if (Schema::hasColumn('vehicles', 'state_id') && $territory['stateId'] > 0) {
+            $payload['state_id'] = $territory['stateId'];
         }
-        if (Schema::hasColumn('vehicles', 'state_id')) {
-            $payload['state_id'] = $data['stateId'] ?? $data['state_id'] ?? $actor->state_id ?? $fleet->state_id ?? null;
-        }
-        if (Schema::hasColumn('vehicles', 'individual_driver_id')) {
-            $payload['individual_driver_id'] = null;
-        }
+        $this->rememberFleetTerritory($fleet, $territory['stateId'], $territory['districtId']);
         try {
             $id = DB::table('vehicles')->insertGetId($payload);
         } catch (QueryException $e) {
-            abort(409, 'Registration number already exists.');
+            $duplicate = ($e->errorInfo[0] ?? '') === '23000' || str_contains($e->getMessage(), 'Duplicate');
+            abort_if($duplicate, 409, 'Registration number already exists.');
+            throw $e;
         }
         $this->audit($actor, $fleet, 'vehicle.created', 'vehicle', $id, null, $payload);
-        foreach ((array) ($data['documents'] ?? []) as $doc) {
+        foreach ($documents as $doc) {
             if (is_array($doc)) {
                 $this->storeOwnedDocument('vehicle_documents', 'vehicle_id', $id, $doc, 'vehicle/'.$id);
             }
@@ -294,7 +316,10 @@ class OperatorFleetService
         $phone = preg_replace('/\D+/', '', (string) ($data['phone'] ?? $data['mobile'] ?? ''));
         $name = trim((string) ($data['name'] ?? ''));
         abort_unless(strlen($name) >= 2, 422, 'Enter the driver name.');
-        abort_unless(filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($phone) === 10, 422, 'Enter email or a 10-digit mobile number.');
+        abort_unless(strlen($phone) === 10, 422, 'Enter a 10-digit mobile number.');
+        $territory = $this->resolveTerritory($fleet, $actor, $data);
+        $license = trim((string) ($data['licenseNo'] ?? $data['license_no'] ?? ''));
+        abort_unless(strlen($license) >= 8, 422, 'Enter the driving licence number.');
         if ($email === '') {
             $email = $phone.'@fleet.karnacab.local';
         }
@@ -305,44 +330,69 @@ class OperatorFleetService
             abort_unless($driverId, 422, 'Driver profile missing for this user.');
             DB::table('drivers')->where('id', $driverId)->update([
                 'fleet_owner_id' => $fleet->id,
+                'license_no' => $license,
+                'city' => $territory['city'],
+                'state_id' => $territory['stateId'],
+                'district_id' => $territory['districtId'],
+                'driver_type' => 'fleet_driver',
                 'updated_at' => now(),
             ]);
+            DB::table('users')->where('id', $existing->id)->update([
+                'state_id' => $territory['stateId'],
+                'district_id' => $territory['districtId'],
+                'updated_at' => now(),
+            ]);
+            $this->rememberFleetTerritory($fleet, $territory['stateId'], $territory['districtId']);
+            $this->storeDriverDocuments((int) $driverId, $data);
             $this->audit($actor, $fleet, 'driver.linked', 'driver', (int) $driverId, null, ['userId' => $existing->id]);
 
             return $this->driver($actor, (int) $driverId);
         }
-        $userId = DB::table('users')->insertGetId([
-            'role' => 'DRIVER',
-            'status' => 'PENDING',
-            'name' => $name,
-            'email' => $email,
-            'phone' => $phone ?: null,
-            'password_hash' => Hash::make((string) ($data['password'] ?? Str::password(12))),
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
+        try {
+            $userId = DB::table('users')->insertGetId([
+                'role' => 'DRIVER',
+                'status' => 'PENDING',
+                'name' => $name,
+                'email' => $email,
+                'phone' => $phone ?: null,
+                'password_hash' => Hash::make((string) ($data['password'] ?? Str::password(12))),
+                'state_id' => $territory['stateId'],
+                'district_id' => $territory['districtId'],
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        } catch (QueryException $e) {
+            $duplicate = ($e->errorInfo[0] ?? '') === '23000' || str_contains($e->getMessage(), 'Duplicate');
+            abort_if($duplicate, 422, 'A user with this mobile number or email already exists.');
+            throw $e;
+        }
+        $account = preg_replace('/\D+/', '', (string) ($data['accountNo'] ?? $data['account_no'] ?? '')) ?? '';
         $driverPayload = [
             'user_id' => $userId,
             'fleet_owner_id' => $fleet->id,
             'online' => false,
             'duty_status' => 'offline',
             'kyc_status' => 'under_review',
-            'license_no' => $data['licenseNo'] ?? $data['license_no'] ?? null,
+            'license_no' => $license,
+            'city' => $territory['city'],
+            'state_id' => $territory['stateId'],
+            'district_id' => $territory['districtId'],
+            'driver_type' => 'fleet_driver',
             'created_at' => now(),
             'updated_at' => now(),
         ];
-        if (Schema::hasColumn('drivers', 'city') && ! empty($data['city'])) {
-            $driverPayload['city'] = $data['city'];
+        if ($account !== '') {
+            $driverPayload['bank_account_holder'] = trim((string) ($data['accountHolder'] ?? ''));
+            $driverPayload['bank_ifsc'] = strtoupper(trim((string) ($data['ifsc'] ?? '')));
+            $driverPayload['bank_account_last4'] = substr($account, -4);
+            $driverPayload['bank_account_hash'] = hash('sha256', $account);
         }
         if (Schema::hasColumn('drivers', 'application_submitted_at')) {
             $driverPayload['application_submitted_at'] = now();
         }
         $driverId = DB::table('drivers')->insertGetId($driverPayload);
-        foreach ((array) ($data['documents'] ?? []) as $doc) {
-            if (is_array($doc)) {
-                $this->storeOwnedDocument('driver_documents', 'driver_id', $driverId, $doc, 'kyc/'.$driverId);
-            }
-        }
+        $this->rememberFleetTerritory($fleet, $territory['stateId'], $territory['districtId']);
+        $this->storeDriverDocuments($driverId, $data);
         $this->audit($actor, $fleet, 'driver.created', 'driver', $driverId, null, ['userId' => $userId]);
 
         return $this->driver($actor, $driverId);
@@ -352,20 +402,38 @@ class OperatorFleetService
     {
         $fleet = $this->requireFleet($actor);
         $vehicle = $this->requireVehicle($fleet, $vehicleId);
-        abort_if(in_array(strtolower((string) $vehicle->status), ['pending_review', 'pending', 'rejected', 'maintenance', 'blocked', 'suspended'], true), 422, 'Vehicle is not assignable until admin approval.');
+        abort_if(in_array(strtolower((string) $vehicle->status), ['rejected', 'maintenance', 'blocked', 'suspended'], true), 422, 'This vehicle cannot be assigned while it is blocked or rejected.');
         $driver = $this->requireDriver($fleet, $driverId);
         $this->assertAssignable($driver);
+        $previousVehicleId = (int) (DB::table('vehicles')->where('fleet_owner_id', $fleet->id)->where('driver_id', $driverId)->value('id') ?? 0);
+        $kyc = strtolower((string) ($driver->kyc_status ?? ''));
+        $vehicleChanged = $previousVehicleId !== $vehicleId;
+        $needsFreshKyc = $vehicleChanged && in_array($kyc, ['verified', 'approved', 'active'], true);
         $this->closeActiveAssignment($fleet, (int) $vehicle->id, 'replaced', $actor->id);
-        DB::table('vehicles')->where('fleet_owner_id', $fleet->id)->where('driver_id', $driverId)->where('id', '!=', $vehicleId)->update([
-            'driver_id' => null,
-            'status' => 'available',
-            'updated_at' => now(),
-        ]);
+        $others = DB::table('vehicles')->where('fleet_owner_id', $fleet->id)->where('driver_id', $driverId)->where('id', '!=', $vehicleId)->get();
+        foreach ($others as $other) {
+            $otherStatus = strtolower((string) $other->status);
+            DB::table('vehicles')->where('id', $other->id)->update([
+                'driver_id' => null,
+                'status' => in_array($otherStatus, ['pending_review', 'pending'], true) ? $other->status : 'available',
+                'updated_at' => now(),
+            ]);
+        }
+        $vehicleStatus = strtolower((string) $vehicle->status);
         DB::table('vehicles')->where('id', $vehicleId)->where('fleet_owner_id', $fleet->id)->update([
             'driver_id' => $driverId,
-            'status' => 'assigned',
+            'status' => in_array($vehicleStatus, ['pending_review', 'pending'], true) ? $vehicle->status : 'assigned',
             'updated_at' => now(),
         ]);
+        if ($needsFreshKyc) {
+            DB::table('drivers')->where('id', $driverId)->update([
+                'kyc_status' => 'under_review',
+                'online' => 0,
+                'duty_status' => 'offline',
+                'updated_at' => now(),
+            ]);
+            $this->kickDriverSession($driverId);
+        }
         $this->openAssignment($fleet, $vehicleId, $driverId, $actor->id, $reason ?? 'assigned');
         $this->audit($actor, $fleet, 'driver.assigned', 'vehicle', $vehicleId, ['driverId' => $vehicle->driver_id], ['driverId' => $driverId]);
         $this->restoreDriverAccount($driverId);
@@ -378,13 +446,19 @@ class OperatorFleetService
         $fleet = $this->requireFleet($actor);
         $vehicle = $this->requireVehicle($fleet, $vehicleId);
         $this->closeActiveAssignment($fleet, $vehicleId, $reason ?? 'unassigned', $actor->id);
+        $vehicleStatus = strtolower((string) $vehicle->status);
         DB::table('vehicles')->where('id', $vehicleId)->where('fleet_owner_id', $fleet->id)->update([
             'driver_id' => null,
-            'status' => 'available',
+            'status' => in_array($vehicleStatus, ['pending_review', 'pending'], true) ? $vehicle->status : 'available',
             'updated_at' => now(),
         ]);
         $this->audit($actor, $fleet, 'driver.unassigned', 'vehicle', $vehicleId, ['driverId' => $vehicle->driver_id], null);
         if ($vehicle->driver_id) {
+            DB::table('drivers')->where('id', $vehicle->driver_id)->update([
+                'online' => 0,
+                'duty_status' => 'offline',
+                'updated_at' => now(),
+            ]);
             $this->kickDriverSession((int) $vehicle->driver_id);
         }
 
@@ -411,11 +485,15 @@ class OperatorFleetService
             $verified = in_array($kyc, ['verified', 'approved', 'active'], true);
             $onLeave = strtolower((string) $row->duty_status) === 'on_leave';
             $suspended = strtolower((string) ($row->account_status ?? '')) === 'suspended';
+            $leftFleet = $kyc === 'left_fleet';
             $busy = in_array((int) $row->id, $assignedIds, true) && (int) $row->id !== (int) $current;
-            $eligible = $verified && ! $onLeave && ! $suspended && ! $busy;
+            $eligible = ! $onLeave && ! $suspended && ! $busy && ! $leftFleet;
             $item = $this->presentDriver($row, $fleet);
             $item['eligible'] = $eligible;
-            $item['unavailableReason'] = ! $verified ? 'Not verified' : ($onLeave ? 'On leave' : ($suspended ? 'Suspended' : ($busy ? 'Assigned to another vehicle' : null)));
+            $item['note'] = $verified ? null : 'KYC pending. Assign now. Admin approves after assignment.';
+            $item['unavailableReason'] = $leftFleet
+                ? 'Left the company'
+                : ($onLeave ? 'On leave' : ($suspended ? 'Suspended' : ($busy ? 'Assigned to another vehicle' : null)));
             $list[] = $item;
         }
 
@@ -817,7 +895,7 @@ class OperatorFleetService
     private function assertAssignable(object $driver): void
     {
         $kyc = strtolower((string) ($driver->kyc_status ?? ''));
-        abort_unless(in_array($kyc, ['verified', 'approved', 'active'], true), 422, 'Only verified drivers can be assigned.');
+        abort_if($kyc === 'left_fleet', 422, 'This driver left the company. Admin must activate KYC before they can be assigned.');
         abort_if(strtolower((string) $driver->duty_status) === 'on_leave', 422, 'Driver is on leave.');
         abort_if(strtolower((string) ($driver->account_status ?? '')) === 'suspended', 422, 'Driver is suspended.');
     }
@@ -1023,12 +1101,24 @@ class OperatorFleetService
                 }
             }
 
+            $preview = app(KycDocumentService::class)->previewUrl($doc->storage_key ?? null);
+
             return [
                 'id' => (int) $doc->id,
                 'type' => $doc->type,
+                'label' => match ($doc->type) {
+                    'RC' => 'Registration certificate',
+                    'INSURANCE' => 'Insurance',
+                    'POLLUTION', 'PUC' => 'PUC / pollution',
+                    'PERMIT' => 'Permit',
+                    'VEHICLE_PHOTO', 'PHOTO' => 'Vehicle photo',
+                    default => (string) $doc->type,
+                },
                 'status' => $doc->status,
                 'expiresAt' => $expires,
                 'expiryLabel' => $label,
+                'previewUrl' => $preview,
+                'fileUrl' => $preview,
             ];
         })->all();
     }
@@ -1138,12 +1228,24 @@ class OperatorFleetService
         ];
     }
 
+    private function storeDriverDocuments(int $driverId, array $data): void
+    {
+        foreach ((array) ($data['documents'] ?? []) as $doc) {
+            if (is_array($doc)) {
+                $this->storeOwnedDocument('driver_documents', 'driver_id', $driverId, $doc, 'kyc/'.$driverId);
+            }
+        }
+    }
+
     private function storeOwnedDocument(string $table, string $fk, int $id, array $data, string $folder): void
     {
         if (! Schema::hasTable($table)) {
             return;
         }
         $type = strtoupper(trim((string) ($data['type'] ?? '')));
+        if ($type === 'LIVE_PHOTO') {
+            $type = 'SELFIE';
+        }
         abort_unless($type !== '', 422, 'Document type is required.');
         $saved = $this->storeBinary($data, $folder);
         $existing = DB::table($table)->where($fk, $id)->where('type', $type)->value('id');
@@ -1160,8 +1262,9 @@ class OperatorFleetService
         if (Schema::hasColumn($table, 'checksum_sha256')) {
             $payload['checksum_sha256'] = $saved['hash'];
         }
-        if (! empty($data['expiresAt'] ?? $data['expires_at']) && Schema::hasColumn($table, 'expires_at')) {
-            $payload['expires_at'] = $data['expiresAt'] ?? $data['expires_at'];
+        $expires = $data['expiresAt'] ?? ($data['expires_at'] ?? null);
+        if (! empty($expires) && Schema::hasColumn($table, 'expires_at')) {
+            $payload['expires_at'] = $expires;
         }
         if ($existing) {
             DB::table($table)->where('id', $existing)->update($payload);
@@ -1226,5 +1329,44 @@ class OperatorFleetService
             'bytes' => strlen($binary),
             'hash' => hash('sha256', $binary),
         ];
+    }
+
+    /**
+     * @return array{stateId:int,districtId:int,city:string}
+     */
+    private function resolveTerritory(object $fleet, User $actor, array $data): array
+    {
+        $stateId = (int) ($data['stateId'] ?? $data['state_id'] ?? $fleet->state_id ?? $actor->state_id ?? 0);
+        $districtId = (int) ($data['districtId'] ?? $data['district_id'] ?? $fleet->district_id ?? $actor->district_id ?? 0);
+        abort_unless($districtId > 0 && Schema::hasTable('districts'), 422, 'Select the state and city.');
+        $district = DB::table('districts')->where('id', $districtId)->first();
+        abort_unless($district, 422, 'Select a valid city.');
+        if ($stateId > 0) {
+            abort_unless((int) $district->state_id === $stateId, 422, 'That city is not in the selected state.');
+        }
+        $stateId = (int) $district->state_id;
+        $city = trim((string) ($data['city'] ?? ''));
+        if ($city === '') {
+            $city = (string) $district->name;
+        }
+
+        return ['stateId' => $stateId, 'districtId' => $districtId, 'city' => $city];
+    }
+
+    private function rememberFleetTerritory(object $fleet, int $stateId, int $districtId): void
+    {
+        if ($districtId <= 0 || ! empty($fleet->district_id)) {
+            return;
+        }
+        $patch = ['updated_at' => now()];
+        if (Schema::hasColumn('fleet_owners', 'district_id')) {
+            $patch['district_id'] = $districtId;
+        }
+        if ($stateId > 0 && Schema::hasColumn('fleet_owners', 'state_id')) {
+            $patch['state_id'] = $stateId;
+        }
+        DB::table('fleet_owners')->where('id', $fleet->id)->update($patch);
+        $fleet->district_id = $districtId;
+        $fleet->state_id = $stateId;
     }
 }

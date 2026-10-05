@@ -23,9 +23,10 @@ class DriverOpsService
         $driver = Driver::query()->where('user_id', $actor->id)->with('vehicles', 'documents', 'user')->firstOrFail();
         $kycStatus = (string) ($driver->kyc_status ?? 'pending');
         $kyc = strtolower($kycStatus);
-        $blocked = in_array($kyc, ['rejected', 'suspended'], true);
+        $blocked = in_array($kyc, ['rejected', 'suspended', 'left_fleet'], true);
         $approved = in_array($kyc, ['verified', 'approved', 'active'], true);
-        $canGoOnline = $approved && ! $blocked;
+        $fleetUnassigned = (bool) $driver->fleet_owner_id && $driver->vehicles->isEmpty();
+        $canGoOnline = $approved && ! $blocked && ! $fleetUnassigned;
         $online = (bool) $driver->online;
         $duty = $driver->duty_status ?: ($online ? 'online' : 'offline');
         $canReceive = $canGoOnline && $online && in_array(strtolower((string) $duty), ['online'], true);
@@ -134,8 +135,8 @@ class DriverOpsService
                 : null,
             'canGoOnline' => $canGoOnline,
             'canReceiveOffers' => $canReceive,
-            'offerBlockReason' => $canReceive ? null : ($blocked ? 'Account is blocked' : ($approved ? 'Tap Go online when you are ready.' : 'Complete KYC onboarding to go online.')),
-            'nextStep' => $approved ? 'HOME' : ($kyc === 'under_review' ? 'KYC_REVIEW' : ($blocked ? 'KYC_BLOCKED' : 'KYC')),
+            'offerBlockReason' => $canReceive ? null : ($kyc === 'left_fleet' ? 'Contact admin to complete KYC.' : ($fleetUnassigned ? 'You are not assigned to a vehicle.' : ($blocked ? 'Account is blocked' : ($approved ? 'Tap Go online when you are ready.' : 'Complete KYC onboarding to go online.')))),
+            'nextStep' => $kyc === 'left_fleet' || $fleetUnassigned ? 'KYC_BLOCKED' : ($approved ? 'HOME' : ($kyc === 'under_review' ? 'KYC_REVIEW' : ($blocked ? 'KYC_BLOCKED' : 'KYC'))),
             'ratingAvg' => (float) $rating['average'],
             'ratingCount' => (int) $rating['count'],
             'vehicles' => $driver->vehicles,
@@ -289,6 +290,14 @@ class DriverOpsService
         $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
         if ($online && in_array(strtolower((string) $driver->duty_status), ['on_trip', 'on_delivery'], true)) {
             return $this->me($actor);
+        }
+        if ($online) {
+            $kyc = strtolower((string) ($driver->kyc_status ?? ''));
+            abort_if($kyc === 'left_fleet', 403, 'Contact admin to complete KYC before you can go online.');
+            abort_unless(in_array($kyc, ['verified', 'approved', 'active'], true), 422, 'Admin must approve your KYC before you can go online.');
+            if ($driver->fleet_owner_id) {
+                abort_unless($driver->vehicles()->exists(), 422, 'You are not assigned to a vehicle.');
+            }
         }
         if (! $online && in_array(strtolower((string) $driver->duty_status), ['on_trip', 'on_delivery'], true)) {
             abort(422, 'Complete the trip before going offline.');
