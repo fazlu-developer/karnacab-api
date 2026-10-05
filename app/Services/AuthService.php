@@ -477,20 +477,137 @@ class AuthService
         $taken = User::query()->where('email', $email)->where('id', '!=', $user->id)->exists();
         abort_if($taken, 409, 'Email already registered');
         $code = (string) random_int(100000, 999999);
-        Cache::put('email-otp:'.$user->id.':'.$email, hash('sha256', $user->id.':'.$email.':'.$code), 300);
+        $cacheKey = 'email-otp:'.$user->id.':'.$email;
+        Cache::put($cacheKey, hash('sha256', $user->id.':'.$email.':'.$code), 300);
         $audience = $user->role === 'DRIVER' ? 'driver' : 'customer';
         try {
-            Mail::to($email)->send(new EmailVerifyOtpMail($code, $audience));
+            $this->sendOtpMail($email, $code, $audience);
         } catch (\Throwable $e) {
-            Cache::forget('email-otp:'.$user->id.':'.$email);
+            Cache::forget($cacheKey);
             Log::warning('email.otp_failed', ['userId' => $user->id, 'error' => $e->getMessage()]);
             abort(503, 'Could not send the email verification code. Try again.');
         }
+        Log::info('email.otp_sent', ['userId' => $user->id]);
 
         return [
             'ok' => true,
             'expiresInSeconds' => 300,
         ];
+    }
+
+    private function sendOtpMail(string $email, string $code, string $audience): void
+    {
+        $settings = $this->mailSettings();
+        $mailable = (new EmailVerifyOtpMail($code, $audience))->from($settings['from'], 'KarnaRide');
+        $attempts = [
+            ['port' => 587, 'scheme' => 'smtp'],
+            ['port' => 465, 'scheme' => 'smtps'],
+        ];
+        $errors = [];
+        foreach ($attempts as $attempt) {
+            $name = 'otp_'.$attempt['port'];
+            config(['mail.mailers.'.$name => [
+                'transport' => 'smtp',
+                'scheme' => $attempt['scheme'],
+                'host' => $settings['host'],
+                'port' => $attempt['port'],
+                'username' => $settings['username'],
+                'password' => $settings['password'],
+                'timeout' => 8,
+                'local_domain' => 'karnacab.in',
+            ]]);
+            try {
+                Mail::purge($name);
+                Mail::mailer($name)->to($email)->send(clone $mailable);
+
+                return;
+            } catch (\Throwable $e) {
+                $errors[] = $attempt['port'].': '.$this->safeMailError($e->getMessage(), $settings['password']);
+            }
+        }
+
+        $sendmail = '/usr/sbin/sendmail';
+        if (PHP_OS_FAMILY !== 'Windows' && is_executable($sendmail)) {
+            config(['mail.mailers.otp_sendmail' => [
+                'transport' => 'sendmail',
+                'path' => $sendmail.' -bs -i',
+            ]]);
+            try {
+                Mail::purge('otp_sendmail');
+                Mail::mailer('otp_sendmail')->to($email)->send(clone $mailable);
+
+                return;
+            } catch (\Throwable $e) {
+                $errors[] = 'sendmail: '.$this->safeMailError($e->getMessage(), $settings['password']);
+            }
+        }
+
+        Log::warning('email.otp_attempt_failed', ['error' => implode(' | ', $errors)]);
+        throw new \RuntimeException($errors === [] ? 'Could not send email' : implode(' | ', $errors));
+    }
+
+    /** @return array{host: string, username: string, password: string, from: string} */
+    private function mailSettings(): array
+    {
+        $file = $this->readMailEnv();
+        $smtp = config('mail.mailers.smtp');
+        $username = $file['MAIL_USERNAME'] !== '' ? $file['MAIL_USERNAME'] : (string) ($smtp['username'] ?? '');
+        $password = $file['MAIL_PASSWORD'] !== '' ? $file['MAIL_PASSWORD'] : (string) ($smtp['password'] ?? '');
+        $from = $file['MAIL_FROM_ADDRESS'] !== '' ? $file['MAIL_FROM_ADDRESS'] : $username;
+        $host = $file['MAIL_HOST'] !== '' ? $file['MAIL_HOST'] : (string) ($smtp['host'] ?? '');
+        if ($host === '' || $host === '127.0.0.1') {
+            $host = 'smtp.gmail.com';
+        }
+
+        return [
+            'host' => $host,
+            'username' => $username,
+            'password' => str_replace(' ', '', $password),
+            'from' => $from !== '' ? $from : $username,
+        ];
+    }
+
+    /** @return array{MAIL_HOST: string, MAIL_USERNAME: string, MAIL_PASSWORD: string, MAIL_FROM_ADDRESS: string} */
+    private function readMailEnv(): array
+    {
+        $out = [
+            'MAIL_HOST' => '',
+            'MAIL_USERNAME' => '',
+            'MAIL_PASSWORD' => '',
+            'MAIL_FROM_ADDRESS' => '',
+        ];
+        $path = base_path('.env');
+        if (! is_readable($path)) {
+            return $out;
+        }
+        $lines = file($path, FILE_IGNORE_NEW_LINES) ?: [];
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '' || str_starts_with($line, '#') || ! str_contains($line, '=')) {
+                continue;
+            }
+            [$key, $value] = explode('=', $line, 2);
+            $key = trim($key);
+            if (! array_key_exists($key, $out)) {
+                continue;
+            }
+            $value = trim($value);
+            if (strlen($value) >= 2 && (($value[0] === '"' && str_ends_with($value, '"')) || ($value[0] === "'" && str_ends_with($value, "'")))) {
+                $value = substr($value, 1, -1);
+            }
+            $out[$key] = $value;
+        }
+
+        return $out;
+    }
+
+    private function safeMailError(string $message, string $password): string
+    {
+        if ($password !== '') {
+            $message = str_replace($password, '***', $message);
+        }
+
+        return mb_substr($message, 0, 300);
     }
 
     public function verifyEmailOtp(User $user, string $email, string $code): array
