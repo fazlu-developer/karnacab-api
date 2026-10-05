@@ -1363,7 +1363,7 @@ class BookingService
     private function notifyOps(Booking $booking, string $title): void
     {
         $email = (string) (DB::table('system_settings')->where('key', 'booking_notify_email')->value('value')
-            ?? config('karnacab.booking_notify_email', 'karnacabofficial@gmail.com'));
+            ?? config('karnacab.booking_notify_email', 'karnaride@gmail.com'));
         if ($email === '' || ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
             return;
         }

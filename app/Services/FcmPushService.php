@@ -83,7 +83,7 @@ class FcmPushService
             $imageUrl = is_string($brand) && str_starts_with($brand, 'http') ? $brand : null;
         }
         $access = $this->accessToken();
-        $project = $this->credentials()['project_id'] ?? 'karnacab-bf930';
+        $project = $this->credentials()['project_id'] ?? env('FIREBASE_PROJECT_ID', 'karnacab-ea7ad');
         if (! $access || $token === '') {
             return false;
         }

@@ -83,7 +83,7 @@ class LeadIntakeService
             $raw = (string) DB::table('system_settings')->where('key', 'leads_notify_email')->value('value');
         }
         if ($raw === '') {
-            $raw = (string) config('karnacab.leads_notify_email', 'karnacabofficial@gmail.com');
+            $raw = (string) config('karnacab.leads_notify_email', 'karnaride@gmail.com');
         }
         $emails = array_values(array_filter(array_map('trim', explode(',', $raw)), fn ($email) => filter_var($email, FILTER_VALIDATE_EMAIL)));
 
