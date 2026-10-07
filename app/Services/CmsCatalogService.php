@@ -24,6 +24,7 @@ class CmsCatalogService
             'catalog' => array_merge($this->catalog(), [
                 'rentalPackages' => app(FareService::class)->rentalPackages(),
             ]),
+            'offers' => app(RideSettingsService::class)->present(),
             'faqs' => Schema::hasTable('support_faqs')
                 ? DB::table('support_faqs')
                     ->where('audience', 'customer')
@@ -296,7 +297,7 @@ class CmsCatalogService
             return $value;
         }
 
-        return rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnacab.in'), '/').'/'.ltrim($value, '/');
+        return rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnaride.in'), '/').'/'.ltrim($value, '/');
     }
 
     private function homeMode(string $slug): string

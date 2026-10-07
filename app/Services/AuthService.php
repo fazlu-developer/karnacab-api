@@ -66,6 +66,8 @@ class AuthService
         }
 
         $this->sendWelcomeMail($user);
+        app(IncentiveService::class)->ensureReferralCode($user);
+        app(IncentiveService::class)->attachReferralCode($user, $data['referralCode'] ?? $data['referral_code'] ?? null);
 
         return $this->issue($user);
     }
@@ -110,7 +112,7 @@ class AuthService
         return $payload;
     }
 
-    public function verifyOtp(string $phone, string $code, string $role = 'CUSTOMER'): array
+    public function verifyOtp(string $phone, string $code, string $role = 'CUSTOMER', ?string $referralCode = null): array
     {
         $phone = $this->normalizePhone($phone);
         $code = preg_replace('/\D+/', '', $code) ?? '';
@@ -191,8 +193,11 @@ class AuthService
         if ($role === 'DRIVER') {
             $this->assertDriverMaySignIn($user);
         }
+        $fresh = $user->fresh();
+        app(IncentiveService::class)->ensureReferralCode($fresh);
+        app(IncentiveService::class)->attachReferralCode($fresh, $referralCode);
 
-        return $this->issue($user->fresh());
+        return $this->issue($fresh->fresh());
     }
 
     public function completeProfile(User $user, array $data): array
@@ -553,7 +558,7 @@ class AuthService
                 'username' => $settings['username'],
                 'password' => $settings['password'],
                 'timeout' => 8,
-                'local_domain' => 'karnacab.in',
+                'local_domain' => 'karnaride.jodoocorp.in',
             ]]);
             try {
                 Mail::purge($name);

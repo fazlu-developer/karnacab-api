@@ -646,7 +646,11 @@ class AppSurfaceService
     public function parcelCreate(User $actor, array $data): array
     {
         $quote = $this->parcelQuote($data);
-        $id = DB::table('parcel_shipments')->insertGetId([
+        $category = strtoupper((string) ($data['category'] ?? $quote['category'] ?? 'BIKE'));
+        if ($category === 'TRUCK' || $category === 'MINI 3W' || $category === 'MINI3W') {
+            $category = $category === 'TRUCK' ? 'TRUCK' : 'AUTO';
+        }
+        $row = [
             'public_ref' => strtoupper(Str::random(8)),
             'customer_id' => $actor->id,
             'bihar_lane' => ! empty($data['biharLane']) ? 1 : 0,
@@ -657,7 +661,7 @@ class AppSurfaceService
             'width_cm' => $data['widthCm'] ?? null,
             'height_cm' => $data['heightCm'] ?? null,
             'quantity' => $data['quantity'] ?? 1,
-            'category' => $data['category'] ?? 'BIKE',
+            'category' => $category,
             'pickup_text' => $data['pickupText'] ?? 'Pickup',
             'drop_text' => $data['dropText'] ?? 'Drop',
             'pickup_lat' => $data['pickupLat'] ?? null,
@@ -682,7 +686,13 @@ class AppSurfaceService
             'status' => 'created',
             'created_at' => now(),
             'updated_at' => now(),
-        ]);
+        ];
+        $payload = array_filter(
+            $row,
+            fn ($key) => Schema::hasColumn('parcel_shipments', $key),
+            ARRAY_FILTER_USE_KEY,
+        );
+        $id = DB::table('parcel_shipments')->insertGetId($payload);
 
         return $this->presentParcel(DB::table('parcel_shipments')->where('id', $id)->first());
     }
@@ -1385,11 +1395,16 @@ class AppSurfaceService
             ])->all();
         }
 
+        $promo = (int) ($row->promo_balance_paise ?? 0);
+
         return [
             'balancePaise' => $balance,
             'balanceRupees' => $balance / 100,
+            'promoBalancePaise' => $promo,
+            'promoBalanceRupees' => $promo / 100,
             'ownerType' => $row->owner_type ?? $ownerType,
             'ledger' => $ledger,
+            'referrals' => app(IncentiveService::class)->snapshot($actor),
         ];
     }
 

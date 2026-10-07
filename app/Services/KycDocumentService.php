@@ -77,7 +77,7 @@ class KycDocumentService
             $base = rtrim($host, '/');
         }
         if ($base === '') {
-            $base = 'https://api.karnacab.in';
+            $base = 'https://api.karnaride.in';
         }
 
         return $base.'/storage/'.ltrim($key, '/');

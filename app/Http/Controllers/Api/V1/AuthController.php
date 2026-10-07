@@ -17,6 +17,7 @@ class AuthController extends Controller
             'email' => 'required|email',
             'phone' => 'nullable|string',
             'password' => 'required|string|min:6',
+            'referralCode' => 'nullable|string|max:32',
         ]);
 
         return $this->auth->register($data);
@@ -40,6 +41,7 @@ class AuthController extends Controller
             'phone' => 'nullable|string',
             'password' => 'required|string|min:6',
             'licenseNo' => 'nullable|string',
+            'referralCode' => 'nullable|string|max:32',
         ]), 'DRIVER');
     }
 
@@ -82,16 +84,16 @@ class AuthController extends Controller
 
     public function verifyOtp(Request $request)
     {
-        $data = $request->validate(['phone' => 'required|string', 'code' => 'required|string']);
+        $data = $request->validate(['phone' => 'required|string', 'code' => 'required|string', 'referralCode' => 'nullable|string|max:32']);
 
-        return $this->auth->verifyOtp($data['phone'], $data['code']);
+        return $this->auth->verifyOtp($data['phone'], $data['code'], 'CUSTOMER', $data['referralCode'] ?? null);
     }
 
     public function verifyDriverOtp(Request $request)
     {
-        $data = $request->validate(['phone' => 'required|string', 'code' => 'required|string']);
+        $data = $request->validate(['phone' => 'required|string', 'code' => 'required|string', 'referralCode' => 'nullable|string|max:32']);
 
-        return $this->auth->verifyOtp($data['phone'], $data['code'], 'DRIVER');
+        return $this->auth->verifyOtp($data['phone'], $data['code'], 'DRIVER', $data['referralCode'] ?? null);
     }
 
     public function verifyOperatorOtp(Request $request)

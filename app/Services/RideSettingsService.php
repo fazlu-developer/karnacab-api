@@ -14,6 +14,15 @@ class RideSettingsService
     public const WALLET_MIN_PAISE_KEY = 'driver_wallet_min_paise';
     public const WALLET_MIN_FARE_PERCENT_KEY = 'driver_wallet_min_fare_percent';
     public const WALLET_COVER_COMMISSION_KEY = 'driver_wallet_must_cover_commission';
+    public const DRIVER_WELCOME_BONUS_ON = 'driver_welcome_bonus_enabled';
+    public const DRIVER_WELCOME_BONUS_RUPEES = 'driver_welcome_bonus_rupees';
+    public const FIRST_RIDE_FREE_ON = 'customer_first_ride_free_enabled';
+    public const DRIVER_REFERRAL_RUPEES = 'driver_referral_bonus_rupees';
+    public const DRIVER_REFERRAL_RIDES = 'driver_referral_required_rides';
+    public const CUSTOMER_JOINING_RUPEES = 'customer_joining_credit_rupees';
+    public const CUSTOMER_REFERRAL_RUPEES = 'customer_referral_credit_rupees';
+    public const CUSTOMER_PROMO_MAX_RUPEES = 'customer_promo_max_rupees';
+    public const CUSTOMER_PROMO_MAX_PERCENT = 'customer_promo_max_fare_percent';
 
     public function radiusKm(): float
     {
@@ -66,6 +75,76 @@ class RideSettingsService
         return $value === null || $value === '' ? true : in_array(strtolower((string) $value), ['1', 'true', 'yes'], true);
     }
 
+    public function driverWelcomeBonusEnabled(): bool
+    {
+        $value = $this->get(self::DRIVER_WELCOME_BONUS_ON);
+
+        return $value === null || $value === '' ? true : in_array(strtolower((string) $value), ['1', 'true', 'yes'], true);
+    }
+
+    public function driverWelcomeBonusRupees(): int
+    {
+        $value = $this->get(self::DRIVER_WELCOME_BONUS_RUPEES);
+        $rupees = is_numeric($value) ? (int) $value : 100;
+
+        return max(0, min(100000, $rupees));
+    }
+
+    public function firstRideFreeEnabled(): bool
+    {
+        $value = $this->get(self::FIRST_RIDE_FREE_ON);
+
+        return $value === null || $value === '' ? false : in_array(strtolower((string) $value), ['1', 'true', 'yes'], true);
+    }
+
+    public function driverReferralBonusRupees(): int
+    {
+        $value = $this->get(self::DRIVER_REFERRAL_RUPEES);
+        $rupees = is_numeric($value) ? (int) $value : 150;
+
+        return max(0, min(100000, $rupees));
+    }
+
+    public function driverReferralRequiredRides(): int
+    {
+        $value = $this->get(self::DRIVER_REFERRAL_RIDES);
+        $rides = is_numeric($value) ? (int) $value : 10;
+
+        return max(1, min(500, $rides));
+    }
+
+    public function customerJoiningCreditRupees(): int
+    {
+        $value = $this->get(self::CUSTOMER_JOINING_RUPEES);
+        $rupees = is_numeric($value) ? (int) $value : 50;
+
+        return max(0, min(100000, $rupees));
+    }
+
+    public function customerReferralCreditRupees(): int
+    {
+        $value = $this->get(self::CUSTOMER_REFERRAL_RUPEES);
+        $rupees = is_numeric($value) ? (int) $value : 50;
+
+        return max(0, min(100000, $rupees));
+    }
+
+    public function customerPromoMaxRupees(): int
+    {
+        $value = $this->get(self::CUSTOMER_PROMO_MAX_RUPEES);
+        $rupees = is_numeric($value) ? (int) $value : 50;
+
+        return max(0, min(100000, $rupees));
+    }
+
+    public function customerPromoMaxFarePercent(): float
+    {
+        $value = $this->get(self::CUSTOMER_PROMO_MAX_PERCENT);
+        $pct = is_numeric($value) ? (float) $value : 50;
+
+        return max(0, min(100, $pct));
+    }
+
     /**
      * @return array{requiredPaise: int, commissionPaise: int, commissionPercent: float, eligible: bool, reason: ?string}
      */
@@ -105,6 +184,15 @@ class RideSettingsService
             'driverWalletMinPaise' => $this->driverWalletMinPaise(),
             'driverWalletMinFarePercent' => $this->driverWalletMinFarePercent(),
             'driverWalletMustCoverCommission' => $this->driverWalletMustCoverCommission(),
+            'driverWelcomeBonusEnabled' => $this->driverWelcomeBonusEnabled(),
+            'driverWelcomeBonusRupees' => $this->driverWelcomeBonusRupees(),
+            'customerFirstRideFreeEnabled' => $this->firstRideFreeEnabled(),
+            'driverReferralBonusRupees' => $this->driverReferralBonusRupees(),
+            'driverReferralRequiredRides' => $this->driverReferralRequiredRides(),
+            'customerJoiningCreditRupees' => $this->customerJoiningCreditRupees(),
+            'customerReferralCreditRupees' => $this->customerReferralCreditRupees(),
+            'customerPromoMaxRupees' => $this->customerPromoMaxRupees(),
+            'customerPromoMaxFarePercent' => $this->customerPromoMaxFarePercent(),
         ];
     }
 
@@ -131,6 +219,33 @@ class RideSettingsService
         if (array_key_exists('driverWalletMustCoverCommission', $input)) {
             $this->put(self::WALLET_COVER_COMMISSION_KEY, $input['driverWalletMustCoverCommission'] ? '1' : '0');
         }
+        if (array_key_exists('driverWelcomeBonusEnabled', $input)) {
+            $this->put(self::DRIVER_WELCOME_BONUS_ON, $input['driverWelcomeBonusEnabled'] ? '1' : '0');
+        }
+        if (isset($input['driverWelcomeBonusRupees'])) {
+            $this->put(self::DRIVER_WELCOME_BONUS_RUPEES, (string) max(0, min(100000, (int) $input['driverWelcomeBonusRupees'])));
+        }
+        if (array_key_exists('customerFirstRideFreeEnabled', $input)) {
+            $this->put(self::FIRST_RIDE_FREE_ON, $input['customerFirstRideFreeEnabled'] ? '1' : '0');
+        }
+        if (isset($input['driverReferralBonusRupees'])) {
+            $this->put(self::DRIVER_REFERRAL_RUPEES, (string) max(0, min(100000, (int) $input['driverReferralBonusRupees'])));
+        }
+        if (isset($input['driverReferralRequiredRides'])) {
+            $this->put(self::DRIVER_REFERRAL_RIDES, (string) max(1, min(500, (int) $input['driverReferralRequiredRides'])));
+        }
+        if (isset($input['customerJoiningCreditRupees'])) {
+            $this->put(self::CUSTOMER_JOINING_RUPEES, (string) max(0, min(100000, (int) $input['customerJoiningCreditRupees'])));
+        }
+        if (isset($input['customerReferralCreditRupees'])) {
+            $this->put(self::CUSTOMER_REFERRAL_RUPEES, (string) max(0, min(100000, (int) $input['customerReferralCreditRupees'])));
+        }
+        if (isset($input['customerPromoMaxRupees'])) {
+            $this->put(self::CUSTOMER_PROMO_MAX_RUPEES, (string) max(0, min(100000, (int) $input['customerPromoMaxRupees'])));
+        }
+        if (isset($input['customerPromoMaxFarePercent'])) {
+            $this->put(self::CUSTOMER_PROMO_MAX_PERCENT, (string) max(0, min(100, (float) $input['customerPromoMaxFarePercent'])));
+        }
 
         return $this->present();
     }
@@ -153,6 +268,33 @@ class RideSettingsService
         }
         if ($this->get(self::WALLET_COVER_COMMISSION_KEY) === null) {
             $this->put(self::WALLET_COVER_COMMISSION_KEY, '1');
+        }
+        if ($this->get(self::DRIVER_WELCOME_BONUS_ON) === null) {
+            $this->put(self::DRIVER_WELCOME_BONUS_ON, '1');
+        }
+        if ($this->get(self::DRIVER_WELCOME_BONUS_RUPEES) === null) {
+            $this->put(self::DRIVER_WELCOME_BONUS_RUPEES, '100');
+        }
+        if ($this->get(self::FIRST_RIDE_FREE_ON) === null) {
+            $this->put(self::FIRST_RIDE_FREE_ON, '0');
+        }
+        if ($this->get(self::DRIVER_REFERRAL_RUPEES) === null) {
+            $this->put(self::DRIVER_REFERRAL_RUPEES, '150');
+        }
+        if ($this->get(self::DRIVER_REFERRAL_RIDES) === null) {
+            $this->put(self::DRIVER_REFERRAL_RIDES, '10');
+        }
+        if ($this->get(self::CUSTOMER_JOINING_RUPEES) === null) {
+            $this->put(self::CUSTOMER_JOINING_RUPEES, '50');
+        }
+        if ($this->get(self::CUSTOMER_REFERRAL_RUPEES) === null) {
+            $this->put(self::CUSTOMER_REFERRAL_RUPEES, '50');
+        }
+        if ($this->get(self::CUSTOMER_PROMO_MAX_RUPEES) === null) {
+            $this->put(self::CUSTOMER_PROMO_MAX_RUPEES, '50');
+        }
+        if ($this->get(self::CUSTOMER_PROMO_MAX_PERCENT) === null) {
+            $this->put(self::CUSTOMER_PROMO_MAX_PERCENT, '50');
         }
     }
 

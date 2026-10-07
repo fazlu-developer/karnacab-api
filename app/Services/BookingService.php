@@ -77,11 +77,38 @@ class BookingService
                 abort(422, 'Coupon could not be applied.');
             }
         }
+        if ($this->settings->firstRideFreeEnabled()) {
+            $prior = Booking::query()
+                ->where('customer_id', $actor->id)
+                ->whereIn('status', [BookingStatus::COMPLETED, 'COMPLETED'])
+                ->count();
+            if ($prior === 0) {
+                $quote['discountPaise'] = (int) ($quote['totalPaise'] ?? 0);
+                $quote['totalPaise'] = 0;
+                $quote['firstRideFree'] = true;
+            }
+        } else {
+            $promo = app(IncentiveService::class)->quotePromoDiscount((int) $actor->id, (int) ($quote['totalPaise'] ?? 0));
+            if ($promo > 0) {
+                $quote['promoCreditPaise'] = $promo;
+                $quote['discountPaise'] = (int) ($quote['discountPaise'] ?? 0) + $promo;
+                $quote['totalPaise'] = max(0, (int) ($quote['totalPaise'] ?? 0) - $promo);
+            }
+        }
 
         $timeout = 600;
         $radius = $this->settings->radiusKm();
         $product = strtoupper((string) ($dto['product'] ?? 'LOCAL_CAB'));
-        $driverDispatch = self::driverCanAccept($product);
+        $scheduledAt = null;
+        if (! empty($dto['scheduledAt'])) {
+            try {
+                $scheduledAt = \Illuminate\Support\Carbon::parse($dto['scheduledAt']);
+            } catch (\Throwable) {
+                $scheduledAt = null;
+            }
+        }
+        $futureSchedule = $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(5));
+        $driverDispatch = self::driverCanAccept($product) && ! $futureSchedule;
         if ($product === 'RENTAL' && empty($dto['scheduledAt'])) {
             $dto['scheduledAt'] = now()->addHour()->toIso8601String();
         }
@@ -564,11 +591,21 @@ class BookingService
             ]),
         ]));
         Driver::query()->where('id', $driver->id)->update(['duty_status' => 'online']);
-        $this->creditDriverWallet((int) $driver->user_id, (int) $booking->id, $earning, $commission, $totalPaise);
+        $payMode = strtoupper((string) ($booking->payment_mode ?? 'CASH'));
+        if (in_array($payMode, ['CASH', 'COD', 'CASH_ON_DELIVERY'], true)) {
+            $this->debitDriverCommission((int) $driver->user_id, (int) $booking->id, $commission, $totalPaise);
+        } else {
+            $this->creditDriverWallet((int) $driver->user_id, (int) $booking->id, $earning, $commission, $totalPaise);
+        }
         if ($fleetOwnerId && $fleetShare > 0) {
             $this->creditFleetWallet($fleetOwnerId, (int) $booking->id, $fleetShare, $totalPaise);
         }
         $this->debitCustomerWallet((int) $booking->customer_id, (int) $booking->id, $totalPaise, (string) ($booking->payment_mode ?? 'CASH'));
+        try {
+            app(IncentiveService::class)->onBookingCompleted($booking->fresh());
+        } catch (\Throwable $e) {
+            Log::warning('booking.incentive_failed', ['bookingId' => (string) $booking->id, 'error' => $e->getMessage()]);
+        }
         $fresh = $booking->fresh();
         $invoiceRef = $this->writeInvoice($fresh, $totalPaise);
         $presented = $this->present($fresh, $actor);
@@ -1326,6 +1363,12 @@ class BookingService
                 $quote['totalPaise'] = max(0, (int) $quote['totalPaise'] - $discount);
                 $quote['totalRupees'] = $quote['totalPaise'] / 100;
             }
+            $promo = app(IncentiveService::class)->quotePromoDiscount((int) $booking->customer_id, (int) ($quote['totalPaise'] ?? 0));
+            if ($promo > 0) {
+                $quote['promoCreditPaise'] = $promo;
+                $quote['totalPaise'] = max(0, (int) $quote['totalPaise'] - $promo);
+                $quote['totalRupees'] = $quote['totalPaise'] / 100;
+            }
             $snapshot = array_merge($snapshot, $quote);
             $snapshot['fareInputs'] = $inputs;
             $snapshot['bookedDistanceKm'] = $bookedKm;
@@ -1458,6 +1501,55 @@ class BookingService
             fn ($key) => Schema::hasColumn('wallet_ledger', $key),
             ARRAY_FILTER_USE_KEY,
         );
+    }
+
+    private function debitDriverCommission(int $userId, int $bookingId, int $commissionPaise, int $grossPaise): void
+    {
+        if ($commissionPaise <= 0 || ! Schema::hasTable('wallets')) {
+            return;
+        }
+        $wallet = DB::table('wallets')->where('owner_user_id', $userId)->where('owner_type', 'DRIVER')->first();
+        if (! $wallet) {
+            $id = DB::table('wallets')->insertGetId($this->filterWallet([
+                'owner_user_id' => $userId,
+                'owner_type' => 'DRIVER',
+                'balance_paise' => 0,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]));
+            $wallet = DB::table('wallets')->where('id', $id)->first();
+        }
+        if (! $wallet) {
+            return;
+        }
+        if (Schema::hasTable('wallet_ledger')) {
+            $exists = DB::table('wallet_ledger')->where('booking_id', $bookingId)->where('wallet_id', $wallet->id)->where('kind', 'commission')->exists();
+            if ($exists) {
+                return;
+            }
+        }
+        $before = (int) $wallet->balance_paise;
+        $after = $before - $commissionPaise;
+        DB::table('wallets')->where('id', $wallet->id)->update($this->filterWallet(['balance_paise' => $after, 'updated_at' => now()]));
+        if (Schema::hasTable('wallet_ledger')) {
+            DB::table('wallet_ledger')->insert($this->filterLedger([
+                'public_ref' => 'WC'.strtoupper(Str::random(10)),
+                'wallet_id' => $wallet->id,
+                'booking_id' => $bookingId,
+                'owner_user_id' => $userId,
+                'account' => 'DRIVER',
+                'direction' => 'debit',
+                'amount_paise' => $commissionPaise,
+                'commission_paise' => $commissionPaise,
+                'gross_paise' => $grossPaise,
+                'balance_before_paise' => $before,
+                'balance_after_paise' => $after,
+                'kind' => 'commission',
+                'status' => 'posted',
+                'note' => 'Admin commission on cash trip',
+                'created_at' => now(),
+            ]));
+        }
     }
 
     private function creditDriverWallet(int $userId, int $bookingId, int $earningPaise, int $commissionPaise, int $grossPaise): void

@@ -42,9 +42,9 @@ class PayUService
             'txnid' => $txnid,
             'amountRupees' => (float) $amount,
             'checkoutUrl' => $checkout,
-            'webhookUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
-            'successUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
-            'failureUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
+            'webhookUrl' => rtrim((string) config('karnacab.api_public_url'), '/').'/api/v1/payments/webhooks/payu',
+            'successUrl' => rtrim((string) config('karnacab.api_public_url'), '/').'/api/v1/payments/webhooks/payu',
+            'failureUrl' => rtrim((string) config('karnacab.api_public_url'), '/').'/api/v1/payments/webhooks/payu',
             'gateway' => 'payu',
             'mode' => env('PAYU_MODE', 'test'),
             'sdk' => [

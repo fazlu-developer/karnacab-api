@@ -63,7 +63,7 @@ class PlatformController extends Controller
         if (! is_array($site)) {
             $site = [];
         }
-        $admin = rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnacab.in'), '/');
+        $admin = rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnaride.in'), '/');
         $url = function (?string $value) use ($admin): string {
             $value = trim((string) $value);
             if ($value === '') {
@@ -187,7 +187,7 @@ class PlatformController extends Controller
                     if ($path !== '') {
                         $image = str_starts_with($path, 'http')
                             ? $path
-                            : rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnacab.in'), '/').'/'.ltrim($path, '/');
+                            : rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnaride.in'), '/').'/'.ltrim($path, '/');
                     }
                 }
             } catch (\Throwable $e) {
@@ -665,6 +665,30 @@ class PlatformController extends Controller
     public function walletMe(Request $request)
     {
         return $this->surface->walletMe($request->user());
+    }
+
+    public function referralsMe(Request $request)
+    {
+        return app(\App\Services\IncentiveService::class)->snapshot($request->user());
+    }
+
+    public function referralsApply(Request $request)
+    {
+        $data = $request->validate(['referralCode' => 'required|string|max:32']);
+        $user = $request->user();
+        app(\App\Services\IncentiveService::class)->attachReferralCode($user, $data['referralCode']);
+
+        return app(\App\Services\IncentiveService::class)->snapshot($user->fresh());
+    }
+
+    public function driverIncentives(Request $request)
+    {
+        $svc = app(\App\Services\IncentiveService::class);
+
+        return [
+            'incentives' => $svc->driverProgramCards($request->user()),
+            'referrals' => $svc->snapshot($request->user()),
+        ];
     }
 
     public function walletTopup(Request $request)

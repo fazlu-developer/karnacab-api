@@ -3,7 +3,7 @@
 $local = env('APP_ENV', 'production') === 'local';
 $origins = array_values(array_filter(array_map('trim', explode(',', (string) env(
     'CORS_ORIGINS',
-    'http://localhost:8000,https://karnacab.jodoocorp.in',
+    'http://localhost:8000,https://karnaride.jodoocorp.in,https://www.karnaride.jodoocorp.in,https://admin.karnaride.in',
 )))));
 
 return [

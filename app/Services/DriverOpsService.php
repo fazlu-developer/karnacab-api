@@ -155,7 +155,11 @@ class DriverOpsService
                 'balancePaise' => $balance,
                 'balanceRupees' => $balance / 100,
             ],
-            'incentives' => [],
+            'welcomeBonusPending' => $this->welcomeBonusPending($driver),
+            'welcomeBonusRupees' => ((int) ($driver->welcome_bonus_paise ?? 0)) > 0
+                ? (int) round(((int) $driver->welcome_bonus_paise) / 100)
+                : app(RideSettingsService::class)->driverWelcomeBonusRupees(),
+            'incentives' => app(IncentiveService::class)->driverProgramCards($actor),
             'documentAlerts' => collect($documents)->filter(fn ($doc) => in_array($doc['status'], ['expired', 'rejected'], true) || ($doc['expiresAt'] && $doc['expiresAt'] <= now()->toDateString()))->values()->all(),
             'vehicle' => $vehicle ? [
                 'registrationNo' => $vehicle->registration_no,
@@ -432,6 +436,9 @@ class DriverOpsService
         }
 
         $driver = Driver::query()->where('user_id', $actor->id)->first();
+        if ($driver && ! empty($data['welcomeBonusSeen']) && Schema::hasColumn('drivers', 'welcome_bonus_seen_at')) {
+            $driver->update(['welcome_bonus_seen_at' => now()]);
+        }
         if ($driver) {
             $city = $data['city'] ?? null;
             if (! empty($data['districtId']) && Schema::hasTable('districts')) {
@@ -570,6 +577,83 @@ class DriverOpsService
         }
 
         return ['id' => (string) $driver->id, 'kycStatus' => $driver->kyc_status];
+    }
+
+    private function welcomeBonusPending(Driver $driver): bool
+    {
+        if (! app(RideSettingsService::class)->driverWelcomeBonusEnabled()) {
+            return false;
+        }
+        if (! Schema::hasColumn('drivers', 'welcome_bonus_at') || empty($driver->welcome_bonus_at)) {
+            return false;
+        }
+        if (Schema::hasColumn('drivers', 'welcome_bonus_seen_at') && ! empty($driver->welcome_bonus_seen_at)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private function grantWelcomeBonus(Driver $driver): void
+    {
+        $settings = app(RideSettingsService::class);
+        if (! $settings->driverWelcomeBonusEnabled()) {
+            return;
+        }
+        $rupees = $settings->driverWelcomeBonusRupees();
+        if ($rupees < 1) {
+            return;
+        }
+        $paise = $rupees * 100;
+        if (Schema::hasColumn('drivers', 'welcome_bonus_at') && $driver->welcome_bonus_at) {
+            return;
+        }
+        $userId = (int) $driver->user_id;
+        $wallet = Schema::hasTable('wallets')
+            ? DB::table('wallets')->where('owner_user_id', $userId)->where('owner_type', 'DRIVER')->first()
+            : null;
+        if (! $wallet && Schema::hasTable('wallets')) {
+            $id = DB::table('wallets')->insertGetId(array_filter([
+                'owner_user_id' => $userId,
+                'owner_type' => 'DRIVER',
+                'balance_paise' => 0,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ], fn ($key) => Schema::hasColumn('wallets', $key), ARRAY_FILTER_USE_KEY));
+            $wallet = DB::table('wallets')->where('id', $id)->first();
+        }
+        if (! $wallet) {
+            return;
+        }
+        $before = (int) $wallet->balance_paise;
+        $after = $before + $paise;
+        DB::table('wallets')->where('id', $wallet->id)->update(['balance_paise' => $after, 'updated_at' => now()]);
+        if (Schema::hasTable('wallet_ledger')) {
+            DB::table('wallet_ledger')->insert(array_filter([
+                'public_ref' => 'WB'.strtoupper(\Illuminate\Support\Str::random(8)),
+                'wallet_id' => $wallet->id,
+                'owner_user_id' => $userId,
+                'account' => 'DRIVER',
+                'direction' => 'credit',
+                'amount_paise' => $paise,
+                'balance_before_paise' => $before,
+                'balance_after_paise' => $after,
+                'kind' => 'welcome_bonus',
+                'status' => 'posted',
+                'note' => 'KarnaRide joining gift',
+                'created_at' => now(),
+            ], fn ($key) => Schema::hasColumn('wallet_ledger', $key), ARRAY_FILTER_USE_KEY));
+        }
+        $patch = [];
+        if (Schema::hasColumn('drivers', 'welcome_bonus_paise')) {
+            $patch['welcome_bonus_paise'] = $paise;
+        }
+        if (Schema::hasColumn('drivers', 'welcome_bonus_at')) {
+            $patch['welcome_bonus_at'] = now();
+        }
+        if ($patch !== []) {
+            $driver->update($patch);
+        }
     }
 
     public function ratings(User $actor): array

@@ -38,9 +38,9 @@ Route::get('/v1/experience/catalog', [PlatformController::class, 'experienceCata
 Route::get('/v1/notifications/catalog', fn () => ['ok' => true, 'module' => 'notifications']);
 Route::get('/v1/payments/catalog', fn () => [
     'gateway' => 'payu',
-    'webhookUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
-    'successUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
-    'failureUrl' => 'https://api.karnacab.in/api/v1/payments/webhooks/payu',
+    'webhookUrl' => rtrim((string) config('karnacab.api_public_url'), '/').'/api/v1/payments/webhooks/payu',
+    'successUrl' => rtrim((string) config('karnacab.api_public_url'), '/').'/api/v1/payments/webhooks/payu',
+    'failureUrl' => rtrim((string) config('karnacab.api_public_url'), '/').'/api/v1/payments/webhooks/payu',
 ]);
 Route::post('/v1/payments/webhooks/payu', [PlatformController::class, 'payuWebhook']);
 Route::get('/v1/payments/payu/checkout/{txnid}', [PlatformController::class, 'payuCheckout']);
@@ -112,7 +112,9 @@ Route::middleware('jwt')->group(function () {
     Route::get('/v1/drivers/me/dashboard', [PlatformController::class, 'driversDashboard']);
     Route::get('/v1/drivers/me/trips', [PlatformController::class, 'driversTrips']);
     Route::get('/v1/drivers/me/documents', [PlatformController::class, 'driversDocuments']);
-    Route::get('/v1/drivers/me/incentives', fn () => ['incentives' => []]);
+    Route::get('/v1/drivers/me/incentives', [PlatformController::class, 'driverIncentives']);
+    Route::get('/v1/referrals/me', [PlatformController::class, 'referralsMe']);
+    Route::post('/v1/referrals/me', [PlatformController::class, 'referralsApply']);
     Route::get('/v1/drivers/me/ratings', [PlatformController::class, 'driversRatings']);
     Route::get('/v1/drivers/me/support', [PlatformController::class, 'driverSupport']);
     Route::post('/v1/drivers/me/support/tickets', [PlatformController::class, 'driverSupport']);
