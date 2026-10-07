@@ -54,12 +54,14 @@ Route::post('/v1/auth/driver/login', [AuthController::class, 'driverLogin']);
 Route::post('/v1/auth/advertiser/login', [AuthController::class, 'advertiserLogin']);
 Route::post('/v1/auth/operator/login', [AuthController::class, 'operatorLogin']);
 Route::post('/v1/auth/otp/request', [AuthController::class, 'requestOtp']);
+Route::post('/v1/auth/account/delete', [AuthController::class, 'deleteAccountByOtp']);
 Route::post('/v1/auth/otp/verify', [AuthController::class, 'verifyOtp']);
 Route::post('/v1/auth/driver/otp/verify', [AuthController::class, 'verifyDriverOtp']);
 Route::post('/v1/auth/operator/otp/verify', [AuthController::class, 'verifyOperatorOtp']);
 
 Route::middleware('jwt')->group(function () {
     Route::get('/v1/auth/me', [AuthController::class, 'me']);
+    Route::delete('/v1/auth/account', [AuthController::class, 'deleteAccount']);
     Route::patch('/v1/auth/profile', [AuthController::class, 'profile']);
     Route::post('/v1/auth/avatar', [AuthController::class, 'avatar']);
     Route::patch('/v1/auth/location', [AuthController::class, 'location']);

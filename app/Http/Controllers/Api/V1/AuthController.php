@@ -189,4 +189,19 @@ class AuthController extends Controller
 
         return $this->auth->clearDevice($request->user(), is_string($token) ? $token : null);
     }
+
+    public function deleteAccount(Request $request)
+    {
+        return $this->auth->deleteCustomerAccount($request->user());
+    }
+
+    public function deleteAccountByOtp(Request $request)
+    {
+        $data = $request->validate([
+            'phone' => 'required|string',
+            'code' => 'required|string',
+        ]);
+
+        return $this->auth->deleteCustomerAccountByOtp($data['phone'], $data['code']);
+    }
 }

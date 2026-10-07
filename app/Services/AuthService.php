@@ -112,6 +112,32 @@ class AuthService
         return $payload;
     }
 
+    public function consumeOtp(string $phone, string $code): string
+    {
+        $phone = $this->normalizePhone($phone);
+        $code = preg_replace('/\D+/', '', $code) ?? '';
+        $hash = Cache::get('otp:'.$phone);
+        $matches = is_string($hash) && hash_equals($hash, hash('sha256', $phone.':'.$code));
+        abort_unless($matches, 422, 'Invalid OTP');
+        Cache::forget('otp:'.$phone);
+
+        return $phone;
+    }
+
+    public function deleteCustomerAccount(User $user): array
+    {
+        return app(AccountDeletionService::class)->deleteCustomer($user);
+    }
+
+    public function deleteCustomerAccountByOtp(string $phone, string $code): array
+    {
+        $phone = $this->consumeOtp($phone, $code);
+        $user = User::query()->where('phone', $phone)->where('role', 'CUSTOMER')->first();
+        abort_unless($user, 404, 'No KarnaRide customer account exists for this number.');
+
+        return $this->deleteCustomerAccount($user);
+    }
+
     public function verifyOtp(string $phone, string $code, string $role = 'CUSTOMER', ?string $referralCode = null): array
     {
         $phone = $this->normalizePhone($phone);
@@ -558,7 +584,7 @@ class AuthService
                 'username' => $settings['username'],
                 'password' => $settings['password'],
                 'timeout' => 8,
-                'local_domain' => 'karnaride.jodoocorp.in',
+                'local_domain' => 'karnaride.in',
             ]]);
             try {
                 Mail::purge($name);

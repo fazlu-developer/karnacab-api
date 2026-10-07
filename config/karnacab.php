@@ -19,7 +19,7 @@ return [
     'google_maps_key' => (string) env('GOOGLE_MAPS_API', ''),
     'cors_origins' => array_values(array_filter(array_map('trim', explode(',', (string) env(
         'CORS_ORIGINS',
-        'http://localhost:8000,https://karnaride.jodoocorp.in,https://www.karnaride.jodoocorp.in,https://admin.karnaride.in',
+        'http://localhost:8000,https://karnaride.in,https://www.karnaride.in,https://admin.karnaride.in',
     ))))),
     'ride_types' => [
         ['key' => 'LOCAL_CAB', 'label' => 'Local Cab'],

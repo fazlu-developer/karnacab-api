@@ -69,7 +69,7 @@ class IncentiveService
         $this->ensureReferralCode($actor);
         $actor->refresh();
         $code = (string) ($actor->referral_code ?? '');
-        $link = 'https://karnaride.jodoocorp.in/?ref='.$code;
+        $link = 'https://karnaride.in/?ref='.$code;
         $kindPrefix = $actor->role === 'DRIVER' ? 'driver' : 'customer';
         $referred = [];
         if (Schema::hasColumn('users', 'referred_by_user_id')) {
