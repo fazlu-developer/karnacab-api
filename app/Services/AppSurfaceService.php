@@ -222,7 +222,10 @@ class AppSurfaceService
         $gstPaise = (int) ($breakdown['gstPaise'] ?? $row->gst_paise ?? 0);
         $basePaise = max(0, $totalPaise - $gstPaise);
         $commissionPaise = (int) ($row->commission_paise ?? $snapshot['commissionPaise'] ?? 0);
-        $earningPaise = (int) ($row->driver_earning_paise ?? $snapshot['driverEarningPaise'] ?? max(0, $totalPaise - $commissionPaise));
+        $earningPaise = (int) ($row->driver_earning_paise ?? $snapshot['driverEarningPaise'] ?? 0);
+        if ($earningPaise <= 0) {
+            $earningPaise = max(0, $totalPaise - $commissionPaise);
+        }
 
         return [
             'id' => (string) ($row->id ?? ''),
@@ -260,11 +263,12 @@ class AppSurfaceService
         ];
     }
 
-    public function supportFaqs(?string $audience = 'customer'): array
+    public function supportFaqs(?string $audience = 'customer', string $locale = 'en'): array
     {
         $this->ensureFaqs();
+        $hindi = str_starts_with(strtolower($locale), 'hi');
         if (! Schema::hasTable('support_faqs')) {
-            return ['faqs' => $this->defaultFaqs()];
+            return ['faqs' => $this->mapFaqs($this->defaultFaqs(), $hindi)];
         }
         $q = DB::table('support_faqs')->where('active', 1);
         if ($audience && Schema::hasColumn('support_faqs', 'audience')) {
@@ -274,15 +278,45 @@ class AppSurfaceService
         }
         $rows = $q->orderBy(Schema::hasColumn('support_faqs', 'sort_order') ? 'sort_order' : 'id')->limit(100)->get();
         if ($rows->isEmpty()) {
-            return ['faqs' => $this->defaultFaqs()];
+            return ['faqs' => $this->mapFaqs($this->defaultFaqs(), $hindi, $audience)];
         }
 
         return ['faqs' => $rows->map(fn ($row) => [
             'id' => (string) $row->id,
-            'question' => $row->question,
-            'answer' => $row->answer,
+            'question' => $hindi && ! empty($row->question_hi) ? $row->question_hi : $row->question,
+            'answer' => $hindi && ! empty($row->answer_hi) ? $row->answer_hi : $row->answer,
+            'questionHi' => $row->question_hi ?? null,
+            'answerHi' => $row->answer_hi ?? null,
+            'q' => $hindi && ! empty($row->question_hi) ? $row->question_hi : $row->question,
+            'a' => $hindi && ! empty($row->answer_hi) ? $row->answer_hi : $row->answer,
             'audience' => $row->audience ?? 'customer',
         ])->all()];
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $rows
+     * @return list<array<string, mixed>>
+     */
+    private function mapFaqs(array $rows, bool $hindi, ?string $audience = null): array
+    {
+        $out = [];
+        foreach ($rows as $faq) {
+            if ($audience && ($faq['audience'] ?? 'customer') !== $audience && ($faq['audience'] ?? '') !== 'all') {
+                continue;
+            }
+            $q = $hindi && ! empty($faq['question_hi']) ? $faq['question_hi'] : $faq['question'];
+            $a = $hindi && ! empty($faq['answer_hi']) ? $faq['answer_hi'] : $faq['answer'];
+            $out[] = [
+                'id' => (string) ($faq['id'] ?? ''),
+                'question' => $q,
+                'answer' => $a,
+                'q' => $q,
+                'a' => $a,
+                'audience' => $faq['audience'] ?? 'customer',
+            ];
+        }
+
+        return $out;
     }
 
     public function supportTickets(User $actor, Request $request)
@@ -697,12 +731,12 @@ class AppSurfaceService
         return $this->presentParcel(DB::table('parcel_shipments')->where('id', $id)->first());
     }
 
-    public function parcelOne(string $id): array
+    public function parcelOne(string $id, ?User $actor = null): array
     {
         $row = DB::table('parcel_shipments')->where('id', $id)->first();
         abort_unless($row, 404);
 
-        return $this->presentParcel($row);
+        return $this->presentParcel($row, $actor);
     }
 
     public function parcelPay(User $actor, string $id, array $data): array
@@ -719,7 +753,7 @@ class AppSurfaceService
             'updated_at' => now(),
         ]);
 
-        return $this->parcelOne($id);
+        return $this->parcelOne($id, $actor);
     }
 
     public function parcelAccept(User $actor, string $id): array
@@ -731,7 +765,7 @@ class AppSurfaceService
             'updated_at' => now(),
         ]);
 
-        return $this->parcelOne($id);
+        return $this->parcelOne($id, $actor);
     }
 
     public function parcelReject(User $actor, string $id): array
@@ -744,8 +778,20 @@ class AppSurfaceService
         return $this->parcelOne($id);
     }
 
-    public function parcelLifecycle(string $id, string $action): array
+    public function parcelLifecycle(?User $actor, string $id, string $action, ?string $otp = null): array
     {
+        $row = DB::table('parcel_shipments')->where('id', $id)->first();
+        abort_unless($row, 404);
+        $action = strtolower($action);
+        if (in_array($action, ['pickup', 'picked_up', 'verify_otp', 'verify_pickup'], true)) {
+            abort_unless($otp !== null && $otp !== '', 422, 'Enter the parcel pickup OTP');
+            abort_unless(hash_equals((string) ($row->pickup_otp ?? ''), trim((string) $otp)), 422, 'Invalid pickup OTP');
+            $action = 'picked_up';
+        }
+        if (in_array($action, ['deliver', 'delivered'], true) && ! empty($row->delivery_pin)) {
+            abort_unless($otp !== null && $otp !== '', 422, 'Enter the delivery PIN');
+            abort_unless(hash_equals((string) $row->delivery_pin, trim((string) $otp)), 422, 'Invalid delivery PIN');
+        }
         $map = [
             'cancel' => 'cancelled',
             'pickup' => 'picked_up',
@@ -758,10 +804,48 @@ class AppSurfaceService
             'deliver' => 'delivered',
             'delivered' => 'delivered',
         ];
-        $status = $map[strtolower($action)] ?? strtolower($action);
-        DB::table('parcel_shipments')->where('id', $id)->update(['status' => $status, 'updated_at' => now()]);
+        $status = $map[$action] ?? $action;
+        $patch = ['status' => $status, 'updated_at' => now()];
+        if ($status === 'delivered') {
+            $this->settleParcel($row, $actor);
+        }
+        DB::table('parcel_shipments')->where('id', $id)->update($patch);
 
-        return $this->parcelOne($id);
+        return $this->parcelOne($id, $actor);
+    }
+
+    private function settleParcel(object $row, ?User $actor): void
+    {
+        $total = (int) ($row->quote_paise ?? 0);
+        if ($total <= 0) {
+            return;
+        }
+        $commissionPercent = (float) (DB::table('commission_rules')->where('active', 1)->orderBy('id')->value('percent') ?? 10);
+        $commission = (int) round($total * ($commissionPercent / 100));
+        $earning = max(0, $total - $commission);
+        if (Schema::hasColumn('parcel_shipments', 'driver_earning_paise')) {
+            DB::table('parcel_shipments')->where('id', $row->id)->update(['driver_earning_paise' => $earning]);
+        }
+        $driverUserId = $actor?->id;
+        if (! $driverUserId && ! empty($row->driver_id)) {
+            $driverUserId = Driver::query()->where('id', $row->driver_id)->value('user_id');
+        }
+        if (! $driverUserId) {
+            return;
+        }
+        $method = strtoupper((string) ($row->payment_method ?? $row->payment_status ?? 'CASH'));
+        $bookingKey = 1000000000 + (int) $row->id;
+        if (in_array($method, ['CASH', 'COD', 'CASH_ON_DELIVERY'], true) || $method === '') {
+            app(WalletAccountService::class)->debitCommission((int) $driverUserId, $bookingKey, $commission, $total);
+            app(WalletAccountService::class)->recordCashTrip(
+                (int) $driverUserId,
+                $bookingKey,
+                $earning,
+                $commission,
+                $total,
+                'Cash parcel collected ₹'.number_format($total / 100, 0),
+            );
+        }
     }
 
     public function travelCatalog(): array
@@ -1375,7 +1459,11 @@ class AppSurfaceService
         $balance = (int) ($row->balance_paise ?? 0);
         $ledger = [];
         if ($row && Schema::hasTable('wallet_ledger')) {
-            $ledger = DB::table('wallet_ledger')->where('wallet_id', $row->id)->orderByDesc('id')->limit(80)->get()->map(fn ($item) => [
+            $q = DB::table('wallet_ledger')->where('wallet_id', $row->id);
+            if ($ownerType === 'DRIVER') {
+                $q->whereNotIn('kind', ['commission', 'fleet_commission', 'admin_commission']);
+            }
+            $ledger = $q->orderByDesc('id')->limit(80)->get()->map(fn ($item) => [
                 'id' => (string) $item->id,
                 'transactionId' => $item->public_ref ?? ('WL'.$item->id),
                 'kind' => $item->kind ?? 'entry',
@@ -1383,8 +1471,8 @@ class AppSurfaceService
                 'direction' => strtolower((string) ($item->direction ?? '')),
                 'amountPaise' => (int) ($item->amount_paise ?? 0),
                 'amountRupees' => ((int) ($item->amount_paise ?? 0)) / 100,
-                'commissionPaise' => (int) ($item->commission_paise ?? 0),
-                'commissionRupees' => ((int) ($item->commission_paise ?? 0)) / 100,
+                'commissionPaise' => $ownerType === 'DRIVER' ? 0 : (int) ($item->commission_paise ?? 0),
+                'commissionRupees' => $ownerType === 'DRIVER' ? 0 : ((int) ($item->commission_paise ?? 0)) / 100,
                 'balanceBeforeRupees' => ((int) ($item->balance_before_paise ?? 0)) / 100,
                 'balanceAfterRupees' => ((int) ($item->balance_after_paise ?? 0)) / 100,
                 'bookingId' => $item->booking_id ?? null,
@@ -1396,15 +1484,18 @@ class AppSurfaceService
         }
 
         $promo = (int) ($row->promo_balance_paise ?? 0);
+        $wallets = app(WalletAccountService::class);
+        $wallets->ensureSchema();
+        $snap = $wallets->snapshot($row, $ownerType);
 
-        return [
-            'balancePaise' => $balance,
-            'balanceRupees' => $balance / 100,
+        return $snap + [
             'promoBalancePaise' => $promo,
             'promoBalanceRupees' => $promo / 100,
-            'ownerType' => $row->owner_type ?? $ownerType,
             'ledger' => $ledger,
             'referrals' => app(IncentiveService::class)->snapshot($actor),
+            'withdrawals' => $ownerType === 'DRIVER'
+                ? ['supported' => true, 'minRupees' => 500, 'items' => $wallets->withdrawalsFor((int) $actor->id)]
+                : null,
         ];
     }
 
@@ -1699,11 +1790,14 @@ class AppSurfaceService
     private function defaultFaqs(): array
     {
         return [
-            ['id' => '1', 'question' => 'How do I book a ride?', 'answer' => 'Tap Where to, set drop, choose a vehicle, pick Cash or Wallet, then confirm.', 'audience' => 'customer'],
-            ['id' => '2', 'question' => 'How do I add wallet balance?', 'answer' => 'Open Account → Wallet, enter an amount, and pay with PayU.', 'audience' => 'customer'],
-            ['id' => '3', 'question' => 'How do I save Home and Work?', 'answer' => 'Open Where to and tap Add Home or Add Work, then pick the address.', 'audience' => 'customer'],
-            ['id' => '4', 'question' => 'How do I cancel a trip?', 'answer' => 'Open the live booking, tap Cancel, and choose a reason. Admin can see that reason.', 'audience' => 'customer'],
-            ['id' => '5', 'question' => 'Safety desk', 'answer' => 'Use Support → Safety desk for SOS, emergency contact, lost & found, and complaints.', 'audience' => 'customer'],
+            ['id' => '1', 'question' => 'How do I book a ride?', 'question_hi' => 'राइड कैसे बुक करूं?', 'answer' => 'Tap Where to, set drop, choose a vehicle, pick Cash or Wallet, then confirm.', 'answer_hi' => 'व्हेयर टू टैप करें, ड्रॉप चुनें, वाहन चुनें, कैश या वॉलेट चुनें, फिर कन्फर्म करें।', 'audience' => 'customer'],
+            ['id' => '2', 'question' => 'How do I add wallet balance?', 'question_hi' => 'वॉलेट बैलेंस कैसे जोड़ें?', 'answer' => 'Open Account → Wallet, enter an amount, and pay with PayU.', 'answer_hi' => 'अकाउंट → वॉलेट खोलें, राशि डालें और PayU से भुगतान करें।', 'audience' => 'customer'],
+            ['id' => '3', 'question' => 'How do I save Home and Work?', 'question_hi' => 'होम और वर्क कैसे सेव करें?', 'answer' => 'Open Where to and tap Add Home or Add Work, then pick the address.', 'answer_hi' => 'व्हेयर टू खोलें, होम या वर्क जोड़ें, फिर पता चुनें।', 'audience' => 'customer'],
+            ['id' => '4', 'question' => 'How do I cancel a trip?', 'question_hi' => 'यात्रा कैसे रद्द करूं?', 'answer' => 'Open the live booking, tap Cancel, and choose a reason. Admin can see that reason.', 'answer_hi' => 'लाइव बुकिंग खोलें, रद्द करें टैप करें और कारण चुनें।', 'audience' => 'customer'],
+            ['id' => '5', 'question' => 'Safety desk', 'question_hi' => 'सेफ्टी डेस्क', 'answer' => 'Use Support → Safety desk for SOS, emergency contact, lost & found, and complaints.', 'answer_hi' => 'सहायता → सेफ्टी डेस्क से SOS, आपातकालीन संपर्क और शिकायत करें।', 'audience' => 'customer'],
+            ['id' => 'd1', 'question' => 'How do I go online?', 'question_hi' => 'ऑनलाइन कैसे जाऊं?', 'answer' => 'Finish KYC, keep location on, then tap Go online.', 'answer_hi' => 'केवाईसी पूरा करें, लोकेशन चालू रखें, फिर ऑनलाइन जाएं टैप करें।', 'audience' => 'driver'],
+            ['id' => 'd2', 'question' => 'How are cash trips counted?', 'question_hi' => 'कैश ट्रिप की गिनती कैसे होती है?', 'answer' => 'Cash collected is recorded on complete. Today’s earnings include cash trips after commission.', 'answer_hi' => 'कैश कलेक्ट पूरा होते ही दर्ज होता है। आज की कमाई में कमीशन काटकर कैश ट्रिप शामिल है।', 'audience' => 'driver'],
+            ['id' => 'd3', 'question' => 'How do I pick up a parcel?', 'question_hi' => 'पार्सल कैसे पिक करूं?', 'answer' => 'Accept the request, then enter the customer pickup OTP to collect the parcel.', 'answer_hi' => 'अनुरोध स्वीकार करें, फिर ग्राहक का पिकअप OTP डालकर पार्सल लें।', 'audience' => 'driver'],
         ];
     }
 
@@ -1715,6 +1809,8 @@ class AppSurfaceService
                     $table->id();
                     $table->string('question');
                     $table->text('answer');
+                    $table->string('question_hi')->nullable();
+                    $table->text('answer_hi')->nullable();
                     $table->string('audience', 24)->default('customer');
                     $table->unsignedInteger('sort_order')->default(0);
                     $table->boolean('active')->default(true);
@@ -1724,10 +1820,22 @@ class AppSurfaceService
                 return;
             }
         }
+        if (Schema::hasTable('support_faqs')) {
+            if (! Schema::hasColumn('support_faqs', 'question_hi')) {
+                Schema::table('support_faqs', function ($table) {
+                    $table->string('question_hi')->nullable();
+                });
+            }
+            if (! Schema::hasColumn('support_faqs', 'answer_hi')) {
+                Schema::table('support_faqs', function ($table) {
+                    $table->text('answer_hi')->nullable();
+                });
+            }
+        }
         if (Schema::hasTable('support_faqs') && DB::table('support_faqs')->count() === 0) {
             $i = 0;
             foreach ($this->defaultFaqs() as $faq) {
-                DB::table('support_faqs')->insert([
+                $row = [
                     'question' => $faq['question'],
                     'answer' => $faq['answer'],
                     'audience' => $faq['audience'],
@@ -1735,7 +1843,33 @@ class AppSurfaceService
                     'active' => 1,
                     'created_at' => now(),
                     'updated_at' => now(),
-                ]);
+                ];
+                if (Schema::hasColumn('support_faqs', 'question_hi')) {
+                    $row['question_hi'] = $faq['question_hi'] ?? null;
+                    $row['answer_hi'] = $faq['answer_hi'] ?? null;
+                }
+                DB::table('support_faqs')->insert($row);
+            }
+        } elseif (Schema::hasTable('support_faqs') && Schema::hasColumn('support_faqs', 'audience') && ! DB::table('support_faqs')->where('audience', 'driver')->exists()) {
+            $i = (int) DB::table('support_faqs')->max('sort_order');
+            foreach ($this->defaultFaqs() as $faq) {
+                if (($faq['audience'] ?? '') !== 'driver') {
+                    continue;
+                }
+                $row = [
+                    'question' => $faq['question'],
+                    'answer' => $faq['answer'],
+                    'audience' => 'driver',
+                    'sort_order' => ++$i,
+                    'active' => 1,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ];
+                if (Schema::hasColumn('support_faqs', 'question_hi')) {
+                    $row['question_hi'] = $faq['question_hi'] ?? null;
+                    $row['answer_hi'] = $faq['answer_hi'] ?? null;
+                }
+                DB::table('support_faqs')->insert($row);
             }
         }
     }
@@ -1752,7 +1886,7 @@ class AppSurfaceService
         ];
     }
 
-    public function presentParcel(object $row): array
+    public function presentParcel(object $row, ?User $actor = null): array
     {
         $total = (int) ($row->quote_paise ?? 0);
         $status = strtolower((string) $row->status);
@@ -1763,13 +1897,16 @@ class AppSurfaceService
             ? 'https://www.google.com/maps/dir/?api=1&destination='.$row->drop_lat.','.$row->drop_lng.'&travelmode=driving'
             : null;
         $actions = match ($status) {
-            'assigned' => ['pickup', 'cancel'],
+            'assigned' => ['verify_otp', 'cancel'],
             'picked_up' => ['transit'],
             'in_transit' => ['arrive', 'out_for_delivery'],
             'destination', 'out_for_delivery' => ['deliver'],
             'created', 'paid' => ['accept', 'reject'],
             default => [],
         };
+        $showOtp = $actor && in_array($actor->role, ['CUSTOMER', 'ADMIN', 'SUPER_ADMIN'], true);
+        $isDriver = $actor && $actor->role === 'DRIVER';
+        $earningPaise = (int) ($row->driver_earning_paise ?? (int) round($total * 0.9));
 
         return [
             'id' => (string) $row->id,
@@ -1791,13 +1928,21 @@ class AppSurfaceService
             'pickupLng' => $row->pickup_lng !== null ? (float) $row->pickup_lng : null,
             'dropLat' => $row->drop_lat !== null ? (float) $row->drop_lat : null,
             'dropLng' => $row->drop_lng !== null ? (float) $row->drop_lng : null,
-            'quotePaise' => $total,
-            'quoteRupees' => $total / 100,
+            'quotePaise' => $isDriver ? $earningPaise : $total,
+            'quoteRupees' => ($isDriver ? $earningPaise : $total) / 100,
+            'estimatedEarningsRupees' => $earningPaise / 100,
+            'driverEarningRupees' => $earningPaise / 100,
             'paymentStatus' => $row->payment_status,
-            'pickupOtp' => $row->pickup_otp,
-            'deliveryPin' => $row->delivery_pin,
+            'pickupOtp' => $showOtp ? $row->pickup_otp : null,
+            'deliveryPin' => $showOtp && in_array($status, ['out_for_delivery', 'destination', 'in_transit'], true) ? $row->delivery_pin : ($actor && $actor->role === 'DRIVER' ? null : $row->delivery_pin),
             'driverId' => $row->driver_id ? (string) $row->driver_id : null,
-            'fare' => ['totalPaise' => $total, 'totalRupees' => $total / 100, 'currency' => 'INR'],
+            'fare' => [
+                'totalPaise' => $isDriver ? $earningPaise : $total,
+                'totalRupees' => ($isDriver ? $earningPaise : $total) / 100,
+                'driverEarningPaise' => $earningPaise,
+                'driverEarningRupees' => $earningPaise / 100,
+                'currency' => 'INR',
+            ],
             'billedKm' => (float) ($row->distance_km ?? 0),
             'allowedActions' => $actions,
             'navigation' => [

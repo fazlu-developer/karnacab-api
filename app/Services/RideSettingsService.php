@@ -23,6 +23,8 @@ class RideSettingsService
     public const CUSTOMER_REFERRAL_RUPEES = 'customer_referral_credit_rupees';
     public const CUSTOMER_PROMO_MAX_RUPEES = 'customer_promo_max_rupees';
     public const CUSTOMER_PROMO_MAX_PERCENT = 'customer_promo_max_fare_percent';
+    public const GST_PERCENT = 'gst_percent';
+    public const FLEET_OWNER_COMMISSION_PERCENT = 'fleet_owner_commission_percent';
 
     public function radiusKm(): float
     {
@@ -145,10 +147,29 @@ class RideSettingsService
         return max(0, min(100, $pct));
     }
 
+    public function gstPercent(): float
+    {
+        $value = $this->get(self::GST_PERCENT);
+        $pct = is_numeric($value) ? (float) $value : 5;
+
+        return max(0, min(100, $pct));
+    }
+
+    public function fleetOwnerCommissionPercent(): float
+    {
+        $value = $this->get(self::FLEET_OWNER_COMMISSION_PERCENT);
+        if ($value === null || $value === '') {
+            $value = $this->get('fleet_commission_share_percent');
+        }
+        $pct = is_numeric($value) ? (float) $value : 5;
+
+        return max(0, min(100, $pct));
+    }
+
     /**
      * @return array{requiredPaise: int, commissionPaise: int, commissionPercent: float, eligible: bool, reason: ?string}
      */
-    public function walletEligibility(int $balancePaise, int $farePaise): array
+    public function walletEligibility(int $balancePaise, int $farePaise, int $joiningCreditPaise = 0, int $frozenPaise = 0): array
     {
         $percent = Schema::hasTable('commission_rules')
             ? (float) (DB::table('commission_rules')->where('active', 1)->orderBy('id')->value('percent') ?? 10)
@@ -160,14 +181,16 @@ class RideSettingsService
         if ($this->driverWalletMustCoverCommission()) {
             $required = max($required, $commission);
         }
-        $eligible = $balancePaise >= $required;
+        $cash = max(0, $balancePaise - max(0, $frozenPaise));
+        $cover = $cash + max(0, $joiningCreditPaise);
+        $eligible = $cover >= $required || ($joiningCreditPaise >= $commission && $commission > 0) || ($required <= 0);
 
         return [
             'requiredPaise' => $required,
             'commissionPaise' => $commission,
             'commissionPercent' => $percent,
             'eligible' => $eligible,
-            'reason' => $eligible ? null : 'Add money to your wallet before accepting this booking. Required ₹'.number_format($required / 100, 0).', available ₹'.number_format($balancePaise / 100, 0).'.',
+            'reason' => $eligible ? null : 'Add money to your wallet before accepting this booking. Required ₹'.number_format($required / 100, 0).', available ₹'.number_format($cover / 100, 0).'.',
         ];
     }
 
@@ -193,6 +216,8 @@ class RideSettingsService
             'customerReferralCreditRupees' => $this->customerReferralCreditRupees(),
             'customerPromoMaxRupees' => $this->customerPromoMaxRupees(),
             'customerPromoMaxFarePercent' => $this->customerPromoMaxFarePercent(),
+            'gstPercent' => $this->gstPercent(),
+            'fleetOwnerCommissionPercent' => $this->fleetOwnerCommissionPercent(),
         ];
     }
 
@@ -295,6 +320,12 @@ class RideSettingsService
         }
         if ($this->get(self::CUSTOMER_PROMO_MAX_PERCENT) === null) {
             $this->put(self::CUSTOMER_PROMO_MAX_PERCENT, '50');
+        }
+        if ($this->get(self::GST_PERCENT) === null) {
+            $this->put(self::GST_PERCENT, '5');
+        }
+        if ($this->get(self::FLEET_OWNER_COMMISSION_PERCENT) === null) {
+            $this->put(self::FLEET_OWNER_COMMISSION_PERCENT, '5');
         }
     }
 

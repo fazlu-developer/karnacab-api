@@ -47,7 +47,14 @@ class BookingService
             'dropText' => $dto['dropText'] ?? $dto['drop_text'] ?? null,
         ]);
 
-        $distanceKm = (float) ($dto['distanceKm'] ?? Geo::haversineKm($pickupLat, $pickupLng, $dropLat, $dropLng));
+        $resolved = $this->fares->withResolvedTripDistance($dto + [
+            'pickupLat' => $pickupLat,
+            'pickupLng' => $pickupLng,
+            'dropLat' => $dropLat,
+            'dropLng' => $dropLng,
+        ]);
+        $distanceKm = (float) ($resolved['distanceKm'] ?? $dto['distanceKm'] ?? Geo::haversineKm($pickupLat, $pickupLng, $dropLat, $dropLng));
+        $dto['distanceKm'] = $distanceKm;
         $dto['product'] = FareService::cityOrOutstation((string) ($dto['product'] ?? 'LOCAL_CAB'), $distanceKm);
         $quote = $this->fares->quote([
             'product' => $dto['product'],
@@ -297,7 +304,12 @@ class BookingService
                 }
             })->orderBy('id')->first()
             : null;
-        $eligibility = $this->settings->walletEligibility((int) ($wallet->balance_paise ?? 0), (int) ($preview->quote_paise ?? 0));
+        $eligibility = $this->settings->walletEligibility(
+            (int) ($wallet->balance_paise ?? 0),
+            (int) ($preview->quote_paise ?? 0),
+            (int) ($wallet->joining_credit_paise ?? 0),
+            (int) ($wallet->frozen_paise ?? 0),
+        );
         abort_unless($eligibility['eligible'], 422, $eligibility['reason'] ?? 'Wallet balance is too low to accept this booking.');
 
         $assigned = false;
@@ -567,9 +579,19 @@ class BookingService
             : ($driver->id ? DB::table('vehicles')->where('driver_id', $driver->id)->orderByDesc('id')->first() : null);
         if ($vehicleRow && ! empty($vehicleRow->fleet_owner_id)) {
             $fleetOwnerId = (int) $vehicleRow->fleet_owner_id;
-            $fleetShare = (int) round($totalPaise * 0.05);
+            $fleetPct = app(RideSettingsService::class)->fleetOwnerCommissionPercent();
+            if (Schema::hasTable('fleet_owners') && Schema::hasColumn('fleet_owners', 'commission_percent')) {
+                $own = DB::table('fleet_owners')->where('id', $fleetOwnerId)->value('commission_percent');
+                if ($own !== null && $own !== '') {
+                    $fleetPct = (float) $own;
+                }
+            }
+            $fleetShare = (int) round($totalPaise * (max(0, min(100, $fleetPct)) / 100));
         }
-        $earning = max(0, $totalPaise - $commission - $fleetShare);
+        $earning = max(0, $totalPaise - $commission);
+        if ($fleetShare > $commission) {
+            $fleetShare = $commission;
+        }
 
         $booking->update($this->filterColumns([
             'status' => BookingStatus::COMPLETED,
@@ -594,6 +616,14 @@ class BookingService
         $payMode = strtoupper((string) ($booking->payment_mode ?? 'CASH'));
         if (in_array($payMode, ['CASH', 'COD', 'CASH_ON_DELIVERY'], true)) {
             $this->debitDriverCommission((int) $driver->user_id, (int) $booking->id, $commission, $totalPaise);
+            app(WalletAccountService::class)->recordCashTrip(
+                (int) $driver->user_id,
+                (int) $booking->id,
+                $earning,
+                $commission,
+                $totalPaise,
+                'Trip earning ₹'.number_format($earning / 100, 0),
+            );
         } else {
             $this->creditDriverWallet((int) $driver->user_id, (int) $booking->id, $earning, $commission, $totalPaise);
         }
@@ -624,7 +654,7 @@ class BookingService
                 $this->push->notifyUsers(
                     [$driverUserId],
                     'Trip completed',
-                    'Earning ₹'.number_format($earning / 100, 0).' after commission.',
+                    'Trip earning ₹'.number_format($earning / 100, 0).'.',
                     ['type' => 'wallet', 'event' => 'trip_completed', 'bookingId' => $bookingId],
                 );
             } catch (\Throwable $e) {
@@ -684,6 +714,11 @@ class BookingService
     {
         $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
         $total = (int) ($row->final_fare_paise ?? $snapshot['totalPaise'] ?? $row->quote_paise);
+        $commissionPaise = (int) ($row->commission_paise ?? $snapshot['commissionPaise'] ?? round($total * 0.1));
+        $storedEarn = isset($row->driver_earning_paise) ? (int) $row->driver_earning_paise : null;
+        $earningPaise = ($storedEarn !== null && $storedEarn > 0)
+            ? $storedEarn
+            : max(0, $total - $commissionPaise);
         $driver = $row->driver_id ? Driver::query()->with('user', 'vehicles')->find($row->driver_id) : null;
         $driverUser = $driver?->user;
         $vehicle = $driver?->vehicles?->first();
@@ -750,6 +785,9 @@ class BookingService
             'expiresAt' => optional($expires)?->toIso8601String(),
             'searchExpiresAt' => optional($expires)?->toIso8601String(),
             'createdAt' => optional($row->created_at)?->toIso8601String(),
+            'arrivedAt' => optional($row->arrived_at)?->toIso8601String(),
+            'tripStartedAt' => optional($row->trip_started_at)?->toIso8601String(),
+            'tripEndedAt' => optional($row->trip_ended_at)?->toIso8601String(),
             'secondsRemaining' => $secondsLeft,
             'startOtp' => $isCustomer ? $row->start_otp : null,
             'endOtp' => $isCustomer && in_array($row->status, [BookingStatus::TRIP_STARTED, BookingStatus::COMPLETED], true) ? $row->end_otp : null,
@@ -770,18 +808,19 @@ class BookingService
             'allowedActions' => $allowed,
             'fare' => [
                 'source' => 'server',
-                'totalPaise' => $total,
-                'totalRupees' => $total / 100,
-                'gstPaise' => $snapshot['breakdown']['gstPaise'] ?? ($snapshot['final']['breakdown']['gstPaise'] ?? null),
-                'discountPaise' => $snapshot['breakdown']['discountPaise'] ?? null,
-                'commissionPaise' => $row->commission_paise ?? $snapshot['commissionPaise'] ?? null,
-                'driverEarningPaise' => $row->driver_earning_paise ?? $snapshot['driverEarningPaise'] ?? null,
-                'driverEarningRupees' => isset($row->driver_earning_paise) ? $row->driver_earning_paise / 100 : null,
+                'totalPaise' => $isCustomer ? $total : $earningPaise,
+                'totalRupees' => ($isCustomer ? $total : $earningPaise) / 100,
+                'gstPaise' => $isCustomer ? ($snapshot['breakdown']['gstPaise'] ?? ($snapshot['final']['breakdown']['gstPaise'] ?? null)) : null,
+                'discountPaise' => $isCustomer ? ($snapshot['breakdown']['discountPaise'] ?? null) : null,
+                'commissionPaise' => $isCustomer ? $commissionPaise : null,
+                'driverEarningPaise' => $earningPaise,
+                'driverEarningRupees' => $earningPaise / 100,
                 'currency' => 'INR',
-                'breakdown' => $snapshot['final']['breakdown'] ?? $snapshot['breakdown'] ?? null,
+                'breakdown' => $isCustomer ? ($snapshot['final']['breakdown'] ?? $snapshot['breakdown'] ?? null) : null,
             ],
-            'estimatedFareRupees' => $total / 100,
-            'estimatedEarningsRupees' => isset($row->driver_earning_paise) ? $row->driver_earning_paise / 100 : round(($total * 0.9) / 100, 2),
+            'estimatedFareRupees' => $isCustomer ? $total / 100 : $earningPaise / 100,
+            'estimatedEarningsRupees' => $earningPaise / 100,
+            'driverEarningRupees' => $earningPaise / 100,
             'kind' => 'ride',
             'navigation' => $this->navigationPayload($row),
         ];
@@ -1505,51 +1544,7 @@ class BookingService
 
     private function debitDriverCommission(int $userId, int $bookingId, int $commissionPaise, int $grossPaise): void
     {
-        if ($commissionPaise <= 0 || ! Schema::hasTable('wallets')) {
-            return;
-        }
-        $wallet = DB::table('wallets')->where('owner_user_id', $userId)->where('owner_type', 'DRIVER')->first();
-        if (! $wallet) {
-            $id = DB::table('wallets')->insertGetId($this->filterWallet([
-                'owner_user_id' => $userId,
-                'owner_type' => 'DRIVER',
-                'balance_paise' => 0,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]));
-            $wallet = DB::table('wallets')->where('id', $id)->first();
-        }
-        if (! $wallet) {
-            return;
-        }
-        if (Schema::hasTable('wallet_ledger')) {
-            $exists = DB::table('wallet_ledger')->where('booking_id', $bookingId)->where('wallet_id', $wallet->id)->where('kind', 'commission')->exists();
-            if ($exists) {
-                return;
-            }
-        }
-        $before = (int) $wallet->balance_paise;
-        $after = $before - $commissionPaise;
-        DB::table('wallets')->where('id', $wallet->id)->update($this->filterWallet(['balance_paise' => $after, 'updated_at' => now()]));
-        if (Schema::hasTable('wallet_ledger')) {
-            DB::table('wallet_ledger')->insert($this->filterLedger([
-                'public_ref' => 'WC'.strtoupper(Str::random(10)),
-                'wallet_id' => $wallet->id,
-                'booking_id' => $bookingId,
-                'owner_user_id' => $userId,
-                'account' => 'DRIVER',
-                'direction' => 'debit',
-                'amount_paise' => $commissionPaise,
-                'commission_paise' => $commissionPaise,
-                'gross_paise' => $grossPaise,
-                'balance_before_paise' => $before,
-                'balance_after_paise' => $after,
-                'kind' => 'commission',
-                'status' => 'posted',
-                'note' => 'Admin commission on cash trip',
-                'created_at' => now(),
-            ]));
-        }
+        app(WalletAccountService::class)->debitCommission($userId, $bookingId, $commissionPaise, $grossPaise);
     }
 
     private function creditDriverWallet(int $userId, int $bookingId, int $earningPaise, int $commissionPaise, int $grossPaise): void
@@ -1580,7 +1575,7 @@ class BookingService
                     'booking_id' => $bookingId,
                     'owner_user_id' => $userId,
                     'account' => 'DRIVER',
-                    'direction' => 'credit',
+                    'direction' => 'CREDIT',
                     'amount_paise' => $earningPaise,
                     'commission_paise' => $commissionPaise,
                     'gross_paise' => $grossPaise,
@@ -1634,7 +1629,7 @@ class BookingService
                     'booking_id' => $bookingId,
                     'owner_user_id' => $userId,
                     'account' => 'FLEET',
-                    'direction' => 'credit',
+                    'direction' => 'CREDIT',
                     'amount_paise' => $amountPaise,
                     'commission_paise' => $amountPaise,
                     'gross_paise' => $grossPaise,
@@ -1642,7 +1637,7 @@ class BookingService
                     'balance_after_paise' => $after,
                     'kind' => 'fleet_commission',
                     'status' => 'posted',
-                    'note' => 'Fleet owner commission 5%',
+                    'note' => 'Fleet owner commission',
                     'created_at' => now(),
                 ]));
             }

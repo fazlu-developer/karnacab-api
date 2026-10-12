@@ -154,18 +154,21 @@ class PlatformController extends Controller
 
     public function quoteRide(Request $request)
     {
-        return $this->fares->quote($request->all());
+        $payload = $this->fares->withResolvedTripDistance($request->all());
+
+        return $this->fares->quote($payload);
     }
 
     public function quoteOptions(Request $request)
     {
-        \App\Support\ServiceArea::assertTrip($request->all());
-        $requested = strtoupper((string) $request->input('category', 'BIKE'));
+        $payload = $this->fares->withResolvedTripDistance($request->all());
+        \App\Support\ServiceArea::assertTrip($payload);
+        $requested = strtoupper((string) ($payload['category'] ?? 'BIKE'));
         $options = [];
-        foreach (config('karnacab.vehicle_types') as $vehicle) {
+        foreach (app(\App\Services\VehicleCatalogService::class)->rideTypes() as $vehicle) {
             try {
-                $quote = $this->fares->quote(array_merge($request->all(), [
-                    'product' => $request->input('product', 'LOCAL_CAB'),
+                $quote = $this->fares->quote(array_merge($payload, [
+                    'product' => $payload['product'] ?? 'LOCAL_CAB',
                     'category' => $vehicle['key'],
                 ]));
             } catch (\Throwable $e) {
@@ -193,8 +196,8 @@ class PlatformController extends Controller
             } catch (\Throwable $e) {
                 Log::notice('quote.catalog_skipped', ['category' => $vehicle['key'], 'message' => $e->getMessage()]);
             }
-            $billedKm = (float) ($quote['billedKm'] ?? $request->input('distanceKm') ?? 5);
-            $routeMinutes = (int) ($request->input('durationMinutes') ?? 0);
+            $billedKm = (float) ($quote['billedKm'] ?? $payload['distanceKm'] ?? 5);
+            $routeMinutes = (int) ($payload['durationMinutes'] ?? 0);
             $durationMinutes = $routeMinutes > 0 ? $routeMinutes : max(1, (int) round($billedKm * 2.3));
             $etaMinutes = match ($vehicle['key']) {
                 'BIKE' => 3,
@@ -251,7 +254,7 @@ class PlatformController extends Controller
 
         return [
             'options' => $options,
-            'billedKm' => $request->input('distanceKm'),
+            'billedKm' => $payload['distanceKm'] ?? $request->input('distanceKm'),
             'nearbyDrivers' => $markers,
             'nearbyDriverCount' => count($markers),
             'searchRadiusKm' => $settings['driverSearchRadiusKm'],
@@ -294,6 +297,7 @@ class PlatformController extends Controller
             (float) $request->query('originLng'),
             (float) $request->query('destLat'),
             (float) $request->query('destLng'),
+            $this->fares->parseWaypoints($request->query('waypoints', $request->input('waypoints'))),
         );
     }
 
@@ -515,13 +519,13 @@ class PlatformController extends Controller
             return $payload;
         }
 
+        $locale = (string) ($request->query('lang') ?? $request->header('Accept-Language', 'en'));
+        $faqs = $this->surface->supportFaqs('driver', $locale)['faqs'] ?? [];
+
         return [
             'tickets' => $payload['tickets'] ?? [],
-            'faqs' => [
-                ['q' => 'How do I go online?', 'a' => 'Finish KYC, keep location on, then tap Go online.'],
-                ['q' => 'How much wallet do I need?', 'a' => 'Admin sets a percent of the fare. At 10%, a ₹1,000 wallet can accept a ₹10,000 booking.'],
-                ['q' => 'Where are my documents reviewed?', 'a' => 'Open Support and send a ticket. The admin team sees the same ticket.'],
-            ],
+            'faqs' => $faqs,
+            'pages' => app(\App\Services\CmsCatalogService::class)->appPages()['pages'] ?? [],
             'tel' => 'tel:08041234500',
         ];
     }
@@ -710,6 +714,22 @@ class PlatformController extends Controller
         return app(\App\Services\PayUService::class)->sdkHash($request);
     }
 
+    public function payuConfirm(Request $request)
+    {
+        $txnid = (string) ($request->input('txnid') ?? $request->input('txnId') ?? '');
+
+        return app(\App\Services\PayUService::class)->confirmForUser($request->user(), $txnid);
+    }
+
+    public function walletWithdraw(Request $request)
+    {
+        $rupees = (float) ($request->input('amountRupees') ?? $request->input('amount') ?? 0);
+        $destination = $request->input('upi') ?? $request->input('account') ?? $request->input('destination');
+        $row = app(\App\Services\WalletAccountService::class)->requestWithdraw($request->user(), $rupees, is_string($destination) ? $destination : null);
+
+        return ['ok' => true, 'withdrawal' => $row];
+    }
+
     public function payuWebhook(Request $request)
     {
         $result = app(\App\Services\PayUService::class)->handleWebhook($request);
@@ -774,7 +794,9 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
 
     public function supportFaqs(Request $request)
     {
-        return $this->surface->supportFaqs($request->query('audience', 'customer'));
+        $locale = (string) ($request->query('lang') ?? $request->header('Accept-Language', 'en'));
+
+        return $this->surface->supportFaqs($request->query('audience', 'customer'), $locale);
     }
 
     public function supportTickets(Request $request)
@@ -869,7 +891,12 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
 
     public function parcelsLifecycle(Request $request, string $id)
     {
-        return $this->surface->parcelLifecycle($id, (string) ($request->input('action') ?? $request->input('status', 'cancel')));
+        return $this->surface->parcelLifecycle(
+            $request->user(),
+            $id,
+            (string) ($request->input('action') ?? $request->input('status', 'cancel')),
+            $request->input('otp'),
+        );
     }
 
     public function travelCatalog()

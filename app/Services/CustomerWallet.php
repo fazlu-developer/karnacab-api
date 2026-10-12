@@ -37,7 +37,7 @@ class CustomerWallet
             $exists = DB::table('wallet_ledger')
                 ->where('wallet_id', $wallet->id)
                 ->where('booking_id', $bookingId)
-                ->where('direction', 'debit')
+                ->whereIn('direction', ['debit', 'DEBIT'])
                 ->exists();
             if ($exists) {
                 return;
@@ -59,7 +59,7 @@ class CustomerWallet
             'booking_id' => $bookingId,
             'owner_user_id' => $userId,
             'account' => 'CUSTOMER',
-            'direction' => 'debit',
+            'direction' => 'DEBIT',
             'amount_paise' => $amountPaise,
             'balance_before_paise' => $before,
             'balance_after_paise' => $after,

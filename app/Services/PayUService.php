@@ -145,18 +145,40 @@ HTML;
         ];
     }
 
+    public function confirmForUser(User $actor, string $txnid): array
+    {
+        abort_unless($txnid !== '', 422, 'txnid required');
+        $intent = DB::table('payment_intents')->where('txnid', $txnid)->where('user_id', $actor->id)->first();
+        abort_unless($intent, 404, 'Unknown payment');
+        if (($intent->status ?? '') === 'captured') {
+            return $this->presentResult($intent, already: true);
+        }
+        $this->creditWallet((int) $intent->user_id, (int) $intent->amount_paise, $txnid);
+        DB::table('payment_intents')->where('id', $intent->id)->update($this->filter('payment_intents', [
+            'status' => 'captured',
+            'gateway_status' => 'success',
+            'updated_at' => now(),
+        ]));
+        $intent = DB::table('payment_intents')->where('id', $intent->id)->first();
+
+        return $this->presentResult($intent, already: false);
+    }
+
     public function handleWebhook(Request $request): array
     {
         $data = $request->all();
         $txnid = (string) ($data['txnid'] ?? $data['txnId'] ?? '');
         $status = strtolower((string) ($data['status'] ?? ''));
         abort_unless($txnid !== '', 422, 'txnid required');
+        $intent = DB::table('payment_intents')->where('txnid', $txnid)->first();
+        abort_unless($intent, 404, 'Unknown txnid');
+        if (($intent->status ?? '') === 'captured') {
+            return ['ok' => true, 'status' => 'captured', 'txnid' => $txnid];
+        }
         if (! $this->verifyResponse($data)) {
             Log::warning('payu.hash_mismatch', ['txnid' => $txnid]);
             abort(422, 'Invalid PayU hash');
         }
-        $intent = DB::table('payment_intents')->where('txnid', $txnid)->first();
-        abort_unless($intent, 404, 'Unknown txnid');
         if (in_array($status, ['success', 'captured'], true)) {
             $this->creditWallet((int) $intent->user_id, (int) $intent->amount_paise, $txnid);
             DB::table('payment_intents')->where('id', $intent->id)->update($this->filter('payment_intents', [
@@ -176,8 +198,31 @@ HTML;
         return ['ok' => true, 'status' => $status ?: 'failed', 'txnid' => $txnid];
     }
 
+    /**
+     * @return array<string, mixed>
+     */
+    private function presentResult(object $intent, bool $already): array
+    {
+        $wallets = app(WalletAccountService::class);
+        $role = (string) (User::query()->where('id', $intent->user_id)->value('role') ?: 'CUSTOMER');
+        $ownerType = in_array($role, ['DRIVER', 'CUSTOMER'], true) ? $role : 'CUSTOMER';
+        $wallet = $wallets->ensureWallet((int) $intent->user_id, $ownerType);
+
+        return [
+            'ok' => true,
+            'status' => 'captured',
+            'txnid' => $intent->txnid,
+            'alreadyCaptured' => $already,
+            'amountPaise' => (int) $intent->amount_paise,
+            'amountRupees' => ((int) $intent->amount_paise) / 100,
+            'wallet' => $wallets->snapshot($wallet, $ownerType),
+        ];
+    }
+
     private function creditWallet(int $userId, int $paise, string $txnid): void
     {
+        $wallets = app(WalletAccountService::class);
+        $wallets->ensureSchema();
         if (! Schema::hasTable('wallets')) {
             return;
         }
@@ -185,46 +230,37 @@ HTML;
         if (! in_array($ownerType, ['DRIVER', 'CUSTOMER'], true)) {
             $ownerType = 'CUSTOMER';
         }
-        $walletQuery = DB::table('wallets')->where('owner_user_id', $userId);
-        if (Schema::hasColumn('wallets', 'owner_type')) {
-            $walletQuery->where('owner_type', $ownerType);
-        }
-        $wallet = $walletQuery->orderBy('id')->first();
-        if (! $wallet) {
-            $id = DB::table('wallets')->insertGetId($this->filter('wallets', [
-                'owner_user_id' => $userId,
-                'owner_type' => $ownerType,
-                'balance_paise' => 0,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]));
-            $wallet = DB::table('wallets')->where('id', $id)->first();
-        }
-        if (Schema::hasTable('wallet_ledger') && Schema::hasColumn('wallet_ledger', 'note')) {
-            $exists = DB::table('wallet_ledger')->where('wallet_id', $wallet->id)->where('note', 'payu:'.$txnid)->exists();
-            if ($exists) {
+        DB::transaction(function () use ($userId, $paise, $txnid, $ownerType, $wallets) {
+            $wallet = $wallets->ensureWallet($userId, $ownerType);
+            if (! $wallet) {
                 return;
             }
-        }
-        $before = (int) $wallet->balance_paise;
-        $after = $before + $paise;
-        DB::table('wallets')->where('id', $wallet->id)->update(['balance_paise' => $after, 'updated_at' => now()]);
-        if (Schema::hasTable('wallet_ledger')) {
-            DB::table('wallet_ledger')->insert($this->filter('wallet_ledger', [
-                'public_ref' => 'WU'.strtoupper(Str::random(10)),
-                'wallet_id' => $wallet->id,
-                'owner_user_id' => $userId,
-                'account' => $ownerType,
-                'direction' => 'credit',
-                'amount_paise' => $paise,
-                'balance_before_paise' => $before,
-                'balance_after_paise' => $after,
-                'kind' => 'topup',
-                'status' => 'posted',
-                'note' => 'payu:'.$txnid,
-                'created_at' => now(),
-            ]));
-        }
+            if (Schema::hasTable('wallet_ledger') && Schema::hasColumn('wallet_ledger', 'note')) {
+                $exists = DB::table('wallet_ledger')->where('wallet_id', $wallet->id)->where('note', 'payu:'.$txnid)->exists();
+                if ($exists) {
+                    return;
+                }
+            }
+            $before = (int) $wallet->balance_paise;
+            $after = $before + $paise;
+            if (Schema::hasTable('wallet_ledger')) {
+                DB::table('wallet_ledger')->insert($this->filter('wallet_ledger', [
+                    'public_ref' => 'WU'.strtoupper(Str::random(10)),
+                    'wallet_id' => $wallet->id,
+                    'owner_user_id' => $userId,
+                    'account' => $ownerType,
+                    'direction' => 'CREDIT',
+                    'amount_paise' => $paise,
+                    'balance_before_paise' => $before,
+                    'balance_after_paise' => $after,
+                    'kind' => 'topup',
+                    'status' => 'posted',
+                    'note' => 'payu:'.$txnid,
+                    'created_at' => now(),
+                ]));
+            }
+            DB::table('wallets')->where('id', $wallet->id)->update(['balance_paise' => $after, 'updated_at' => now()]);
+        });
         try {
             app(FcmPushService::class)->notifyUsers(
                 [$userId],

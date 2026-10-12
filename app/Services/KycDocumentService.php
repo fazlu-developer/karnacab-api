@@ -35,23 +35,28 @@ class KycDocumentService
             })->all();
         }
 
-        $families = [
-            ['key' => 'BIKE', 'label' => 'Bike', 'categories' => [['key' => 'BIKE', 'label' => 'Bike']]],
-            ['key' => 'AUTO', 'label' => 'Auto', 'categories' => [
-                ['key' => 'AUTO', 'label' => 'Auto'],
-                ['key' => 'E_RICKSHAW', 'label' => 'E-Rickshaw'],
-            ]],
-            ['key' => 'CAR', 'label' => 'Car', 'categories' => [
-                ['key' => 'MINI', 'label' => 'Mini / Hatchback'],
-                ['key' => 'SEDAN', 'label' => 'Sedan'],
-                ['key' => 'SUV', 'label' => 'SUV'],
-                ['key' => 'TRAVELLER', 'label' => 'Traveller / XL'],
-            ]],
-        ];
+        $families = app(VehicleCatalogService::class)->families();
+        if ($families === []) {
+            $families = [
+                ['key' => 'BIKE', 'label' => 'Bike', 'categories' => [['key' => 'BIKE', 'label' => 'Bike']]],
+                ['key' => 'AUTO', 'label' => 'Auto', 'categories' => [
+                    ['key' => 'AUTO', 'label' => 'Auto'],
+                    ['key' => 'E_RICKSHAW', 'label' => 'E-Rickshaw'],
+                ]],
+                ['key' => 'CAR', 'label' => 'Car', 'categories' => [
+                    ['key' => 'MINI', 'label' => 'Mini / Hatchback'],
+                    ['key' => 'SEDAN', 'label' => 'Sedan'],
+                    ['key' => 'SUV', 'label' => 'SUV'],
+                    ['key' => 'TRAVELLER', 'label' => 'Traveller / XL'],
+                ]],
+            ];
+        }
 
         return [
             'states' => $states,
             'vehicleFamilies' => $families,
+            'gstPercent' => app(RideSettingsService::class)->gstPercent(),
+            'incentives' => app(TerritoryBonusService::class)->publicOffers(),
             'requiredDocs' => [
                 'AADHAAR_FRONT', 'AADHAAR_BACK', 'PAN', 'LICENSE_FRONT', 'LICENSE_BACK',
                 'RC', 'INSURANCE', 'VEHICLE_PHOTO', 'VEHICLE_DRIVER_PHOTO', 'LIVE_PHOTO',

@@ -25,6 +25,10 @@ class DriverOpsService
         $kyc = strtolower($kycStatus);
         $blocked = in_array($kyc, ['rejected', 'suspended', 'left_fleet'], true);
         $approved = in_array($kyc, ['verified', 'approved', 'active'], true);
+        if ($approved) {
+            $this->grantWelcomeBonus($driver);
+            $driver->refresh();
+        }
         $fleetUnassigned = (bool) $driver->fleet_owner_id && $driver->vehicles->isEmpty();
         $canGoOnline = $approved && ! $blocked && ! $fleetUnassigned;
         $online = (bool) $driver->online;
@@ -41,21 +45,10 @@ class DriverOpsService
             : null;
         $balance = (int) ($wallet->balance_paise ?? 0);
         $todayStart = now()->timezone('Asia/Kolkata')->startOfDay();
-        $todayRides = \App\Models\Booking::query()
-            ->where('driver_id', $driver->id)
-            ->where('status', 'COMPLETED')
-            ->where('updated_at', '>=', $todayStart)
-            ->count();
-        $todayEarnPaise = Schema::hasTable('wallet_ledger')
-            ? (int) DB::table('wallet_ledger')
-                ->where('owner_user_id', $actor->id)
-                ->where('direction', 'credit')
-                ->where('created_at', '>=', $todayStart)
-                ->sum('amount_paise')
-            : 0;
-        $todayParcels = Schema::hasTable('parcel_shipments')
-            ? DB::table('parcel_shipments')->where('driver_id', $driver->id)->where('status', 'delivered')->where('updated_at', '>=', $todayStart)->count()
-            : 0;
+        $todayStats = $this->periodEarnings((int) $driver->id, (int) $actor->id, $todayStart, now());
+        $todayRides = (int) $todayStats['rides'];
+        $todayEarnPaise = (int) $todayStats['netPaise'];
+        $todayParcels = (int) $todayStats['parcels'];
         $pending = 0;
         $offerIds = [];
         if ($canReceive) {
@@ -141,24 +134,17 @@ class DriverOpsService
             'ratingCount' => (int) $rating['count'],
             'vehicles' => $driver->vehicles,
             'documents' => $documents,
-            'today' => [
-                'earningsPaise' => $todayEarnPaise,
-                'earningsRupees' => $todayEarnPaise / 100,
-                'trips' => $todayRides + $todayParcels,
-                'rides' => $todayRides,
-                'parcels' => $todayParcels,
-            ],
+            'today' => $todayStats,
             'pendingRequests' => $pending,
             'unreadNotifications' => count(array_filter($inbox, fn ($row) => empty($row['read']))),
             'notifications' => $inbox,
-            'wallet' => [
-                'balancePaise' => $balance,
-                'balanceRupees' => $balance / 100,
-            ],
-            'welcomeBonusPending' => $this->welcomeBonusPending($driver),
-            'welcomeBonusRupees' => ((int) ($driver->welcome_bonus_paise ?? 0)) > 0
-                ? (int) round(((int) $driver->welcome_bonus_paise) / 100)
-                : app(RideSettingsService::class)->driverWelcomeBonusRupees(),
+            'wallet' => array_merge(
+                app(WalletAccountService::class)->snapshot($wallet, 'DRIVER'),
+                ['balancePaise' => $balance, 'balanceRupees' => $balance / 100],
+            ),
+            ...$this->welcomeBonusPayload($driver),
+            'gstPercent' => app(RideSettingsService::class)->gstPercent(),
+            'fleetOwnerCommissionPercent' => app(RideSettingsService::class)->fleetOwnerCommissionPercent(),
             'incentives' => app(IncentiveService::class)->driverProgramCards($actor),
             'documentAlerts' => collect($documents)->filter(fn ($doc) => in_array($doc['status'], ['expired', 'rejected'], true) || ($doc['expiresAt'] && $doc['expiresAt'] <= now()->toDateString()))->values()->all(),
             'vehicle' => $vehicle ? [
@@ -207,7 +193,7 @@ class DriverOpsService
 
                         return true;
                     })
-                    ->map(fn ($row) => array_merge(app(AppSurfaceService::class)->presentParcel($row), [
+                    ->map(fn ($row) => array_merge(app(AppSurfaceService::class)->presentParcel($row, $actor), [
                         'actions' => ['accept', 'reject'],
                     ]))
                     ->values()
@@ -247,6 +233,7 @@ class DriverOpsService
                 'category' => $row->category,
                 'quotePaise' => (int) $row->quote_paise,
                 'quoteRupees' => ((int) $row->quote_paise) / 100,
+                'earningRupees' => ((int) ($row->driver_earning_paise ?? max(0, (int) ($row->final_fare_paise ?? $row->quote_paise) - (int) ($row->commission_paise ?? 0)))) / 100,
                 'scheduledAt' => optional($row->scheduled_at)?->toIso8601String(),
                 'updatedAt' => optional($row->updated_at)?->toIso8601String(),
                 'customerRating' => $stars !== null ? round((float) $stars, 1) : null,
@@ -264,6 +251,7 @@ class DriverOpsService
                 'category' => $row->category,
                 'quotePaise' => (int) ($row->quote_paise ?? 0),
                 'quoteRupees' => ((int) ($row->quote_paise ?? 0)) / 100,
+                'earningRupees' => ((int) ($row->driver_earning_paise ?? (int) round(((int) ($row->quote_paise ?? 0)) * 0.9))) / 100,
                 'updatedAt' => $row->updated_at,
             ])->all();
         }
@@ -281,11 +269,118 @@ class DriverOpsService
     public function earnings(User $actor): array
     {
         $dash = $this->dashboard($actor);
+        $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
+        $wallets = app(WalletAccountService::class);
+        $items = $wallets->withdrawalsFor((int) $actor->id);
+        $ist = now()->timezone('Asia/Kolkata');
+        $week = $this->periodEarnings((int) $driver->id, (int) $actor->id, $ist->copy()->startOfWeek(), now());
+        $month = $this->periodEarnings((int) $driver->id, (int) $actor->id, $ist->copy()->startOfMonth(), now());
+        $cash = [];
+        if (Schema::hasTable('wallet_ledger')) {
+            $cash = DB::table('wallet_ledger')
+                ->where('owner_user_id', $actor->id)
+                ->whereIn('kind', ['cash_trip', 'cash'])
+                ->orderByDesc('id')
+                ->limit(40)
+                ->get()
+                ->map(fn ($row) => [
+                    'id' => (string) $row->id,
+                    'bookingId' => $row->booking_id ? (string) $row->booking_id : null,
+                    'kind' => $row->kind,
+                    'note' => $row->note,
+                    'grossRupees' => ((int) $row->amount_paise) / 100,
+                    'earningRupees' => ((int) $row->amount_paise) / 100,
+                    'createdAt' => $row->created_at,
+                ])->all();
+        }
 
         return [
             'today' => $dash['today'],
+            'week' => $week,
+            'month' => $month,
+            'cashTransactions' => $cash,
             'wallet' => $dash['wallet'],
-            'withdrawalsEnabled' => false,
+            'withdrawalsEnabled' => true,
+            'gstPercent' => app(RideSettingsService::class)->gstPercent(),
+            'withdrawals' => [
+                'supported' => true,
+                'minRupees' => 500,
+                'items' => $items,
+            ],
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function periodEarnings(int $driverId, int $userId, $from, $to): array
+    {
+        $rides = \App\Models\Booking::query()
+            ->where('driver_id', $driverId)
+            ->where('status', 'COMPLETED')
+            ->where('updated_at', '>=', $from)
+            ->where('updated_at', '<=', $to)
+            ->get();
+        $gross = 0;
+        $earn = 0;
+        $commission = 0;
+        $cashGross = 0;
+        foreach ($rides as $row) {
+            $fare = (int) ($row->final_fare_paise ?? $row->quote_paise ?? 0);
+            $comm = (int) ($row->commission_paise ?? 0);
+            $net = (int) ($row->driver_earning_paise ?? max(0, $fare - $comm));
+            $gross += $fare;
+            $commission += $comm;
+            $earn += $net;
+            $mode = strtoupper((string) ($row->payment_mode ?? 'CASH'));
+            if (in_array($mode, ['CASH', 'COD', 'CASH_ON_DELIVERY'], true)) {
+                $cashGross += $fare;
+            }
+        }
+        $parcelCount = 0;
+        $parcelEarn = 0;
+        $parcelGross = 0;
+        if (Schema::hasTable('parcel_shipments')) {
+            $parcels = DB::table('parcel_shipments')
+                ->where('driver_id', $driverId)
+                ->whereIn('status', ['delivered', 'DELIVERED'])
+                ->where('updated_at', '>=', $from)
+                ->where('updated_at', '<=', $to)
+                ->get();
+            $parcelCount = $parcels->count();
+            foreach ($parcels as $row) {
+                $fare = (int) ($row->quote_paise ?? 0);
+                $parcelGross += $fare;
+                $parcelEarn += (int) ($row->driver_earning_paise ?? (int) round($fare * 0.9));
+            }
+        }
+        $incentives = 0;
+        if (Schema::hasTable('wallet_ledger')) {
+            $incentives = (int) DB::table('wallet_ledger')
+                ->where('owner_user_id', $userId)
+                ->whereIn('direction', ['credit', 'CREDIT'])
+                ->whereIn('kind', ['bonus', 'incentive', 'joining', 'referral'])
+                ->where('created_at', '>=', $from)
+                ->where('created_at', '<=', $to)
+                ->sum('amount_paise');
+        }
+        $net = $earn + $parcelEarn;
+
+        return [
+            'earningsPaise' => $net,
+            'earningsRupees' => $net / 100,
+            'netRupees' => $net / 100,
+            'grossPaise' => $gross + $parcelGross,
+            'grossRupees' => ($gross + $parcelGross) / 100,
+            'commissionPaise' => $commission,
+            'commissionRupees' => $commission / 100,
+            'cashCollectedPaise' => $cashGross,
+            'cashCollectedRupees' => $cashGross / 100,
+            'incentivesPaise' => $incentives,
+            'incentivesRupees' => $incentives / 100,
+            'trips' => $rides->count() + $parcelCount,
+            'rides' => $rides->count(),
+            'parcels' => $parcelCount,
         ];
     }
 
@@ -416,8 +511,14 @@ class DriverOpsService
         $email = strtolower(trim((string) ($data['email'] ?? '')));
         if ($email !== '') {
             abort_unless(filter_var($email, FILTER_VALIDATE_EMAIL), 422, 'Enter a valid email address');
-            $taken = User::query()->where('email', $email)->where('id', '!=', $actor->id)->exists();
-            abort_if($taken, 409, 'Email already registered');
+            abort_if($this->identityTaken('email', $email, $actor->id), 409, 'Email already registered');
+        }
+        $phone = preg_replace('/\D+/', '', (string) ($data['phone'] ?? $data['mobile'] ?? '')) ?? '';
+        if (strlen($phone) === 10) {
+            $phone = '91'.$phone;
+        }
+        if ($phone !== '') {
+            abort_if($this->identityTaken('phone', $phone, $actor->id), 409, 'Mobile number already registered');
         }
         $emailChanged = $email !== '' && strtolower((string) $actor->email) !== $email;
         $actor->update(array_filter([
@@ -444,9 +545,13 @@ class DriverOpsService
             if (! empty($data['districtId']) && Schema::hasTable('districts')) {
                 $city = $city ?: DB::table('districts')->where('id', $data['districtId'])->value('name');
             }
+            $license = strtoupper(trim((string) ($data['licenseNo'] ?? $data['license_no'] ?? '')));
+            if ($license !== '' && ! in_array($license, ['PENDING', 'NA'], true)) {
+                abort_if($this->identityTaken('license', $license, $actor->id), 409, 'Driving licence already registered');
+            }
             $driverUpdates = array_filter([
                 'city' => $city,
-                'license_no' => $data['licenseNo'] ?? $data['license_no'] ?? null,
+                'license_no' => $license !== '' ? $license : ($data['licenseNo'] ?? $data['license_no'] ?? null),
                 'license_expires_at' => $data['licenseExpiresAt'] ?? $data['license_expires_at'] ?? null,
                 'vehicle_family' => isset($data['vehicleFamily']) ? strtoupper((string) $data['vehicleFamily']) : ($data['vehicle_family'] ?? null),
                 'bank_account_holder' => $data['accountHolder'] ?? $data['bank_account_holder'] ?? null,
@@ -456,6 +561,7 @@ class DriverOpsService
             if (! empty($data['aadhaar']) || ! empty($data['aadhaarNumber'])) {
                 $aadhaar = preg_replace('/\D+/', '', (string) ($data['aadhaar'] ?? $data['aadhaarNumber'])) ?? '';
                 abort_unless(preg_match('/^\d{12}$/', $aadhaar), 422, 'Enter a valid 12-digit Aadhaar number');
+                abort_if($this->identityTaken('aadhaar', hash('sha256', $aadhaar), $actor->id), 409, 'Aadhaar number already registered');
                 $driverUpdates['aadhaar_last4'] = substr($aadhaar, -4);
                 $driverUpdates['aadhaar_hash'] = hash('sha256', $aadhaar);
                 $driverUpdates['id_type'] = 'AADHAAR';
@@ -464,6 +570,7 @@ class DriverOpsService
             if (! empty($data['pan']) || ! empty($data['panNumber'])) {
                 $pan = strtoupper(preg_replace('/\s+/', '', (string) ($data['pan'] ?? $data['panNumber'])) ?? '');
                 abort_unless(preg_match('/^[A-Z]{5}[0-9]{4}[A-Z]$/', $pan), 422, 'Enter a valid PAN');
+                abort_if($this->identityTaken('pan', hash('sha256', $pan), $actor->id), 409, 'PAN already registered');
                 $driverUpdates['pan_last4'] = substr($pan, -4);
                 $driverUpdates['pan_hash'] = hash('sha256', $pan);
             }
@@ -574,14 +681,39 @@ class DriverOpsService
         ]);
         if (in_array($normalized, ['approved', 'verified', 'active'], true)) {
             User::query()->where('id', $driver->user_id)->update(['status' => 'ACTIVE']);
+            $this->grantWelcomeBonus($driver->fresh() ?? $driver);
         }
 
         return ['id' => (string) $driver->id, 'kycStatus' => $driver->kyc_status];
     }
 
+    public function welcomeBonusPayload(?Driver $driver): array
+    {
+        $user = $driver?->user;
+        $offer = $user
+            ? app(TerritoryBonusService::class)->forUser($user, 'joining')
+            : app(TerritoryBonusService::class)->resolve('DRIVER', 'joining', null, null);
+        $rupees = $driver && ((int) ($driver->welcome_bonus_paise ?? 0)) > 0
+            ? (int) round(((int) $driver->welcome_bonus_paise) / 100)
+            : (int) $offer['amountRupees'];
+
+        return [
+            'welcomeBonusPending' => $driver ? $this->welcomeBonusPending($driver) : false,
+            'welcomeBonusRupees' => $rupees,
+            'welcomeBonusEnabled' => ! empty($offer['enabled']) && $rupees > 0,
+            'referralBonusRupees' => $user
+                ? (int) app(TerritoryBonusService::class)->forUser($user, 'referral')['amountRupees']
+                : 0,
+        ];
+    }
+
     private function welcomeBonusPending(Driver $driver): bool
     {
-        if (! app(RideSettingsService::class)->driverWelcomeBonusEnabled()) {
+        $user = $driver->user;
+        $offer = $user
+            ? app(TerritoryBonusService::class)->forUser($user, 'joining')
+            : ['enabled' => app(RideSettingsService::class)->driverWelcomeBonusEnabled()];
+        if (empty($offer['enabled'])) {
             return false;
         }
         if (! Schema::hasColumn('drivers', 'welcome_bonus_at') || empty($driver->welcome_bonus_at)) {
@@ -594,13 +726,20 @@ class DriverOpsService
         return true;
     }
 
-    private function grantWelcomeBonus(Driver $driver): void
+    public function grantWelcomeBonus(Driver $driver): void
     {
-        $settings = app(RideSettingsService::class);
-        if (! $settings->driverWelcomeBonusEnabled()) {
+        $kyc = strtolower((string) ($driver->kyc_status ?? ''));
+        if (! in_array($kyc, ['approved', 'verified', 'active'], true)) {
             return;
         }
-        $rupees = $settings->driverWelcomeBonusRupees();
+        $user = User::query()->find((int) $driver->user_id);
+        $offer = $user
+            ? app(TerritoryBonusService::class)->forUser($user, 'joining')
+            : app(TerritoryBonusService::class)->resolve('DRIVER', 'joining', null, null);
+        if (empty($offer['enabled'])) {
+            return;
+        }
+        $rupees = (int) $offer['amountRupees'];
         if ($rupees < 1) {
             return;
         }
@@ -609,47 +748,34 @@ class DriverOpsService
             return;
         }
         $userId = (int) $driver->user_id;
-        $wallet = Schema::hasTable('wallets')
-            ? DB::table('wallets')->where('owner_user_id', $userId)->where('owner_type', 'DRIVER')->first()
-            : null;
-        if (! $wallet && Schema::hasTable('wallets')) {
-            $id = DB::table('wallets')->insertGetId(array_filter([
-                'owner_user_id' => $userId,
-                'owner_type' => 'DRIVER',
-                'balance_paise' => 0,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ], fn ($key) => Schema::hasColumn('wallets', $key), ARRAY_FILTER_USE_KEY));
-            $wallet = DB::table('wallets')->where('id', $id)->first();
-        }
-        if (! $wallet) {
+        if (Schema::hasTable('incentives') && DB::table('incentives')->where('user_id', $userId)->where('kind', 'driver_joining')->where('status', 'paid')->exists()) {
+            if (Schema::hasColumn('drivers', 'welcome_bonus_at')) {
+                $driver->update(array_filter([
+                    'welcome_bonus_paise' => Schema::hasColumn('drivers', 'welcome_bonus_paise') ? $paise : null,
+                    'welcome_bonus_at' => now(),
+                ]));
+            }
+
             return;
         }
-        $before = (int) $wallet->balance_paise;
-        $after = $before + $paise;
-        DB::table('wallets')->where('id', $wallet->id)->update(['balance_paise' => $after, 'updated_at' => now()]);
-        if (Schema::hasTable('wallet_ledger')) {
-            DB::table('wallet_ledger')->insert(array_filter([
-                'public_ref' => 'WB'.strtoupper(\Illuminate\Support\Str::random(8)),
-                'wallet_id' => $wallet->id,
-                'owner_user_id' => $userId,
-                'account' => 'DRIVER',
-                'direction' => 'credit',
-                'amount_paise' => $paise,
-                'balance_before_paise' => $before,
-                'balance_after_paise' => $after,
-                'kind' => 'welcome_bonus',
-                'status' => 'posted',
-                'note' => 'KarnaRide joining gift',
-                'created_at' => now(),
-            ], fn ($key) => Schema::hasColumn('wallet_ledger', $key), ARRAY_FILTER_USE_KEY));
-        }
+        app(WalletAccountService::class)->creditBonus($userId, 'DRIVER', $paise, 'joining_bonus', 'Joining bonus ₹'.$rupees.' credited to wallet');
         $patch = [];
         if (Schema::hasColumn('drivers', 'welcome_bonus_paise')) {
             $patch['welcome_bonus_paise'] = $paise;
         }
         if (Schema::hasColumn('drivers', 'welcome_bonus_at')) {
             $patch['welcome_bonus_at'] = now();
+        }
+        if (Schema::hasTable('incentives')) {
+            DB::table('incentives')->insert(array_filter([
+                'user_id' => $userId,
+                'kind' => 'driver_joining',
+                'amount_paise' => $paise,
+                'status' => 'paid',
+                'note' => 'Driver joining bonus credited to wallet',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ], fn ($key) => Schema::hasColumn('incentives', $key), ARRAY_FILTER_USE_KEY));
         }
         if ($patch !== []) {
             $driver->update($patch);
@@ -786,5 +912,38 @@ class DriverOpsService
             $payload['created_at'] = now();
             Vehicle::query()->create($payload);
         }
+    }
+
+    private function identityTaken(string $kind, string $value, int $ignoreUserId): bool
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return false;
+        }
+        if ($kind === 'email') {
+            return User::query()->whereRaw('LOWER(email) = ?', [strtolower($value)])->where('id', '!=', $ignoreUserId)->exists();
+        }
+        if ($kind === 'phone') {
+            $digits = preg_replace('/\D+/', '', $value) ?? '';
+            if (strlen($digits) === 10) {
+                $digits = '91'.$digits;
+            }
+
+            return User::query()->where('phone', $digits)->where('id', '!=', $ignoreUserId)->exists();
+        }
+        $q = Driver::query()->where('user_id', '!=', $ignoreUserId);
+        if ($kind === 'aadhaar') {
+            return $q->where('aadhaar_hash', $value)->exists();
+        }
+        if ($kind === 'pan') {
+            return $q->where('pan_hash', $value)->exists();
+        }
+        if ($kind === 'license') {
+            return $q->whereRaw('UPPER(license_no) = ?', [strtoupper($value)])
+                ->whereNotIn('license_no', ['PENDING', 'NA', ''])
+                ->exists();
+        }
+
+        return false;
     }
 }

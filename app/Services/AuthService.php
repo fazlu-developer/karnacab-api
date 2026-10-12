@@ -468,6 +468,7 @@ class AuthService
                         ? 'Please contact admin to assign a vehicle before you can go online.'
                         : $area['message'])),
             'needVehicle' => $next === 'NEED_VEHICLE',
+            ...($user->role === 'DRIVER' ? app(DriverOpsService::class)->welcomeBonusPayload($user->driver) : []),
         ];
     }
 

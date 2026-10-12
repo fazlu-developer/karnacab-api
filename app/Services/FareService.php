@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\Geo;
 use App\Support\ServiceArea;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -70,7 +71,8 @@ class FareService
         $toll = $rule->apply_toll ? (int) ($input['tollPaise'] ?? 0) : 0;
         $parking = $rule->apply_parking ? (int) ($input['parkingPaise'] ?? 0) : 0;
         $gstBase = $rule->apply_gst_to_base ? $taxable : 0;
-        $gstPaise = (int) round(($gstBase * $rule->gst_percent) / 100);
+        $gstPct = (float) ($rule->gst_percent ?? app(RideSettingsService::class)->gstPercent());
+        $gstPaise = (int) round(($gstBase * $gstPct) / 100);
         $beforeDiscount = $taxable + $toll + $parking + $gstPaise;
         $discountPaise = min($beforeDiscount, (int) $rule->discount_paise + (int) round(($beforeDiscount * $rule->discount_percent) / 100));
         $totalPaise = max(0, $beforeDiscount - $discountPaise);
@@ -185,34 +187,148 @@ class FareService
         return round(((float) $meters) / 1000, 2);
     }
 
+    /**
+     * @param  list<array{lat: float, lng: float}>|mixed  $raw
+     * @return list<array{lat: float, lng: float}>
+     */
+    public function parseWaypoints(mixed $raw): array
+    {
+        $points = [];
+        if (is_string($raw) && trim($raw) !== '') {
+            foreach (preg_split('/\|/', $raw) ?: [] as $pair) {
+                $pair = trim(str_ireplace('via:', '', $pair));
+                $parts = preg_split('/\s*,\s*/', $pair) ?: [];
+                if (count($parts) >= 2 && is_numeric($parts[0]) && is_numeric($parts[1])) {
+                    $points[] = ['lat' => (float) $parts[0], 'lng' => (float) $parts[1]];
+                }
+            }
+
+            return $points;
+        }
+        if (! is_array($raw)) {
+            return [];
+        }
+        foreach ($raw as $item) {
+            if (is_string($item)) {
+                $points = array_merge($points, $this->parseWaypoints($item));
+                continue;
+            }
+            if (! is_array($item)) {
+                continue;
+            }
+            $lat = $item['lat'] ?? $item['latitude'] ?? null;
+            $lng = $item['lng'] ?? $item['longitude'] ?? null;
+            if (is_numeric($lat) && is_numeric($lng)) {
+                $points[] = ['lat' => (float) $lat, 'lng' => (float) $lng];
+            }
+        }
+
+        return $points;
+    }
+
+    /**
+     * Driving km from first stop through every waypoint to the last stop.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array<string, mixed>
+     */
+    public function withResolvedTripDistance(array $input): array
+    {
+        $product = strtoupper((string) ($input['product'] ?? ''));
+        $stops = $this->parseWaypoints($input['waypoints'] ?? $input['stops'] ?? []);
+        $needsPath = $stops !== [] || in_array($product, ['MULTI_STOP', 'RENTAL'], true);
+        $oLat = isset($input['pickupLat']) ? (float) $input['pickupLat'] : null;
+        $oLng = isset($input['pickupLng']) ? (float) $input['pickupLng'] : null;
+        $dLat = isset($input['dropLat']) ? (float) $input['dropLat'] : null;
+        $dLng = isset($input['dropLng']) ? (float) $input['dropLng'] : null;
+        if (! $needsPath || $oLat === null || $oLng === null || $dLat === null || $dLng === null) {
+            return $input;
+        }
+        $route = $this->directions($oLat, $oLng, $dLat, $dLng, $stops);
+        $input['distanceKm'] = (float) ($route['distanceKm'] ?? $input['distanceKm'] ?? 1);
+        if (! empty($route['durationMinutes'])) {
+            $input['durationMinutes'] = $route['durationMinutes'];
+        }
+        if (! empty($route['polyline']) && empty($input['polyline'])) {
+            $input['polyline'] = $route['polyline'];
+        }
+        $input['stopCount'] = max((int) ($input['stopCount'] ?? 0), count($stops));
+
+        return $input;
+    }
+
     public function directions(float $oLat, float $oLng, float $dLat, float $dLng, array $waypoints = []): array
     {
+        $points = $this->parseWaypoints($waypoints);
+        $fallback = $this->pathEstimate($oLat, $oLng, $dLat, $dLng, $points);
         $key = (string) env('GOOGLE_MAPS_API', '');
         if ($key === '') {
-            return ['distanceKm' => 1, 'durationSeconds' => 180, 'polyline' => null];
+            return $fallback;
         }
-        $wp = collect($waypoints)->map(fn ($p) => $p['lat'].','.$p['lng'])->implode('|');
-        $response = Http::timeout(8)->get('https://maps.googleapis.com/maps/api/directions/json', array_filter([
-            'origin' => $oLat.','.$oLng,
-            'destination' => $dLat.','.$dLng,
-            'waypoints' => $wp ?: null,
-            'key' => $key,
-            'mode' => 'driving',
-        ]));
-        $legKm = 0;
+        $wp = collect($points)->map(fn ($p) => 'via:'.$p['lat'].','.$p['lng'])->implode('|');
+        try {
+            $response = Http::timeout(8)->get('https://maps.googleapis.com/maps/api/directions/json', array_filter([
+                'origin' => $oLat.','.$oLng,
+                'destination' => $dLat.','.$dLng,
+                'waypoints' => $wp ?: null,
+                'key' => $key,
+                'mode' => 'driving',
+            ], fn ($value) => $value !== null && $value !== ''));
+        } catch (\Throwable) {
+            return $fallback;
+        }
+        $legs = $response->json('routes.0.legs') ?? [];
+        if ($points !== [] && count($legs) < 2) {
+            return $fallback;
+        }
+        $legKm = 0.0;
         $seconds = 0;
-        $poly = null;
-        foreach ($response->json('routes.0.legs') ?? [] as $leg) {
-            $legKm += ($leg['distance']['value'] ?? 0) / 1000;
-            $seconds += $leg['duration']['value'] ?? 0;
+        foreach ($legs as $leg) {
+            $legKm += ((float) ($leg['distance']['value'] ?? 0)) / 1000;
+            $seconds += (int) ($leg['duration']['value'] ?? 0);
+        }
+        if ($legKm <= 0) {
+            return $fallback;
         }
         $poly = $response->json('routes.0.overview_polyline.points');
 
         return [
             'distanceKm' => max(1, round($legKm, 2)),
             'durationSeconds' => $seconds,
-            'durationMinutes' => max(1, (int) round($seconds / 60) ?: (int) max(1, round($legKm * 2))),
+            'durationMinutes' => max(1, $seconds > 0 ? (int) round($seconds / 60) : (int) max(1, round($legKm * 2))),
             'polyline' => $poly,
+            'legCount' => count($legs),
+        ];
+    }
+
+    /**
+     * @param  list<array{lat: float, lng: float}>  $waypoints
+     * @return array<string, mixed>
+     */
+    private function pathEstimate(float $oLat, float $oLng, float $dLat, float $dLng, array $waypoints): array
+    {
+        $chain = array_merge(
+            [['lat' => $oLat, 'lng' => $oLng]],
+            $waypoints,
+            [['lat' => $dLat, 'lng' => $dLng]],
+        );
+        $km = 0.0;
+        for ($i = 1; $i < count($chain); $i++) {
+            $km += Geo::haversineKm(
+                (float) $chain[$i - 1]['lat'],
+                (float) $chain[$i - 1]['lng'],
+                (float) $chain[$i]['lat'],
+                (float) $chain[$i]['lng'],
+            );
+        }
+        $road = max(1, round($km * 1.25, 2));
+
+        return [
+            'distanceKm' => $road,
+            'durationSeconds' => (int) max(180, round($road * 120)),
+            'durationMinutes' => max(1, (int) round($road * 2)),
+            'polyline' => null,
+            'legCount' => max(1, count($chain) - 1),
         ];
     }
 

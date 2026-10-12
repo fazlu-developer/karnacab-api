@@ -13,7 +13,10 @@ class CmsCatalogService
     {
         $this->ensureAppPages();
         $pages = CmsPage::query()->where('published', 1)->orderBy('sort_order')->get();
-        $presented = $pages->map(fn ($row) => $this->presentPage($row))->all();
+        $presented = collect($pages->map(fn ($row) => $this->presentPage($row))->all())
+            ->reject(fn ($page) => ($page['navGroup'] ?? '') === 'app' || ($page['template'] ?? '') === 'app_legal' || in_array($page['slug'] ?? '', array_column(self::appPageCatalog(), 'slug'), true))
+            ->values()
+            ->all();
         $settings = DB::table('system_settings')->whereIn('key', ['cms_site', 'cms_home_promo'])->pluck('value', 'key');
 
         return [
@@ -39,6 +42,13 @@ class CmsCatalogService
     public function page(string $slug): array
     {
         $this->ensureAppPages();
+        $appSlugs = array_column(self::appPageCatalog(), 'slug');
+        if (in_array($slug, $appSlugs, true) && Schema::hasTable('cms_app_pages')) {
+            $row = DB::table('cms_app_pages')->where('slug', $slug)->where('published', 1)->first();
+            abort_unless($row, 404);
+
+            return $this->presentAppRow($row);
+        }
         $row = CmsPage::query()->where('slug', $slug)->where('published', 1)->firstOrFail();
 
         return $this->presentPage($row);
@@ -47,12 +57,14 @@ class CmsCatalogService
     public function appPages(): array
     {
         $this->ensureAppPages();
-        $slugs = array_column(self::appPageCatalog(), 'slug');
-        $pages = CmsPage::query()->whereIn('slug', $slugs)->where('published', 1)->orderBy('sort_order')->get()
-            ->map(fn ($row) => $this->presentPage($row))
-            ->all();
+        $pages = [];
+        if (Schema::hasTable('cms_app_pages')) {
+            $pages = DB::table('cms_app_pages')->where('published', 1)->orderBy('sort_order')->get()
+                ->map(fn ($row) => $this->presentAppRow($row))
+                ->all();
+        }
 
-        return ['pages' => $pages];
+        return ['pages' => $pages, 'source' => 'cms_app_pages'];
     }
 
     /**
@@ -199,21 +211,15 @@ class CmsCatalogService
 
     public function ensureAppPages(): void
     {
-        if (! Schema::hasTable('cms_pages')) {
-            Schema::create('cms_pages', function ($table) {
+        if (! Schema::hasTable('cms_app_pages')) {
+            Schema::create('cms_app_pages', function ($table) {
                 $table->id();
                 $table->string('slug')->unique();
                 $table->string('title');
-                $table->string('eyebrow')->nullable();
-                $table->string('seo_title')->nullable();
-                $table->string('seo_description', 500)->nullable();
                 $table->text('lede')->nullable();
                 $table->json('body')->nullable();
                 $table->string('image_url', 500)->nullable();
                 $table->string('template')->nullable();
-                $table->string('lead_type')->nullable();
-                $table->string('register_kind')->nullable();
-                $table->string('product_key')->nullable();
                 $table->string('nav_group')->nullable();
                 $table->string('nav_label')->nullable();
                 $table->unsignedInteger('sort_order')->default(0);
@@ -221,36 +227,57 @@ class CmsCatalogService
                 $table->timestamps();
             });
         }
-        if (! Schema::hasColumn('cms_pages', 'image_url')) {
-            Schema::table('cms_pages', function ($table) {
-                $table->string('image_url', 500)->nullable();
-            });
-        }
         $sort = 80;
         foreach (self::appPageCatalog() as $item) {
-            $row = CmsPage::query()->where('slug', $item['slug'])->first();
-            if ($row) {
-                $row->update([
-                    'title' => $item['title'],
-                    'lede' => $item['lede'],
-                    'body' => ['html' => $item['body']],
-                    'published' => true,
-                    'nav_label' => $item['title'],
-                ]);
+            $exists = DB::table('cms_app_pages')->where('slug', $item['slug'])->first();
+            if ($exists) {
+                $html = $this->bodyHtml(is_string($exists->body) ? json_decode($exists->body, true) : $exists->body);
+                if (trim($html) === '' && $item['body'] !== '') {
+                    DB::table('cms_app_pages')->where('slug', $item['slug'])->update([
+                        'body' => json_encode(['html' => $item['body']], JSON_UNESCAPED_UNICODE),
+                        'updated_at' => now(),
+                    ]);
+                }
+                $sort++;
                 continue;
             }
-            CmsPage::query()->create([
+            DB::table('cms_app_pages')->insert([
                 'slug' => $item['slug'],
                 'title' => $item['title'],
                 'lede' => $item['lede'],
-                'body' => ['html' => $item['body']],
-                'nav_group' => 'legal',
+                'body' => json_encode(['html' => $item['body']], JSON_UNESCAPED_UNICODE),
+                'nav_group' => 'app',
                 'nav_label' => $item['title'],
-                'sort_order' => $sort++,
-                'published' => true,
                 'template' => 'app_legal',
+                'sort_order' => $sort++,
+                'published' => 1,
+                'created_at' => now(),
+                'updated_at' => now(),
             ]);
         }
+    }
+
+    private function presentAppRow(object $row): array
+    {
+        $body = is_string($row->body ?? null) ? json_decode($row->body, true) : ($row->body ?? []);
+
+        return [
+            'id' => (string) $row->id,
+            'slug' => $row->slug,
+            'path' => '/'.$row->slug,
+            'title' => $row->title,
+            'lede' => $row->lede,
+            'description' => $row->lede,
+            'body' => $body,
+            'bodyHtml' => $this->bodyHtml($body),
+            'imageUrl' => $this->publicUpload($row->image_url ?? null),
+            'template' => $row->template ?? 'app_legal',
+            'navGroup' => $row->nav_group ?? 'app',
+            'navLabel' => $row->nav_label ?: $row->title,
+            'sortOrder' => (int) ($row->sort_order ?? 0),
+            'published' => (bool) ($row->published ?? true),
+            'source' => 'cms_app_pages',
+        ];
     }
 
     private function nav(array $pages): array

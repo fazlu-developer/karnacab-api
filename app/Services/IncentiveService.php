@@ -93,14 +93,18 @@ class IncentiveService
             : [];
         $joiningPaid = collect($mine)->contains(fn ($row) => str_contains((string) $row['kind'], 'joining') && $row['status'] === 'paid');
         $wallet = $this->walletRow((int) $actor->id, $actor->role === 'DRIVER' ? 'DRIVER' : 'CUSTOMER');
+        $joining = app(TerritoryBonusService::class)->forUser($actor, 'joining');
+        $referral = app(TerritoryBonusService::class)->forUser($actor, 'referral');
 
         return [
             'referralCode' => $code,
             'shareLink' => $link,
             'role' => $actor->role,
-            'joiningBonusRupees' => $actor->role === 'DRIVER' ? $this->settings->driverWelcomeBonusRupees() : $this->settings->customerJoiningCreditRupees(),
-            'referralBonusRupees' => $actor->role === 'DRIVER' ? $this->settings->driverReferralBonusRupees() : $this->settings->customerReferralCreditRupees(),
-            'driverReferralRequiredRides' => $this->settings->driverReferralRequiredRides(),
+            'joiningBonusRupees' => (int) $joining['amountRupees'],
+            'joiningBonusEnabled' => ! empty($joining['enabled']),
+            'referralBonusRupees' => (int) $referral['amountRupees'],
+            'referralBonusEnabled' => ! empty($referral['enabled']),
+            'driverReferralRequiredRides' => (int) ($referral['requiredRides'] ?: $this->settings->driverReferralRequiredRides()),
             'joiningStatus' => $joiningPaid ? 'paid' : 'pending_activity',
             'promoBalancePaise' => (int) ($wallet->promo_balance_paise ?? 0),
             'promoBalanceRupees' => ((int) ($wallet->promo_balance_paise ?? 0)) / 100,
@@ -108,10 +112,10 @@ class IncentiveService
             'referred' => $referred,
             'history' => $mine,
             'policy' => [
-                'driverJoining' => '₹'.$this->settings->driverWelcomeBonusRupees().' after KYC, vehicle verification, approval and 1 completed ride.',
-                'driverReferral' => '₹'.$this->settings->driverReferralBonusRupees().' after the referred driver completes '.$this->settings->driverReferralRequiredRides().' rides.',
-                'customerJoining' => '₹'.$this->settings->customerJoiningCreditRupees().' ride credit after the first successful paid ride. Not withdrawable.',
-                'customerReferral' => '₹'.$this->settings->customerReferralCreditRupees().' ride credit to you when a friend completes their first paid ride.',
+                'driverJoining' => '₹'.$joining['amountRupees'].' credited to your wallet when admin verifies KYC. No first-ride claim.',
+                'driverReferral' => '₹'.$referral['amountRupees'].' after the referred driver completes '.($referral['requiredRides'] ?: $this->settings->driverReferralRequiredRides()).' rides.',
+                'customerJoining' => '₹'.$joining['amountRupees'].' ride credit after the first successful paid ride. Not withdrawable.',
+                'customerReferral' => '₹'.$referral['amountRupees'].' ride credit to you when a friend completes their first paid ride.',
                 'promoCap' => 'Promotional credit is capped at ₹'.$this->settings->customerPromoMaxRupees().' or '.$this->settings->customerPromoMaxFarePercent().'% of fare per ride.',
             ],
             'kindPrefix' => $kindPrefix,
@@ -153,7 +157,7 @@ class IncentiveService
         $this->settlePromo($booking);
         $driver = $booking->driver_id ? Driver::query()->find($booking->driver_id) : null;
         if ($driver) {
-            $this->maybeGrantDriverJoining($driver, (int) $booking->id);
+            app(DriverOpsService::class)->grantWelcomeBonus($driver);
             $this->maybeGrantDriverReferral($driver, (int) $booking->id);
         }
         $customer = User::query()->find($booking->customer_id);
@@ -217,17 +221,15 @@ class IncentiveService
     public function driverProgramCards(User $actor): array
     {
         $snap = $this->snapshot($actor);
-        $driver = Driver::query()->where('user_id', $actor->id)->first();
-        $rides = $driver ? $this->completedDriverRides((int) $driver->id) : 0;
         $joinPaid = $snap['joiningStatus'] === 'paid';
 
         return [
             [
                 'title' => 'Joining bonus ₹'.$snap['joiningBonusRupees'],
-                'subtitle' => $joinPaid ? 'Credited after your first completed ride' : 'Complete KYC, vehicle verification, then 1 ride',
-                'progressTrips' => min(1, $rides),
+                'subtitle' => $joinPaid ? 'Credited to your wallet' : 'Credited to your wallet when admin verifies KYC',
+                'progressTrips' => $joinPaid ? 1 : 0,
                 'targetTrips' => 1,
-                'progress' => $joinPaid ? 1 : min(1, $rides),
+                'progress' => $joinPaid ? 1 : 0,
                 'bonusRupees' => $snap['joiningBonusRupees'],
                 'awarded' => $joinPaid,
                 'earnedRupees' => $joinPaid ? $snap['joiningBonusRupees'] : 0,
@@ -243,51 +245,6 @@ class IncentiveService
                 'earnedRupees' => collect($snap['history'])->where('kind', 'driver_referral')->sum('amountRupees'),
             ],
         ];
-    }
-
-    private function maybeGrantDriverJoining(Driver $driver, int $bookingId): void
-    {
-        if (! $this->settings->driverWelcomeBonusEnabled()) {
-            return;
-        }
-        $rupees = $this->settings->driverWelcomeBonusRupees();
-        if ($rupees < 1) {
-            return;
-        }
-        if (Schema::hasColumn('drivers', 'welcome_bonus_at') && $driver->welcome_bonus_at) {
-            return;
-        }
-        if ($this->alreadyPaid((int) $driver->user_id, 'driver_joining')) {
-            return;
-        }
-        $user = User::query()->find($driver->user_id);
-        if (! $user || strtoupper((string) $user->status) !== 'ACTIVE') {
-            return;
-        }
-        $kyc = strtolower((string) ($driver->kyc_status ?? ''));
-        if (! in_array($kyc, ['approved', 'verified', 'active'], true)) {
-            return;
-        }
-        $hasVehicle = Schema::hasTable('vehicles') && DB::table('vehicles')->where('driver_id', $driver->id)->exists();
-        if (! $hasVehicle) {
-            return;
-        }
-        if ($this->completedDriverRides((int) $driver->id) < 1) {
-            return;
-        }
-        $paise = $rupees * 100;
-        $this->creditCash((int) $driver->user_id, 'DRIVER', $paise, 'welcome_bonus', $bookingId, 'Driver joining bonus');
-        $this->recordIncentive((int) $driver->user_id, 'driver_joining', $paise, $bookingId, null, 'Driver joining bonus after first completed ride');
-        $patch = [];
-        if (Schema::hasColumn('drivers', 'welcome_bonus_paise')) {
-            $patch['welcome_bonus_paise'] = $paise;
-        }
-        if (Schema::hasColumn('drivers', 'welcome_bonus_at')) {
-            $patch['welcome_bonus_at'] = now();
-        }
-        if ($patch !== []) {
-            $driver->update($patch);
-        }
     }
 
     private function maybeGrantDriverReferral(Driver $newDriver, int $bookingId): void
@@ -416,7 +373,7 @@ class IncentiveService
         $before = (int) $wallet->balance_paise;
         $after = $before + $paise;
         DB::table('wallets')->where('id', $wallet->id)->update(['balance_paise' => $after, 'updated_at' => now()]);
-        $this->ledger((int) $wallet->id, $userId, $ownerType, 'credit', $paise, $before, $after, $kind, $bookingId, $note);
+        $this->ledger((int) $wallet->id, $userId, $ownerType, 'CREDIT', $paise, $before, $after, $kind, $bookingId, $note);
     }
 
     private function creditPromo(int $userId, int $paise, ?int $bookingId, string $note): void
@@ -432,12 +389,12 @@ class IncentiveService
         } else {
             $before = (int) $wallet->balance_paise;
             $update['balance_paise'] = $before + $paise;
-            $this->ledger((int) $wallet->id, $userId, 'CUSTOMER', 'credit', $paise, $before, $before + $paise, 'promo_credit', $bookingId, $note);
+            $this->ledger((int) $wallet->id, $userId, 'CUSTOMER', 'CREDIT', $paise, $before, $before + $paise, 'promo_credit', $bookingId, $note);
 
             return;
         }
         DB::table('wallets')->where('id', $wallet->id)->update($update);
-        $this->ledger((int) $wallet->id, $userId, 'CUSTOMER', 'credit', $paise, (int) $wallet->balance_paise, (int) $wallet->balance_paise, 'promo_credit', $bookingId, $note);
+        $this->ledger((int) $wallet->id, $userId, 'CUSTOMER', 'CREDIT', $paise, (int) $wallet->balance_paise, (int) $wallet->balance_paise, 'promo_credit', $bookingId, $note);
     }
 
     private function ledger(int $walletId, int $userId, string $account, string $direction, int $paise, int $before, int $after, string $kind, ?int $bookingId, string $note): void
@@ -451,7 +408,7 @@ class IncentiveService
             'booking_id' => $bookingId,
             'owner_user_id' => $userId,
             'account' => $account,
-            'direction' => $direction,
+            'direction' => strtoupper($direction) === 'DEBIT' ? 'DEBIT' : 'CREDIT',
             'amount_paise' => $paise,
             'balance_before_paise' => $before,
             'balance_after_paise' => $after,
