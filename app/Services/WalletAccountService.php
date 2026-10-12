@@ -91,11 +91,11 @@ class WalletAccountService
      */
     public function snapshot(?object $wallet, string $ownerType = 'CUSTOMER'): array
     {
-        $balance = (int) ($wallet->balance_paise ?? 0);
-        $joining = (int) ($wallet->joining_credit_paise ?? 0);
-        $limit = (int) ($wallet->joining_credit_limit_paise ?? 0);
-        $used = (int) ($wallet->joining_credit_used_paise ?? 0);
-        $frozen = (int) ($wallet->frozen_paise ?? 0);
+        $balance = (int) ($wallet?->balance_paise ?? 0);
+        $joining = (int) ($wallet?->joining_credit_paise ?? 0);
+        $limit = (int) ($wallet?->joining_credit_limit_paise ?? 0);
+        $used = (int) ($wallet?->joining_credit_used_paise ?? 0);
+        $frozen = (int) ($wallet?->frozen_paise ?? 0);
         $available = max(0, $balance - $frozen);
 
         return [
@@ -111,7 +111,7 @@ class WalletAccountService
             'frozenRupees' => $frozen / 100,
             'availablePaise' => $available,
             'availableRupees' => $available / 100,
-            'ownerType' => $wallet->owner_type ?? $ownerType,
+            'ownerType' => $wallet?->owner_type ?? $ownerType,
         ];
     }
 

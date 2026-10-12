@@ -43,7 +43,7 @@ class DriverOpsService
                 }),
             )->orderByDesc('id')->first()
             : null;
-        $balance = (int) ($wallet->balance_paise ?? 0);
+        $balance = (int) ($wallet?->balance_paise ?? 0);
         $todayStart = now()->timezone('Asia/Kolkata')->startOfDay();
         $todayStats = $this->periodEarnings((int) $driver->id, (int) $actor->id, $todayStart, now());
         $todayRides = (int) $todayStats['rides'];
@@ -81,6 +81,12 @@ class DriverOpsService
             : null;
         $kycDocs = app(KycDocumentService::class);
         $documents = $driver->documents->map(fn ($doc) => $kycDocs->present($doc))->all();
+        $incentives = [];
+        try {
+            $incentives = app(IncentiveService::class)->driverProgramCards($actor);
+        } catch (\Throwable) {
+            $incentives = [];
+        }
         $inbox = Schema::hasTable('user_notifications')
             ? DB::table('user_notifications')->where('user_id', $actor->id)->orderByDesc('id')->limit(30)->get()->map(fn ($row) => [
                 'id' => (string) $row->id,
@@ -103,8 +109,8 @@ class DriverOpsService
             'avatarUrl' => app(KycDocumentService::class)->previewUrl($driver->user?->avatar_path ?? null),
             'dateOfBirth' => optional($driver->user?->date_of_birth)->toDateString() ?? $driver->user?->date_of_birth,
             'city' => $driver->city,
-            'stateId' => $driver->user?->state_id,
-            'districtId' => $driver->user?->district_id,
+            'stateId' => $driver->user?->state_id ?? $driver->state_id ?? null,
+            'districtId' => $driver->user?->district_id ?? $driver->district_id ?? null,
             'driverType' => $driver->fleet_owner_id ? 'fleet_driver' : 'individual_driver',
             'fleetOwnerId' => $driver->fleet_owner_id,
             'fleet' => $driver->fleet_owner_id && Schema::hasTable('fleet_owners')
@@ -145,7 +151,7 @@ class DriverOpsService
             ...$this->welcomeBonusPayload($driver),
             'gstPercent' => app(RideSettingsService::class)->gstPercent(),
             'fleetOwnerCommissionPercent' => app(RideSettingsService::class)->fleetOwnerCommissionPercent(),
-            'incentives' => app(IncentiveService::class)->driverProgramCards($actor),
+            'incentives' => $incentives,
             'documentAlerts' => collect($documents)->filter(fn ($doc) => in_array($doc['status'], ['expired', 'rejected'], true) || ($doc['expiresAt'] && $doc['expiresAt'] <= now()->toDateString()))->values()->all(),
             'vehicle' => $vehicle ? [
                 'registrationNo' => $vehicle->registration_no,
@@ -521,29 +527,50 @@ class DriverOpsService
             abort_if($this->identityTaken('phone', $phone, $actor->id), 409, 'Mobile number already registered');
         }
         $emailChanged = $email !== '' && strtolower((string) $actor->email) !== $email;
-        $actor->update(array_filter([
+        $userPatch = array_filter([
             'name' => $data['name'] ?? ($name !== '' ? $name : null),
             'email' => $email !== '' ? $email : null,
             'emergency_name' => $data['emergencyName'] ?? null,
             'emergency_phone' => $data['emergencyPhone'] ?? null,
             'last_address' => $data['address'] ?? null,
-            'state_id' => $data['stateId'] ?? $data['state_id'] ?? null,
-            'district_id' => $data['districtId'] ?? $data['district_id'] ?? null,
             'gender' => isset($data['gender']) ? strtoupper((string) $data['gender']) : null,
             'date_of_birth' => $data['dateOfBirth'] ?? $data['date_of_birth'] ?? null,
-        ], fn ($v) => $v !== null && $v !== ''));
+        ], fn ($v) => $v !== null && $v !== '');
+        $stateId = isset($data['stateId']) || isset($data['state_id'])
+            ? (int) ($data['stateId'] ?? $data['state_id'])
+            : null;
+        $districtId = isset($data['districtId']) || isset($data['district_id'])
+            ? (int) ($data['districtId'] ?? $data['district_id'])
+            : null;
+        if ($stateId && Schema::hasColumn('users', 'state_id')) {
+            $userPatch['state_id'] = $stateId;
+        }
+        if ($districtId && Schema::hasColumn('users', 'district_id')) {
+            $userPatch['district_id'] = $districtId;
+        }
+        if ($userPatch) {
+            $actor->update($userPatch);
+        }
         if ($emailChanged) {
             app(AuthService::class)->sendWelcomeMail($actor->fresh(), 'profile-mail:'.$email);
         }
 
+        $city = $data['city'] ?? null;
         $driver = Driver::query()->where('user_id', $actor->id)->first();
+        if (! $driver) {
+            $driver = Driver::query()->create([
+                'user_id' => $actor->id,
+                'license_no' => 'PENDING',
+                'kyc_status' => 'pending',
+                'duty_status' => 'offline',
+            ]);
+        }
         if ($driver && ! empty($data['welcomeBonusSeen']) && Schema::hasColumn('drivers', 'welcome_bonus_seen_at')) {
             $driver->update(['welcome_bonus_seen_at' => now()]);
         }
         if ($driver) {
-            $city = $data['city'] ?? null;
-            if (! empty($data['districtId']) && Schema::hasTable('districts')) {
-                $city = $city ?: DB::table('districts')->where('id', $data['districtId'])->value('name');
+            if ($districtId && Schema::hasTable('districts')) {
+                $city = $city ?: DB::table('districts')->where('id', $districtId)->value('name');
             }
             $license = strtoupper(trim((string) ($data['licenseNo'] ?? $data['license_no'] ?? '')));
             if ($license !== '' && ! in_array($license, ['PENDING', 'NA'], true)) {
@@ -558,6 +585,12 @@ class DriverOpsService
                 'bank_ifsc' => isset($data['ifsc']) ? strtoupper((string) $data['ifsc']) : null,
                 'upi_id' => $data['upiId'] ?? $data['upi_id'] ?? null,
             ], fn ($v) => $v !== null && $v !== '');
+            if ($stateId && Schema::hasColumn('drivers', 'state_id')) {
+                $driverUpdates['state_id'] = $stateId;
+            }
+            if ($districtId && Schema::hasColumn('drivers', 'district_id')) {
+                $driverUpdates['district_id'] = $districtId;
+            }
             if (! empty($data['aadhaar']) || ! empty($data['aadhaarNumber'])) {
                 $aadhaar = preg_replace('/\D+/', '', (string) ($data['aadhaar'] ?? $data['aadhaarNumber'])) ?? '';
                 abort_unless(preg_match('/^\d{12}$/', $aadhaar), 422, 'Enter a valid 12-digit Aadhaar number');
@@ -579,7 +612,7 @@ class DriverOpsService
                 $driverUpdates['bank_account_last4'] = substr($acct, -4);
                 $driverUpdates['bank_account_hash'] = hash('sha256', $acct);
             }
-            if (! empty($data['termsAccepted'])) {
+            if (! empty($data['termsAccepted']) && Schema::hasColumn('drivers', 'terms_accepted_at')) {
                 $driverUpdates['terms_accepted_at'] = now();
             }
             if ($driverUpdates) {
@@ -588,7 +621,20 @@ class DriverOpsService
             $this->upsertVehicle($driver, $data);
         }
 
-        return $this->me($actor->fresh());
+        try {
+            return $this->kycSnapshot($actor->fresh());
+        } catch (\Throwable $e) {
+            Log::warning('driver.profile_snapshot_failed', ['userId' => $actor->id, 'error' => $e->getMessage()]);
+
+            return [
+                'ok' => true,
+                'kycStatus' => $driver->kyc_status ?? 'pending',
+                'nextStep' => 'KYC',
+                'stateId' => $stateId ?: ($actor->state_id ?? null),
+                'districtId' => $districtId ?: ($actor->district_id ?? null),
+                'city' => $city ?? $data['city'] ?? null,
+            ];
+        }
     }
 
     public function submitKyc(User $actor): array
