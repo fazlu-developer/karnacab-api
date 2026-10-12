@@ -142,7 +142,14 @@ class CmsCatalogService
                 'popular' => (bool) ($row->popular ?? false),
             ])->all(),
             'rideTypes' => collect(config('karnacab.ride_types'))->map(fn ($row) => ['key' => $row['key'], 'title' => $row['label']])->all(),
-            'vehicleTypes' => collect(config('karnacab.vehicle_types'))->map(fn ($row) => ['key' => $row['key'], 'title' => $row['label']])->all(),
+            'vehicleTypes' => collect(app(VehicleCatalogService::class)->allTypes())->map(fn ($row) => [
+                'key' => $row['key'],
+                'title' => $row['label'],
+                'family' => $row['family'] ?? null,
+                'seats' => $row['seats'] ?? null,
+                'imageUrl' => $row['imageUrl'] ?? '',
+            ])->values()->all(),
+            'vehicleFamilies' => app(VehicleCatalogService::class)->families(),
             'homeOffers' => $this->homeOffers(),
         ];
     }
@@ -307,6 +314,7 @@ class CmsCatalogService
             'iconKey' => $row->icon_key ?? null,
             'imageUrl' => $this->publicUpload($row->getAttributes()['image_url'] ?? null),
             'badge' => $row->badge ?? null,
+                'imageUrl' => $type['imageUrl'] ?? '',
             'key' => strtoupper(str_replace('-', '_', $slug)),
             'homeMode' => $this->homeMode($slug),
             'active' => (bool) $row->active,
@@ -360,7 +368,7 @@ class CmsCatalogService
         }
         $decoded = json_decode($raw, true);
 
-        return is_array($decoded) ? $decoded : [];
+            'parcel', 'parcel-home', 'parcel-delivery', 'send-bike', 'send-mini3w', 'send-truck' => 'parcel',
     }
 
     public static function privacyPolicyBody(): string

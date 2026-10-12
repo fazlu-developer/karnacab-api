@@ -4,6 +4,7 @@ namespace Database\Seeders;
 
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Schema;
 
 /**
@@ -24,6 +25,7 @@ class GoLiveFreshSeeder extends Seeder
         'parcel_fare_rules',
         'commission_rules',
         'catalog_services',
+        'catalog_vehicle_types',
         'cms_pages',
         'system_settings',
         'support_faqs',
@@ -43,6 +45,8 @@ class GoLiveFreshSeeder extends Seeder
     {
         $this->wipeTransactional();
         $this->keepOnlyOperators();
+        $this->wipeDynamicUploads();
+        $this->setPlayStoreAndVersions();
         $this->seedOffers();
         $this->seedCoupons();
         $this->seedBanners();
@@ -63,6 +67,55 @@ class GoLiveFreshSeeder extends Seeder
             DB::table($table)->truncate();
         }
         DB::statement('SET FOREIGN_KEY_CHECKS=1');
+    }
+
+    private function wipeDynamicUploads(): void
+    {
+        $keepNames = ['.gitignore', '.htaccess', '.gitkeep'];
+        $keepDirs = ['branding', 'logo', 'logos', 'favicon', 'site', 'cms'];
+        $roots = [
+            storage_path('app/public'),
+            storage_path('app/private'),
+            base_path('../management-admin/storage/app/public'),
+            base_path('../management-admin/public/uploads'),
+        ];
+        foreach ($roots as $root) {
+            if (! is_dir($root)) {
+                continue;
+            }
+            foreach (File::directories($root) as $dir) {
+                $name = basename($dir);
+                if (in_array(strtolower($name), $keepDirs, true)) {
+                    continue;
+                }
+                File::deleteDirectory($dir);
+            }
+            foreach (File::files($root) as $file) {
+                if (in_array($file->getFilename(), $keepNames, true)) {
+                    continue;
+                }
+                File::delete($file->getPathname());
+            }
+        }
+        $this->command?->info('Dynamic KYC / document uploads removed. Branding folders kept.');
+    }
+
+    private function setPlayStoreAndVersions(): void
+    {
+        if (! Schema::hasTable('system_settings')) {
+            return;
+        }
+        $raw = DB::table('system_settings')->where('key', 'cms_site')->value('value');
+        $site = json_decode((string) $raw, true);
+        if (! is_array($site)) {
+            $site = [];
+        }
+        $site['customerAppVersion'] = '1.1.10';
+        $site['driverAppVersion'] = '1.1.9';
+        $site['customerPlayStoreUrl'] = 'https://play.google.com/store/apps/details?id=com.karnacabride';
+        $site['driverPlayStoreUrl'] = 'https://play.google.com/store/apps/details?id=com.karnacabpartner';
+        $site['playStoreUrl'] = $site['customerPlayStoreUrl'];
+        $this->putSetting('cms_site', json_encode($site, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
     }
 
     private function keepOnlyOperators(): void

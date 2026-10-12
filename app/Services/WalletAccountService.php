@@ -143,32 +143,96 @@ class WalletAccountService
         if ($paise < 1) {
             return false;
         }
-        $wallet = $this->ensureWallet($userId, $ownerType);
-        if (! $wallet) {
+
+        return (bool) DB::transaction(function () use ($userId, $ownerType, $paise, $kind, $note) {
+            $wallet = $this->ensureWallet($userId, $ownerType);
+            if (! $wallet) {
+                return false;
+            }
+            $wallet = DB::table('wallets')->where('id', $wallet->id)->lockForUpdate()->first() ?? $wallet;
+            if ($this->joiningBonusPosted((int) $wallet->id, $userId)) {
+                return false;
+            }
+            $before = (int) ($wallet->balance_paise ?? 0);
+            $after = $before + $paise;
+            DB::table('wallets')->where('id', $wallet->id)->update($this->filter('wallets', [
+                'balance_paise' => $after,
+                'updated_at' => now(),
+            ]));
+            $fresh = DB::table('wallets')->where('id', $wallet->id)->first() ?? $wallet;
+            $this->ledger($fresh, $userId, $ownerType, 'CREDIT', $paise, $before, $after, $kind, $note);
+
+            return true;
+        });
+    }
+
+    public function joiningBonusPosted(int $walletId, int $userId): bool
+    {
+        if (Schema::hasTable('incentives') && DB::table('incentives')->where('user_id', $userId)->where('kind', 'driver_joining')->where('status', 'paid')->exists()) {
+            return true;
+        }
+        if (! Schema::hasTable('wallet_ledger')) {
             return false;
         }
-        if (Schema::hasTable('wallet_ledger')) {
-            $exists = DB::table('wallet_ledger')
-                ->where('wallet_id', $wallet->id)
-                ->whereIn('kind', [$kind, 'joining_bonus', 'driver_joining', 'bonus'])
+
+        return DB::table('wallet_ledger')
+            ->where(function ($q) use ($walletId, $userId) {
+                $q->where('wallet_id', $walletId)->orWhere('owner_user_id', $userId);
+            })
+            ->whereIn('kind', ['joining_bonus', 'driver_joining', 'joining'])
+            ->where(function ($q) {
+                $q->where('direction', 'CREDIT')->orWhere('direction', 'credit');
+            })
+            ->exists();
+    }
+
+    /** Keep wallet joining bonus equal to the admin offer, not a double credit. */
+    public function reconcileJoiningBonus(int $userId, string $ownerType, int $offerPaise): void
+    {
+        if ($offerPaise < 1 || ! Schema::hasTable('wallet_ledger')) {
+            return;
+        }
+        DB::transaction(function () use ($userId, $ownerType, $offerPaise) {
+            $wallet = $this->ensureWallet($userId, $ownerType);
+            if (! $wallet) {
+                return;
+            }
+            $wallet = DB::table('wallets')->where('id', $wallet->id)->lockForUpdate()->first() ?? $wallet;
+            $credited = (int) DB::table('wallet_ledger')
+                ->where(function ($q) use ($wallet, $userId) {
+                    $q->where('wallet_id', $wallet->id)->orWhere('owner_user_id', $userId);
+                })
+                ->whereIn('kind', ['joining_bonus', 'driver_joining', 'joining'])
                 ->where(function ($q) {
                     $q->where('direction', 'CREDIT')->orWhere('direction', 'credit');
                 })
-                ->exists();
-            if ($exists) {
-                return false;
+                ->sum('amount_paise');
+            $reversed = (int) DB::table('wallet_ledger')
+                ->where(function ($q) use ($wallet, $userId) {
+                    $q->where('wallet_id', $wallet->id)->orWhere('owner_user_id', $userId);
+                })
+                ->whereIn('kind', ['joining_bonus', 'driver_joining', 'joining', 'joining_bonus_adjust'])
+                ->where(function ($q) {
+                    $q->where('direction', 'DEBIT')->orWhere('direction', 'debit');
+                })
+                ->sum('amount_paise');
+            $net = max(0, $credited - $reversed);
+            if ($net <= $offerPaise) {
+                return;
             }
-        }
-        $before = (int) ($wallet->balance_paise ?? 0);
-        $after = $before + $paise;
-        DB::table('wallets')->where('id', $wallet->id)->update($this->filter('wallets', [
-            'balance_paise' => $after,
-            'updated_at' => now(),
-        ]));
-        $fresh = DB::table('wallets')->where('id', $wallet->id)->first() ?? $wallet;
-        $this->ledger($fresh, $userId, $ownerType, 'CREDIT', $paise, $before, $after, $kind, $note);
-
-        return true;
+            $extra = $net - $offerPaise;
+            $before = (int) ($wallet->balance_paise ?? 0);
+            $after = max(0, $before - $extra);
+            if ($after === $before) {
+                return;
+            }
+            DB::table('wallets')->where('id', $wallet->id)->update($this->filter('wallets', [
+                'balance_paise' => $after,
+                'updated_at' => now(),
+            ]));
+            $fresh = DB::table('wallets')->where('id', $wallet->id)->first() ?? $wallet;
+            $this->ledger($fresh, $userId, $ownerType, 'DEBIT', $before - $after, $before, $after, 'joining_bonus_adjust', 'Removed duplicate joining bonus');
+        });
     }
 
     public function debitCommission(int $userId, int $bookingId, int $commissionPaise, int $grossPaise): void

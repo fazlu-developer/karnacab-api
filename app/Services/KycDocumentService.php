@@ -38,7 +38,7 @@ class KycDocumentService
         $families = app(VehicleCatalogService::class)->families();
         if ($families === []) {
             $families = [
-                ['key' => 'BIKE', 'label' => 'Bike', 'categories' => [['key' => 'BIKE', 'label' => 'Bike']]],
+                ['key' => 'BIKE', 'label' => 'Bike', 'categories' => [['key' => 'BIKE', 'label' => 'Bike'], ['key' => 'SCOOTY', 'label' => 'Scooty']]],
                 ['key' => 'AUTO', 'label' => 'Auto', 'categories' => [
                     ['key' => 'AUTO', 'label' => 'Auto'],
                     ['key' => 'E_RICKSHAW', 'label' => 'E-Rickshaw'],
@@ -48,6 +48,10 @@ class KycDocumentService
                     ['key' => 'SEDAN', 'label' => 'Sedan'],
                     ['key' => 'SUV', 'label' => 'SUV'],
                     ['key' => 'TRAVELLER', 'label' => 'Traveller / XL'],
+                ]],
+                ['key' => 'LOADING', 'label' => 'Loading', 'categories' => [
+                    ['key' => 'PICKUP', 'label' => 'Pickup'],
+                    ['key' => 'VAN', 'label' => 'Van'],
                 ]],
             ];
         }
@@ -63,7 +67,7 @@ class KycDocumentService
             ],
             'datedDocs' => self::DATED_TYPES,
             'optionalDocs' => ['POLLUTION', 'PERMIT'],
-            'permitRequiredFor' => ['AUTO', 'CAR'],
+            'permitRequiredFor' => ['AUTO', 'CAR', 'LOADING'],
         ];
     }
 

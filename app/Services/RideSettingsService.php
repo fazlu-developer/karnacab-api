@@ -102,7 +102,7 @@ class RideSettingsService
     public function driverReferralBonusRupees(): int
     {
         $value = $this->get(self::DRIVER_REFERRAL_RUPEES);
-        $rupees = is_numeric($value) ? (int) $value : 150;
+        $rupees = is_numeric($value) ? (int) $value : 50;
 
         return max(0, min(100000, $rupees));
     }
@@ -110,9 +110,9 @@ class RideSettingsService
     public function driverReferralRequiredRides(): int
     {
         $value = $this->get(self::DRIVER_REFERRAL_RIDES);
-        $rides = is_numeric($value) ? (int) $value : 10;
+        $rides = is_numeric($value) ? (int) $value : 0;
 
-        return max(1, min(500, $rides));
+        return max(0, min(500, $rides));
     }
 
     public function customerJoiningCreditRupees(): int

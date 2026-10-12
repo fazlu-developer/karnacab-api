@@ -82,14 +82,14 @@ class PlatformController extends Controller
                 'maintenance' => $flag('customerMaintenance'),
                 'forceUpdate' => $flag('customerForceUpdate'),
                 'version' => (string) ($site['customerAppVersion'] ?? ''),
-                'playStoreUrl' => $url($site['customerPlayStoreUrl'] ?? $site['playStoreUrl'] ?? ''),
+                'playStoreUrl' => $url($site['customerPlayStoreUrl'] ?? $site['playStoreUrl'] ?? '') ?: 'https://play.google.com/store/apps/details?id=com.karnacabride',
                 'logoUrl' => $url($site['customerAppLogoUrl'] ?? $site['logoUrl'] ?? ''),
             ],
             'driver' => [
                 'maintenance' => $flag('driverMaintenance'),
                 'forceUpdate' => $flag('driverForceUpdate'),
                 'version' => (string) ($site['driverAppVersion'] ?? ''),
-                'playStoreUrl' => $url($site['driverPlayStoreUrl'] ?? ''),
+                'playStoreUrl' => $url($site['driverPlayStoreUrl'] ?? '') ?: 'https://play.google.com/store/apps/details?id=com.karnacabpartner',
                 'logoUrl' => $url($site['driverAppLogoUrl'] ?? ''),
             ],
             'highAlert' => [
@@ -165,7 +165,8 @@ class PlatformController extends Controller
         \App\Support\ServiceArea::assertTrip($payload);
         $requested = strtoupper((string) ($payload['category'] ?? 'BIKE'));
         $options = [];
-        foreach (app(\App\Services\VehicleCatalogService::class)->rideTypes() as $vehicle) {
+        $product = strtoupper((string) ($payload['product'] ?? 'LOCAL_CAB'));
+        foreach (app(\App\Services\VehicleCatalogService::class)->typesForProduct($product) as $vehicle) {
             try {
                 $quote = $this->fares->quote(array_merge($payload, [
                     'product' => $payload['product'] ?? 'LOCAL_CAB',
@@ -175,26 +176,9 @@ class PlatformController extends Controller
                 Log::notice('quote.option_skipped', ['category' => $vehicle['key'], 'message' => $e->getMessage()]);
                 continue;
             }
-            $catalogVehicle = null;
-            $image = '';
-            try {
-                if (Schema::hasTable('catalog_services') && Schema::hasColumn('catalog_services', 'category_key')) {
-                    $catalogQuery = DB::table('catalog_services')->where('category_key', $vehicle['key']);
-                    if (Schema::hasColumn('catalog_services', 'active')) {
-                        $catalogQuery->where('active', 1);
-                    }
-                    $catalogVehicle = $catalogQuery->first();
-                }
-                if ($catalogVehicle && Schema::hasColumn('catalog_services', 'image_url')) {
-                    $path = (string) ($catalogVehicle->image_url ?? '');
-                    if ($path !== '') {
-                        $image = str_starts_with($path, 'http')
-                            ? $path
-                            : rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnaride.in'), '/').'/'.ltrim($path, '/');
-                    }
-                }
-            } catch (\Throwable $e) {
-                Log::notice('quote.catalog_skipped', ['category' => $vehicle['key'], 'message' => $e->getMessage()]);
+            $image = (string) ($vehicle['imageUrl'] ?? '');
+            if ($image === '') {
+                $image = (string) ($vehicle['familyImageUrl'] ?? '');
             }
             $billedKm = (float) ($quote['billedKm'] ?? $payload['distanceKm'] ?? 5);
             $routeMinutes = (int) ($payload['durationMinutes'] ?? 0);
@@ -218,9 +202,9 @@ class PlatformController extends Controller
                 'SUV' => 'For family & group',
                 'TRAVELLER' => 'Best for large group',
             ];
-            $subtitle = trim((string) ($catalogVehicle?->subtitle ?? ''));
+            $subtitle = trim((string) ($vehicle['blurb'] ?? ''));
             $options[] = array_merge($quote, [
-                'label' => $catalogVehicle?->title ?? $vehicle['label'],
+                'label' => $vehicle['label'] ?? $vehicle['key'],
                 'seats' => $vehicle['seats'],
                 'icon' => $vehicle['key'],
                 'imageUrl' => $image,

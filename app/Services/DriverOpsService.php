@@ -28,6 +28,11 @@ class DriverOpsService
         if ($approved) {
             $this->grantWelcomeBonus($driver);
             $driver->refresh();
+            $offer = app(TerritoryBonusService::class)->forUser($actor, 'joining');
+            $offerPaise = ((int) ($offer['amountRupees'] ?? 0)) * 100;
+            if ($offerPaise > 0) {
+                app(WalletAccountService::class)->reconcileJoiningBonus((int) $actor->id, 'DRIVER', $offerPaise);
+            }
         }
         $fleetUnassigned = (bool) $driver->fleet_owner_id && $driver->vehicles->isEmpty();
         $canGoOnline = $approved && ! $blocked && ! $fleetUnassigned;
@@ -47,7 +52,7 @@ class DriverOpsService
         $todayStart = now()->timezone('Asia/Kolkata')->startOfDay();
         $todayStats = $this->periodEarnings((int) $driver->id, (int) $actor->id, $todayStart, now());
         $todayRides = (int) $todayStats['rides'];
-        $todayEarnPaise = (int) $todayStats['netPaise'];
+        $todayEarnPaise = (int) ($todayStats['netPaise'] ?? $todayStats['earningsPaise'] ?? 0);
         $todayParcels = (int) $todayStats['parcels'];
         $pending = 0;
         $offerIds = [];
@@ -152,6 +157,7 @@ class DriverOpsService
             'gstPercent' => app(RideSettingsService::class)->gstPercent(),
             'fleetOwnerCommissionPercent' => app(RideSettingsService::class)->fleetOwnerCommissionPercent(),
             'incentives' => $incentives,
+            'referralCode' => app(IncentiveService::class)->ensureReferralCode($actor),
             'documentAlerts' => collect($documents)->filter(fn ($doc) => in_array($doc['status'], ['expired', 'rejected'], true) || ($doc['expiresAt'] && $doc['expiresAt'] <= now()->toDateString()))->values()->all(),
             'vehicle' => $vehicle ? [
                 'registrationNo' => $vehicle->registration_no,
@@ -374,6 +380,7 @@ class DriverOpsService
 
         return [
             'earningsPaise' => $net,
+            'netPaise' => $net,
             'earningsRupees' => $net / 100,
             'netRupees' => $net / 100,
             'grossPaise' => $gross + $parcelGross,
@@ -647,7 +654,7 @@ class DriverOpsService
         $catalog = app(KycDocumentService::class)->catalog();
         $required = $catalog['requiredDocs'] ?? [];
         $family = strtoupper((string) ($driver->vehicle_family ?? $driver->vehicles->first()?->category ?? ''));
-        if (in_array($family, $catalog['permitRequiredFor'] ?? [], true) || in_array($family, ['AUTO', 'CAR', 'SEDAN', 'SUV', 'MINI', 'TRAVELLER'], true)) {
+        if (in_array($family, $catalog['permitRequiredFor'] ?? [], true) || in_array($family, ['AUTO', 'CAR', 'LOADING', 'SEDAN', 'SUV', 'MINI', 'TRAVELLER'], true)) {
             $required[] = 'PERMIT';
         }
         $have = $driver->documents->pluck('type')->map(fn ($t) => strtoupper((string) $t))->all();
@@ -782,50 +789,46 @@ class DriverOpsService
         $offer = $user
             ? app(TerritoryBonusService::class)->forUser($user, 'joining')
             : app(TerritoryBonusService::class)->resolve('DRIVER', 'joining', null, null);
-        if (empty($offer['enabled'])) {
-            return;
-        }
-        $rupees = (int) $offer['amountRupees'];
-        if ($rupees < 1) {
-            return;
-        }
+        $alreadyJoined = Schema::hasColumn('drivers', 'welcome_bonus_at') && $driver->welcome_bonus_at;
+        $rupees = (int) ($offer['amountRupees'] ?? 0);
         $paise = $rupees * 100;
-        if (Schema::hasColumn('drivers', 'welcome_bonus_at') && $driver->welcome_bonus_at) {
-            return;
-        }
         $userId = (int) $driver->user_id;
-        if (Schema::hasTable('incentives') && DB::table('incentives')->where('user_id', $userId)->where('kind', 'driver_joining')->where('status', 'paid')->exists()) {
-            if (Schema::hasColumn('drivers', 'welcome_bonus_at')) {
-                $driver->update(array_filter([
-                    'welcome_bonus_paise' => Schema::hasColumn('drivers', 'welcome_bonus_paise') ? $paise : null,
-                    'welcome_bonus_at' => now(),
-                ]));
+        if (! empty($offer['enabled']) && $rupees >= 1 && ! $alreadyJoined) {
+            if (Schema::hasTable('incentives') && DB::table('incentives')->where('user_id', $userId)->where('kind', 'driver_joining')->where('status', 'paid')->exists()) {
+                if (Schema::hasColumn('drivers', 'welcome_bonus_at')) {
+                    $driver->update(array_filter([
+                        'welcome_bonus_paise' => Schema::hasColumn('drivers', 'welcome_bonus_paise') ? $paise : null,
+                        'welcome_bonus_at' => now(),
+                    ]));
+                }
+            } else {
+                $wallets = app(WalletAccountService::class);
+                $wallets->creditBonus($userId, 'DRIVER', $paise, 'joining_bonus', 'Joining bonus ₹'.$rupees.' credited to wallet');
+                $wallets->reconcileJoiningBonus($userId, 'DRIVER', $paise);
+                $patch = [];
+                if (Schema::hasColumn('drivers', 'welcome_bonus_paise')) {
+                    $patch['welcome_bonus_paise'] = $paise;
+                }
+                if (Schema::hasColumn('drivers', 'welcome_bonus_at')) {
+                    $patch['welcome_bonus_at'] = now();
+                }
+                if (Schema::hasTable('incentives')) {
+                    DB::table('incentives')->insert(array_filter([
+                        'user_id' => $userId,
+                        'kind' => 'driver_joining',
+                        'amount_paise' => $paise,
+                        'status' => 'paid',
+                        'note' => 'Driver joining bonus credited to wallet',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ], fn ($key) => Schema::hasColumn('incentives', $key), ARRAY_FILTER_USE_KEY));
+                }
+                if ($patch !== []) {
+                    $driver->update($patch);
+                }
             }
-
-            return;
         }
-        app(WalletAccountService::class)->creditBonus($userId, 'DRIVER', $paise, 'joining_bonus', 'Joining bonus ₹'.$rupees.' credited to wallet');
-        $patch = [];
-        if (Schema::hasColumn('drivers', 'welcome_bonus_paise')) {
-            $patch['welcome_bonus_paise'] = $paise;
-        }
-        if (Schema::hasColumn('drivers', 'welcome_bonus_at')) {
-            $patch['welcome_bonus_at'] = now();
-        }
-        if (Schema::hasTable('incentives')) {
-            DB::table('incentives')->insert(array_filter([
-                'user_id' => $userId,
-                'kind' => 'driver_joining',
-                'amount_paise' => $paise,
-                'status' => 'paid',
-                'note' => 'Driver joining bonus credited to wallet',
-                'created_at' => now(),
-                'updated_at' => now(),
-            ], fn ($key) => Schema::hasColumn('incentives', $key), ARRAY_FILTER_USE_KEY));
-        }
-        if ($patch !== []) {
-            $driver->update($patch);
-        }
+        app(IncentiveService::class)->grantDriverReferralOnSignup($driver->fresh() ?? $driver);
     }
 
     public function ratings(User $actor): array
