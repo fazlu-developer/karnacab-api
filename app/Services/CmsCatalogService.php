@@ -368,7 +368,7 @@ class CmsCatalogService
         }
         $decoded = json_decode($raw, true);
 
-            'parcel', 'parcel-home', 'parcel-delivery', 'send-bike', 'send-mini3w', 'send-truck' => 'parcel',
+        return is_array($decoded) ? $decoded : [];
     }
 
     public static function privacyPolicyBody(): string

@@ -143,9 +143,17 @@ class IncentiveService
             ->where('kind', $actor->role === 'DRIVER' ? 'driver_referral' : 'customer_referral')
             ->where('status', 'paid')
             ->exists();
-            'status' => $paid ? 'bonus_paid' : ($rides >= $needed ? 'eligible' : 'in_progress'),
+        $waitingKyc = $row->role === 'DRIVER' && ! in_array($kyc, ['verified', 'approved', 'active'], true);
+        $status = $paid ? 'bonus_paid' : ($waitingKyc ? 'waiting_kyc' : ($rides >= $needed ? 'eligible' : 'in_progress'));
+
+        return [
+            'id' => (string) $row->id,
+            'name' => $row->name,
+            'phone' => $row->phone,
+            'status' => $status,
             'completedRides' => $rides,
             'requiredRides' => $needed,
+            'kycStatus' => $kyc,
         ];
     }
 
@@ -233,14 +241,6 @@ class IncentiveService
             ],
             [
                 'title' => 'Refer a driver ₹'.$snap['referralBonusRupees'],
-                'subtitle' => 'Paid when they complete '.$snap['driverReferralRequiredRides'].' rides. Code '.$snap['referralCode'],
-                'progressTrips' => collect($snap['referred'])->where('status', 'bonus_paid')->count(),
-                'targetTrips' => max(1, count($snap['referred'])),
-                'progress' => 0,
-                'bonusRupees' => $snap['referralBonusRupees'],
-                'awarded' => false,
-                'earnedRupees' => collect($snap['history'])->where('kind', 'driver_referral')->sum('amountRupees'),
-            ],
                 'subtitle' => 'You get ₹'.$snap['referralBonusRupees'].' when they complete signup and KYC. They get joining bonus ₹'.$snap['joiningBonusRupees'].'. Code '.$snap['referralCode'],
                 'progressTrips' => collect($snap['referred'])->where('status', 'bonus_paid')->count(),
                 'targetTrips' => max(1, count($snap['referred'])),
@@ -249,11 +249,11 @@ class IncentiveService
                     : collect($snap['referred'])->where('status', 'bonus_paid')->count() / max(1, count($snap['referred'])),
                 'bonusRupees' => $snap['referralBonusRupees'],
                 'awarded' => collect($snap['history'])->where('kind', 'driver_referral')->sum('amountRupees') > 0,
-            return;
-        }
-        $newUser = User::query()->find($newDriver->user_id);
-        $referrerId = (int) ($newUser->referred_by_user_id ?? 0);
-        if ($referrerId < 1 || $referrerId === (int) $newUser->id) {
+                'earnedRupees' => collect($snap['history'])->where('kind', 'driver_referral')->sum('amountRupees'),
+            ],
+        ];
+    }
+
     public function grantDriverReferralOnSignup(Driver $newDriver): void
     {
         $this->maybeGrantDriverReferral($newDriver, 0);
@@ -290,7 +290,19 @@ class IncentiveService
         $paise = $rupees * 100;
         $this->creditCash($referrerId, 'DRIVER', $paise, 'driver_referral', $bookingId > 0 ? $bookingId : null, 'Referral bonus ₹'.$rupees.' when referred driver completed KYC');
         $this->recordIncentive($referrerId, 'driver_referral', $paise, $bookingId > 0 ? $bookingId : null, (int) $newUser->id, 'Referral bonus when referred driver completed signup');
+    }
+
+    private function maybeGrantCustomerJoining(User $customer, int $bookingId): void
+    {
+        if ($this->alreadyPaid((int) $customer->id, 'customer_joining')) {
+            return;
+        }
         if ($this->completedCustomerPaidRides((int) $customer->id) < 1) {
+            return;
+        }
+        $offer = app(TerritoryBonusService::class)->forUser($customer, 'joining');
+        $rupees = (int) ($offer['amountRupees'] ?: $this->settings->customerJoiningCreditRupees());
+        if ($rupees < 1) {
             return;
         }
         $paise = $rupees * 100;
