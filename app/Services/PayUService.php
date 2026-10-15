@@ -13,7 +13,10 @@ class PayUService
 {
     public function startTopup(User $actor, float $rupees): array
     {
-        abort_unless($rupees >= 1, 422, 'Enter at least ₹1');
+        $min = $actor->role === 'DRIVER'
+            ? app(RideSettingsService::class)->driverTopupMinRupees()
+            : 1;
+        abort_unless($rupees >= $min, 422, 'Minimum add money is ₹'.$min.'.');
         abort_unless($rupees <= 50000, 422, 'Maximum top-up is ₹50,000');
         abort_unless($this->key() !== '' && $this->salt() !== '', 422, 'PayU is not configured');
         $this->ensureTables();

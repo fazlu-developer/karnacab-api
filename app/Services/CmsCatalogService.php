@@ -314,9 +314,9 @@ class CmsCatalogService
             'iconKey' => $row->icon_key ?? null,
             'imageUrl' => $this->publicUpload($row->getAttributes()['image_url'] ?? null),
             'badge' => $row->badge ?? null,
-                'imageUrl' => $type['imageUrl'] ?? '',
             'key' => strtoupper(str_replace('-', '_', $slug)),
             'homeMode' => $this->homeMode($slug),
+            'sortOrder' => (int) ($row->sort_order ?? 0),
             'active' => (bool) $row->active,
         ];
     }
@@ -353,7 +353,7 @@ class CmsCatalogService
             'bus-train', 'railway', 'railway-transfer' => 'railway',
             'airport', 'airport-transfer' => 'airport',
             'multi-stop', 'multi-stop-ride' => 'multi_stop',
-            'parcel', 'parcel-home', 'send-bike', 'send-mini3w', 'send-truck' => 'parcel',
+            'parcel', 'parcel-delivery', 'parcel-home', 'send-bike', 'send-mini3w', 'send-truck' => 'parcel',
             'travel', 'travel-tours' => 'travel',
             'bulk', 'bulk-booking' => 'bulk',
             'corporate', 'corporate-travel', 'seniors' => 'corporate',

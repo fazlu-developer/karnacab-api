@@ -31,7 +31,7 @@ class AuthenticateJwt
         $userEpoch = (int) ($user->session_epoch ?? 0);
         if ($tokenEpoch !== $userEpoch) {
             return response()->json([
-                'message' => 'Session expired. Please sign in again.',
+                'message' => 'This account is signed in on another device.',
                 'statusCode' => 401,
                 'code' => 'SESSION_REVOKED',
             ], 401);

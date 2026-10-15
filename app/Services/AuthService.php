@@ -497,13 +497,17 @@ class AuthService
 
             return;
         }
-        $epoch = ((int) ($user->session_epoch ?? 0)) + 1;
-        User::query()->where('id', $user->id)->update([
-            'session_epoch' => $epoch,
-            'updated_at' => now(),
-        ]);
-        $user->session_epoch = $epoch;
+        User::query()->where('id', $user->id)->increment('session_epoch');
+        User::query()->where('id', $user->id)->update(['updated_at' => now()]);
+        $user->session_epoch = (int) (User::query()->where('id', $user->id)->value('session_epoch') ?? 1);
         $this->forgetPushDevices((int) $user->id);
+    }
+
+    public function revokeAppSession(User $user): array
+    {
+        $this->rotateDeviceSession($user);
+
+        return ['ok' => true];
     }
 
     private function forgetPushDevices(int $userId, ?string $keepToken = null): void

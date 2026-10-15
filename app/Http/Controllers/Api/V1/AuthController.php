@@ -108,6 +108,11 @@ class AuthController extends Controller
         return $this->auth->present($request->user());
     }
 
+    public function logout(Request $request)
+    {
+        return $this->auth->revokeAppSession($request->user());
+    }
+
     public function profile(Request $request)
     {
         $data = $request->all();

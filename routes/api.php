@@ -61,6 +61,7 @@ Route::post('/v1/auth/operator/otp/verify', [AuthController::class, 'verifyOpera
 
 Route::middleware('jwt')->group(function () {
     Route::get('/v1/auth/me', [AuthController::class, 'me']);
+    Route::post('/v1/auth/logout', [AuthController::class, 'logout']);
     Route::delete('/v1/auth/account', [AuthController::class, 'deleteAccount']);
     Route::patch('/v1/auth/profile', [AuthController::class, 'profile']);
     Route::post('/v1/auth/avatar', [AuthController::class, 'avatar']);

@@ -44,6 +44,7 @@ class WalletAccountService
                 $table->unsignedBigInteger('user_id');
                 $table->unsignedBigInteger('amount_paise');
                 $table->string('status', 24)->default('requested');
+                $table->string('payout_method', 16)->nullable();
                 $table->string('upi_or_account', 120)->nullable();
                 $table->string('transfer_ref', 64)->nullable();
                 $table->string('note', 255)->nullable();
@@ -67,6 +68,9 @@ class WalletAccountService
         Schema::table('wallet_withdrawals', function ($table) use ($adds) {
             if (in_array('user_id', $adds, true)) {
                 $table->unsignedBigInteger('user_id')->nullable();
+            }
+            if (in_array('payout_method', $adds, true)) {
+                $table->string('payout_method', 16)->nullable();
             }
             if (in_array('upi_or_account', $adds, true)) {
                 $table->string('upi_or_account', 120)->nullable();
@@ -379,31 +383,42 @@ class WalletAccountService
     /**
      * @return array<string, mixed>
      */
-    public function requestWithdraw(User $actor, float $rupees, ?string $destination = null): array
+    public function requestWithdraw(User $actor, float $rupees, ?string $destination = null, ?string $method = null): array
     {
         abort_unless($actor->role === 'DRIVER', 403, 'Only drivers can withdraw wallet cash.');
+        $policy = app(RideSettingsService::class)->walletCashPolicy();
+        $minRupees = (int) ($policy['withdrawMinRupees'] ?? 500);
+        $methods = $policy['withdrawMethods'] ?? ['UPI'];
         $paise = (int) round($rupees * 100);
-        abort_unless($paise >= 50000, 422, 'Minimum withdrawal is ₹500.');
+        abort_unless($paise >= $minRupees * 100, 422, 'Minimum withdrawal is ₹'.$minRupees.'.');
+        $payout = strtoupper(trim((string) $method));
+        abort_unless(in_array($payout, $methods, true), 422, 'Choose how admin should pay this withdrawal.');
+        $destination = trim((string) $destination);
+        if ($payout !== 'CASH') {
+            abort_unless(strlen($destination) >= 4, 422, $payout === 'UPI' ? 'Enter your UPI ID.' : 'Enter bank account details.');
+        }
         $wallet = $this->ensureWallet((int) $actor->id, 'DRIVER');
         abort_unless($wallet, 422, 'Wallet not found.');
         $available = max(0, (int) $wallet->balance_paise - (int) ($wallet->frozen_paise ?? 0));
-        abort_unless($available >= $paise, 422, 'Not enough withdrawable cash. Joining credit cannot be withdrawn.');
+        abort_unless($available >= $paise, 422, 'Not enough withdrawable cash. Frozen and joining credit cannot be withdrawn.');
         $frozen = (int) ($wallet->frozen_paise ?? 0) + $paise;
         DB::table('wallets')->where('id', $wallet->id)->update($this->filter('wallets', [
             'frozen_paise' => $frozen,
             'updated_at' => now(),
         ]));
-        $id = DB::table('wallet_withdrawals')->insertGetId([
+        $id = DB::table('wallet_withdrawals')->insertGetId($this->filter('wallet_withdrawals', [
             'public_ref' => 'WW'.strtoupper(Str::random(10)),
             'wallet_id' => $wallet->id,
             'user_id' => $actor->id,
             'amount_paise' => $paise,
             'status' => 'requested',
-            'upi_or_account' => $destination,
+            'payout_method' => $payout,
+            'upi_or_account' => $destination !== '' ? $destination : null,
             'note' => 'Driver withdrawal requested. Amount frozen until admin settles.',
             'created_at' => now(),
             'updated_at' => now(),
-        ]);
+        ]));
+
         return $this->presentWithdrawal(DB::table('wallet_withdrawals')->where('id', $id)->first());
     }
 
@@ -431,6 +446,8 @@ class WalletAccountService
             'amountPaise' => (int) $row->amount_paise,
             'amountRupees' => ((int) $row->amount_paise) / 100,
             'status' => $row->status,
+            'payoutMethod' => $row->payout_method ?? null,
+            'destination' => $row->upi_or_account ?? null,
             'transferRef' => $row->transfer_ref,
             'note' => $row->note,
             'createdAt' => $row->created_at,

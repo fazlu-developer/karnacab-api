@@ -771,6 +771,7 @@ class BookingService
             'status' => $row->status,
             'cancelReason' => $row->cancel_reason ?? null,
             'paymentMode' => $row->payment_mode ?? 'CASH',
+            'paymentType' => $this->paymentTypeLabel($row->payment_mode ?? 'CASH'),
             'ratings' => $this->ratingsPayload($row),
             'customerReview' => $this->customerReview($row),
             'lifecycle' => BookingStatus::lifecycle((string) $row->status),
@@ -829,6 +830,7 @@ class BookingService
             ],
             'estimatedFareRupees' => $total / 100,
             'collectRupees' => $total / 100,
+            'amountType' => $this->paymentTypeLabel($row->payment_mode ?? 'CASH'),
             'commissionRupees' => $commissionPaise / 100,
             'estimatedEarningsRupees' => $earningPaise / 100,
             'driverEarningRupees' => $earningPaise / 100,
@@ -924,14 +926,25 @@ class BookingService
                 return [];
             }
             return match ($status) {
-                BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED => ['arrive', 'cancel'],
+                BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED, 'DRIVER_ARRIVING' => ['arrive', 'cancel'],
                 BookingStatus::DRIVER_ARRIVED => ['verify_otp'],
-                BookingStatus::OTP_VERIFIED, BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED => ['complete'],
+                BookingStatus::OTP_VERIFIED, BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED' => ['complete'],
                 default => [],
             };
         }
 
         return [];
+    }
+
+    public function paymentTypeLabel(mixed $mode): string
+    {
+        return match (strtoupper(trim((string) ($mode ?: 'CASH')))) {
+            'WALLET', 'WALLET_BALANCE' => 'Wallet',
+            'UPI' => 'UPI',
+            'PAYU', 'ONLINE', 'CARD', 'NETBANKING', 'RAZORPAY' => 'Online',
+            'COD', 'CASH_ON_DELIVERY', 'CASH' => 'Cash',
+            default => trim((string) $mode) !== '' ? ucwords(strtolower(str_replace('_', ' ', (string) $mode))) : 'Cash',
+        };
     }
 
     /**

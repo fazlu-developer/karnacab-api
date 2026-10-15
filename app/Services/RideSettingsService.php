@@ -14,6 +14,9 @@ class RideSettingsService
     public const WALLET_MIN_PAISE_KEY = 'driver_wallet_min_paise';
     public const WALLET_MIN_FARE_PERCENT_KEY = 'driver_wallet_min_fare_percent';
     public const WALLET_COVER_COMMISSION_KEY = 'driver_wallet_must_cover_commission';
+    public const TOPUP_MIN_RUPEES_KEY = 'driver_topup_min_rupees';
+    public const WITHDRAW_MIN_RUPEES_KEY = 'driver_withdraw_min_rupees';
+    public const WITHDRAW_METHODS_KEY = 'driver_withdraw_methods';
     public const DRIVER_WELCOME_BONUS_ON = 'driver_welcome_bonus_enabled';
     public const DRIVER_WELCOME_BONUS_RUPEES = 'driver_welcome_bonus_rupees';
     public const FIRST_RIDE_FREE_ON = 'customer_first_ride_free_enabled';
@@ -75,6 +78,63 @@ class RideSettingsService
         $value = $this->get(self::WALLET_COVER_COMMISSION_KEY);
 
         return $value === null || $value === '' ? true : in_array(strtolower((string) $value), ['1', 'true', 'yes'], true);
+    }
+
+    public function driverTopupMinRupees(): int
+    {
+        $value = $this->get(self::TOPUP_MIN_RUPEES_KEY);
+        $rupees = is_numeric($value) ? (int) $value : 100;
+
+        return max(1, min(50000, $rupees));
+    }
+
+    public function driverWithdrawMinRupees(): int
+    {
+        $value = $this->get(self::WITHDRAW_MIN_RUPEES_KEY);
+        $rupees = is_numeric($value) ? (int) $value : 500;
+
+        return max(1, min(500000, $rupees));
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function driverWithdrawMethods(): array
+    {
+        $raw = strtoupper((string) ($this->get(self::WITHDRAW_METHODS_KEY) ?? 'UPI,BANK'));
+        $allowed = ['UPI', 'BANK', 'CASH'];
+        $out = [];
+        foreach (preg_split('/[,\s]+/', $raw) ?: [] as $part) {
+            $key = trim($part);
+            if (in_array($key, $allowed, true) && ! in_array($key, $out, true)) {
+                $out[] = $key;
+            }
+        }
+
+        return $out !== [] ? $out : ['UPI'];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function walletCashPolicy(): array
+    {
+        $methods = $this->driverWithdrawMethods();
+        $labels = [
+            'UPI' => 'UPI',
+            'BANK' => 'Bank transfer',
+            'CASH' => 'Cash (office)',
+        ];
+
+        return [
+            'topupMinRupees' => $this->driverTopupMinRupees(),
+            'withdrawMinRupees' => $this->driverWithdrawMinRupees(),
+            'withdrawMethods' => $methods,
+            'withdrawMethodOptions' => array_map(fn ($key) => [
+                'key' => $key,
+                'label' => $labels[$key] ?? $key,
+            ], $methods),
+        ];
     }
 
     public function driverWelcomeBonusEnabled(): bool
@@ -222,6 +282,9 @@ class RideSettingsService
             'customerPromoMaxFarePercent' => $this->customerPromoMaxFarePercent(),
             'gstPercent' => $this->gstPercent(),
             'fleetOwnerCommissionPercent' => $this->fleetOwnerCommissionPercent(),
+            'driverTopupMinRupees' => $this->driverTopupMinRupees(),
+            'driverWithdrawMinRupees' => $this->driverWithdrawMinRupees(),
+            'driverWithdrawMethods' => $this->driverWithdrawMethods(),
         ];
     }
 
@@ -297,6 +360,15 @@ class RideSettingsService
         }
         if ($this->get(self::WALLET_COVER_COMMISSION_KEY) === null) {
             $this->put(self::WALLET_COVER_COMMISSION_KEY, '1');
+        }
+        if ($this->get(self::TOPUP_MIN_RUPEES_KEY) === null) {
+            $this->put(self::TOPUP_MIN_RUPEES_KEY, '100');
+        }
+        if ($this->get(self::WITHDRAW_MIN_RUPEES_KEY) === null) {
+            $this->put(self::WITHDRAW_MIN_RUPEES_KEY, '500');
+        }
+        if ($this->get(self::WITHDRAW_METHODS_KEY) === null) {
+            $this->put(self::WITHDRAW_METHODS_KEY, 'UPI,BANK');
         }
         if ($this->get(self::DRIVER_WELCOME_BONUS_ON) === null) {
             $this->put(self::DRIVER_WELCOME_BONUS_ON, '1');

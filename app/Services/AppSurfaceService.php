@@ -1497,7 +1497,11 @@ class AppSurfaceService
             'ledger' => $ledger,
             'referrals' => app(IncentiveService::class)->snapshot($actor),
             'withdrawals' => $ownerType === 'DRIVER'
-                ? ['supported' => true, 'minRupees' => 500, 'items' => $wallets->withdrawalsFor((int) $actor->id)]
+                ? array_merge(app(RideSettingsService::class)->walletCashPolicy(), [
+                    'supported' => true,
+                    'minRupees' => app(RideSettingsService::class)->driverWithdrawMinRupees(),
+                    'items' => $wallets->withdrawalsFor((int) $actor->id),
+                ])
                 : null,
         ];
     }

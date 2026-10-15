@@ -709,7 +709,13 @@ class PlatformController extends Controller
     {
         $rupees = (float) ($request->input('amountRupees') ?? $request->input('amount') ?? 0);
         $destination = $request->input('upi') ?? $request->input('account') ?? $request->input('destination');
-        $row = app(\App\Services\WalletAccountService::class)->requestWithdraw($request->user(), $rupees, is_string($destination) ? $destination : null);
+        $method = $request->input('method') ?? $request->input('payoutMethod') ?? $request->input('payout_method');
+        $row = app(\App\Services\WalletAccountService::class)->requestWithdraw(
+            $request->user(),
+            $rupees,
+            is_string($destination) ? $destination : null,
+            is_string($method) ? $method : null,
+        );
 
         return ['ok' => true, 'withdrawal' => $row];
     }

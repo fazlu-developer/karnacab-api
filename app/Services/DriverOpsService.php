@@ -321,11 +321,11 @@ class DriverOpsService
             'wallet' => $dash['wallet'],
             'withdrawalsEnabled' => true,
             'gstPercent' => app(RideSettingsService::class)->gstPercent(),
-            'withdrawals' => [
+            'withdrawals' => array_merge(app(RideSettingsService::class)->walletCashPolicy(), [
                 'supported' => true,
-                'minRupees' => 500,
+                'minRupees' => app(RideSettingsService::class)->driverWithdrawMinRupees(),
                 'items' => $items,
-            ],
+            ]),
         ];
     }
 

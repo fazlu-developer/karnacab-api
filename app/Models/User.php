@@ -22,6 +22,7 @@ class User extends Model
         'last_seen_at' => 'datetime',
         'location_updated_at' => 'datetime',
         'profile_completed_at' => 'datetime',
+        'session_epoch' => 'integer',
     ];
 
     public function driver(): HasOne
