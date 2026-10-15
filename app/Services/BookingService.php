@@ -139,7 +139,7 @@ class BookingService
         $booking = Booking::query()->create($this->filterColumns([
             'public_ref' => strtoupper(Str::random(8)),
             'customer_id' => $actor->id,
-            'district_id' => $dto['districtId'] ?? $actor->district_id,
+            'district_id' => $this->resolveDistrictId($dto, $actor),
             'product' => $dto['product'],
             'category' => $dto['category'],
             'status' => $status,
@@ -573,12 +573,15 @@ class BookingService
         $commissionPercent = (float) (DB::table('commission_rules')->where('active', 1)->orderBy('id')->value('percent') ?? 10);
         $commission = (int) round($totalPaise * ($commissionPercent / 100));
         $fleetShare = 0;
-        $fleetOwnerId = null;
+        $fleetPct = 0.0;
         $vehicleRow = $booking->vehicle_id
             ? DB::table('vehicles')->where('id', $booking->vehicle_id)->first()
             : ($driver->id ? DB::table('vehicles')->where('driver_id', $driver->id)->orderByDesc('id')->first() : null);
-        if ($vehicleRow && ! empty($vehicleRow->fleet_owner_id)) {
-            $fleetOwnerId = (int) $vehicleRow->fleet_owner_id;
+        $fleetOwnerId = (int) ($vehicleRow->fleet_owner_id ?? $driver->fleet_owner_id ?? 0);
+        if ($fleetOwnerId < 1) {
+            $fleetOwnerId = null;
+        }
+        if ($fleetOwnerId) {
             $fleetPct = app(RideSettingsService::class)->fleetOwnerCommissionPercent();
             if (Schema::hasTable('fleet_owners') && Schema::hasColumn('fleet_owners', 'commission_percent')) {
                 $own = DB::table('fleet_owners')->where('id', $fleetOwnerId)->value('commission_percent');
@@ -592,6 +595,7 @@ class BookingService
         if ($fleetShare > $commission) {
             $fleetShare = $commission;
         }
+        $platformShare = max(0, $commission - $fleetShare);
 
         $booking->update($this->filterColumns([
             'status' => BookingStatus::COMPLETED,
@@ -608,27 +612,31 @@ class BookingService
                 'commissionPaise' => $commission,
                 'driverEarningPaise' => $earning,
                 'fleetCommissionPaise' => $fleetShare,
+                'platformCommissionPaise' => $platformShare,
+                'fleetCommissionPercent' => $fleetPct,
                 'durationSeconds' => $duration,
                 'waitMinutes' => $wait,
             ]),
         ]));
         Driver::query()->where('id', $driver->id)->update(['duty_status' => 'online']);
         $payMode = strtoupper((string) ($booking->payment_mode ?? 'CASH'));
+        $collectNote = 'Cash collected from customer ₹'.number_format($totalPaise / 100, 0);
         if (in_array($payMode, ['CASH', 'COD', 'CASH_ON_DELIVERY'], true)) {
-            $this->debitDriverCommission((int) $driver->user_id, (int) $booking->id, $commission, $totalPaise);
             app(WalletAccountService::class)->recordCashTrip(
                 (int) $driver->user_id,
                 (int) $booking->id,
-                $earning,
+                $totalPaise,
                 $commission,
                 $totalPaise,
-                'Trip earning ₹'.number_format($earning / 100, 0),
+                $collectNote,
             );
+            $this->debitDriverCommission((int) $driver->user_id, (int) $booking->id, $commission, $totalPaise);
         } else {
-            $this->creditDriverWallet((int) $driver->user_id, (int) $booking->id, $earning, $commission, $totalPaise);
+            $this->creditDriverWallet((int) $driver->user_id, (int) $booking->id, $totalPaise, $commission, $totalPaise);
+            $this->debitDriverCommission((int) $driver->user_id, (int) $booking->id, $commission, $totalPaise);
         }
-        if ($fleetOwnerId && $fleetShare > 0) {
-            $this->creditFleetWallet($fleetOwnerId, (int) $booking->id, $fleetShare, $totalPaise);
+        if ($platformShare > 0) {
+            $this->creditPlatformWallet((int) $booking->id, $platformShare, $commission);
         }
         $this->debitCustomerWallet((int) $booking->customer_id, (int) $booking->id, $totalPaise, (string) ($booking->payment_mode ?? 'CASH'));
         try {
@@ -808,22 +816,52 @@ class BookingService
             'allowedActions' => $allowed,
             'fare' => [
                 'source' => 'server',
-                'totalPaise' => $isCustomer ? $total : $earningPaise,
-                'totalRupees' => ($isCustomer ? $total : $earningPaise) / 100,
-                'gstPaise' => $isCustomer ? ($snapshot['breakdown']['gstPaise'] ?? ($snapshot['final']['breakdown']['gstPaise'] ?? null)) : null,
-                'discountPaise' => $isCustomer ? ($snapshot['breakdown']['discountPaise'] ?? null) : null,
-                'commissionPaise' => $isCustomer ? $commissionPaise : null,
+                'totalPaise' => $total,
+                'totalRupees' => $total / 100,
+                'gstPaise' => $snapshot['breakdown']['gstPaise'] ?? ($snapshot['final']['breakdown']['gstPaise'] ?? null),
+                'discountPaise' => $snapshot['breakdown']['discountPaise'] ?? null,
+                'commissionPaise' => $commissionPaise,
+                'commissionRupees' => $commissionPaise / 100,
                 'driverEarningPaise' => $earningPaise,
                 'driverEarningRupees' => $earningPaise / 100,
                 'currency' => 'INR',
-                'breakdown' => $isCustomer ? ($snapshot['final']['breakdown'] ?? $snapshot['breakdown'] ?? null) : null,
+                'breakdown' => $snapshot['final']['breakdown'] ?? $snapshot['breakdown'] ?? null,
             ],
-            'estimatedFareRupees' => $isCustomer ? $total / 100 : $earningPaise / 100,
+            'estimatedFareRupees' => $total / 100,
+            'collectRupees' => $total / 100,
+            'commissionRupees' => $commissionPaise / 100,
             'estimatedEarningsRupees' => $earningPaise / 100,
             'driverEarningRupees' => $earningPaise / 100,
             'kind' => 'ride',
             'navigation' => $this->navigationPayload($row),
+            'wallet' => $this->driverWalletGate($actor, $total),
         ];
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function driverWalletGate(?User $actor, int $farePaise): ?array
+    {
+        if (! $actor || $actor->role !== 'DRIVER' || ! Schema::hasTable('wallets')) {
+            return null;
+        }
+        $wallet = DB::table('wallets')->where('owner_user_id', $actor->id)->where(function ($q) {
+            if (Schema::hasColumn('wallets', 'owner_type')) {
+                $q->where('owner_type', 'DRIVER');
+            }
+        })->orderBy('id')->first();
+        $gate = $this->settings->walletEligibility(
+            (int) ($wallet->balance_paise ?? 0),
+            $farePaise,
+            (int) ($wallet->joining_credit_paise ?? 0),
+            (int) ($wallet->frozen_paise ?? 0),
+        );
+        $gate['requiredRupees'] = ((int) $gate['requiredPaise']) / 100;
+        $gate['availableRupees'] = ((int) $gate['availablePaise']) / 100;
+        $gate['shortfallRupees'] = ((int) $gate['shortfallPaise']) / 100;
+
+        return $gate;
     }
 
     /**
@@ -1578,12 +1616,12 @@ class BookingService
                     'direction' => 'CREDIT',
                     'amount_paise' => $earningPaise,
                     'commission_paise' => $commissionPaise,
-                    'gross_paise' => $grossPaise,
+                    'gross_paise' => $grossPaise ?: $earningPaise,
                     'balance_before_paise' => $before,
                     'balance_after_paise' => $after,
                     'kind' => 'trip',
                     'status' => 'posted',
-                    'note' => 'Trip earning',
+                    'note' => 'Trip fare ₹'.number_format($earningPaise / 100, 0),
                     'created_at' => now(),
                 ]));
             }
@@ -1592,56 +1630,44 @@ class BookingService
 
     private function creditFleetWallet(int $fleetOwnerId, int $bookingId, int $amountPaise, int $grossPaise): void
     {
-        if ($amountPaise <= 0 || ! Schema::hasTable('wallets') || ! Schema::hasTable('fleet_owners')) {
+        if ($amountPaise <= 0 || ! Schema::hasTable('fleet_owners')) {
             return;
         }
         $userId = (int) DB::table('fleet_owners')->where('id', $fleetOwnerId)->value('user_id');
         if ($userId < 1) {
             return;
         }
-        $q = DB::table('wallets')->where('owner_user_id', $userId);
-        if (Schema::hasColumn('wallets', 'owner_type')) {
-            $q->whereIn('owner_type', ['FLEET', 'FLEET_OWNER']);
-        }
-        $wallet = $q->orderBy('id')->first();
-        if (! $wallet) {
-            $id = DB::table('wallets')->insertGetId($this->filterWallet([
-                'owner_user_id' => $userId,
-                'owner_type' => 'FLEET',
-                'balance_paise' => 0,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]));
-            $wallet = DB::table('wallets')->where('id', $id)->first();
-        }
-        if (! $wallet) {
+        app(WalletAccountService::class)->creditAccount(
+            $userId,
+            'FLEET_OWNER',
+            $bookingId,
+            $amountPaise,
+            $grossPaise,
+            'fleet_commission',
+            'Fleet owner 5% commission ₹'.number_format($amountPaise / 100, 0),
+            ['FLEET', 'FLEET_OWNER'],
+        );
+    }
+
+    private function creditPlatformWallet(int $bookingId, int $amountPaise, int $grossPaise): void
+    {
+        if ($amountPaise <= 0 || ! Schema::hasTable('users')) {
             return;
         }
-        $before = (int) $wallet->balance_paise;
-        $after = $before + $amountPaise;
-        DB::table('wallets')->where('id', $wallet->id)->update($this->filterWallet(['balance_paise' => $after, 'updated_at' => now()]));
-        if (Schema::hasTable('wallet_ledger')) {
-            $exists = DB::table('wallet_ledger')->where('booking_id', $bookingId)->where('wallet_id', $wallet->id)->where('kind', 'fleet_commission')->exists();
-            if (! $exists) {
-                DB::table('wallet_ledger')->insert($this->filterLedger([
-                    'public_ref' => 'FL'.strtoupper(Str::random(10)),
-                    'wallet_id' => $wallet->id,
-                    'booking_id' => $bookingId,
-                    'owner_user_id' => $userId,
-                    'account' => 'FLEET',
-                    'direction' => 'CREDIT',
-                    'amount_paise' => $amountPaise,
-                    'commission_paise' => $amountPaise,
-                    'gross_paise' => $grossPaise,
-                    'balance_before_paise' => $before,
-                    'balance_after_paise' => $after,
-                    'kind' => 'fleet_commission',
-                    'status' => 'posted',
-                    'note' => 'Fleet owner commission',
-                    'created_at' => now(),
-                ]));
-            }
+        $userId = (int) (DB::table('users')->whereIn('role', ['ADMIN', 'SUPER_ADMIN'])->orderBy('id')->value('id') ?? 0);
+        if ($userId < 1) {
+            return;
         }
+        app(WalletAccountService::class)->creditAccount(
+            $userId,
+            'PLATFORM',
+            $bookingId,
+            $amountPaise,
+            $grossPaise,
+            'platform_commission',
+            'Platform commission ₹'.number_format($amountPaise / 100, 0),
+            ['PLATFORM'],
+        );
     }
 
     /**
@@ -1655,5 +1681,32 @@ class BookingService
             fn ($key) => Schema::hasColumn('wallets', $key),
             ARRAY_FILTER_USE_KEY,
         );
+    }
+
+    /**
+     * @param  array<string, mixed>  $dto
+     */
+    private function resolveDistrictId(array $dto, User $actor): ?int
+    {
+        $id = isset($dto['districtId']) ? (int) $dto['districtId'] : ($actor->district_id ? (int) $actor->district_id : 0);
+        if ($id > 0) {
+            return $id;
+        }
+        if (! Schema::hasTable('districts')) {
+            return null;
+        }
+        $hay = strtolower(trim((string) (($dto['pickupText'] ?? $dto['pickup'] ?? '').' '.($dto['dropText'] ?? $dto['drop'] ?? ''))));
+        if ($hay === '') {
+            return null;
+        }
+        $rows = DB::table('districts')->orderByRaw('CHAR_LENGTH(name) desc')->get(['id', 'name']);
+        foreach ($rows as $row) {
+            $name = strtolower((string) $row->name);
+            if ($name !== '' && str_contains($hay, $name)) {
+                return (int) $row->id;
+            }
+        }
+
+        return null;
     }
 }

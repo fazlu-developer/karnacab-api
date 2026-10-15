@@ -29,7 +29,7 @@ class AuthenticateJwt
         }
         $tokenEpoch = (int) ($payload->sev ?? 0);
         $userEpoch = (int) ($user->session_epoch ?? 0);
-        if ($userEpoch > 0 && $tokenEpoch !== $userEpoch) {
+        if ($tokenEpoch !== $userEpoch) {
             return response()->json([
                 'message' => 'Session expired. Please sign in again.',
                 'statusCode' => 401,

@@ -52,6 +52,40 @@ class WalletAccountService
                 $table->timestamp('settled_at')->nullable();
                 $table->timestamps();
             });
+
+            return;
+        }
+        $adds = [];
+        foreach (['user_id', 'upi_or_account', 'transfer_ref', 'reviewed_by', 'reviewed_at', 'settled_at'] as $column) {
+            if (! Schema::hasColumn('wallet_withdrawals', $column)) {
+                $adds[] = $column;
+            }
+        }
+        if ($adds === []) {
+            return;
+        }
+        Schema::table('wallet_withdrawals', function ($table) use ($adds) {
+            if (in_array('user_id', $adds, true)) {
+                $table->unsignedBigInteger('user_id')->nullable();
+            }
+            if (in_array('upi_or_account', $adds, true)) {
+                $table->string('upi_or_account', 120)->nullable();
+            }
+            if (in_array('transfer_ref', $adds, true)) {
+                $table->string('transfer_ref', 64)->nullable();
+            }
+            if (in_array('reviewed_by', $adds, true)) {
+                $table->unsignedBigInteger('reviewed_by')->nullable();
+            }
+            if (in_array('reviewed_at', $adds, true)) {
+                $table->timestamp('reviewed_at')->nullable();
+            }
+            if (in_array('settled_at', $adds, true)) {
+                $table->timestamp('settled_at')->nullable();
+            }
+        });
+        if (in_array('user_id', $adds, true) && Schema::hasColumn('wallets', 'owner_user_id')) {
+            DB::statement('UPDATE wallet_withdrawals w INNER JOIN wallets wa ON wa.id = w.wallet_id SET w.user_id = wa.owner_user_id WHERE w.user_id IS NULL OR w.user_id = 0');
         }
     }
 
@@ -235,6 +269,77 @@ class WalletAccountService
         });
     }
 
+    /**
+     * @param  list<string>  $ownerAliases
+     */
+    public function creditAccount(
+        int $userId,
+        string $ownerType,
+        int $bookingId,
+        int $amountPaise,
+        int $grossPaise,
+        string $kind,
+        string $note,
+        array $ownerAliases = [],
+        ?string $paymentRef = null,
+    ): void {
+        if ($amountPaise <= 0 || $userId < 1) {
+            return;
+        }
+        $types = array_values(array_unique(array_filter(array_merge([$ownerType], $ownerAliases))));
+        $wallet = null;
+        if (Schema::hasTable('wallets') && Schema::hasColumn('wallets', 'owner_type')) {
+            $wallet = DB::table('wallets')
+                ->where('owner_user_id', $userId)
+                ->whereIn('owner_type', $types)
+                ->orderBy('id')
+                ->first();
+        }
+        $wallet = $wallet ?: $this->ensureWallet($userId, $ownerType);
+        if (! $wallet) {
+            return;
+        }
+        if (Schema::hasTable('wallet_ledger')) {
+            $dup = DB::table('wallet_ledger')->where('wallet_id', $wallet->id)->where('kind', $kind);
+            if ($paymentRef) {
+                $dup->where(function ($q) use ($paymentRef) {
+                    $q->where('public_ref', $paymentRef);
+                    if (Schema::hasColumn('wallet_ledger', 'payment_ref')) {
+                        $q->orWhere('payment_ref', $paymentRef);
+                    }
+                });
+            } elseif ($bookingId > 0) {
+                $dup->where('booking_id', $bookingId);
+            } else {
+                $dup = null;
+            }
+            if ($dup && $dup->exists()) {
+                return;
+            }
+        }
+        $before = (int) $wallet->balance_paise;
+        $after = $before + $amountPaise;
+        DB::table('wallets')->where('id', $wallet->id)->update($this->filter('wallets', [
+            'balance_paise' => $after,
+            'updated_at' => now(),
+        ]));
+        $this->ledger(
+            $wallet,
+            $userId,
+            $ownerType,
+            'CREDIT',
+            $amountPaise,
+            $before,
+            $after,
+            $kind,
+            $note,
+            $bookingId > 0 ? $bookingId : null,
+            $amountPaise,
+            $grossPaise,
+            $paymentRef,
+        );
+    }
+
     public function debitCommission(int $userId, int $bookingId, int $commissionPaise, int $grossPaise): void
     {
         if ($commissionPaise <= 0) {
@@ -266,8 +371,8 @@ class WalletAccountService
         }
         DB::table('wallets')->where('id', $wallet->id)->update($this->filter('wallets', $update));
         $note = $fromCredit > 0
-            ? 'Trip commission ₹'.number_format($commissionPaise / 100, 0).' (₹'.number_format($fromCredit / 100, 0).' from joining credit)'
-            : 'Admin commission on cash trip';
+            ? 'Platform commission ₹'.number_format($commissionPaise / 100, 0).' (₹'.number_format($fromCredit / 100, 0).' from joining credit)'
+            : 'Platform commission ₹'.number_format($commissionPaise / 100, 0);
         $this->ledger($wallet, $userId, 'DRIVER', 'DEBIT', $commissionPaise, $before, $after, 'commission', $note, $bookingId, $commissionPaise, $grossPaise);
     }
 
@@ -350,20 +455,21 @@ class WalletAccountService
         if ($exists) {
             return;
         }
+        $collectPaise = max(0, $grossPaise > 0 ? $grossPaise : $earningPaise);
         $balance = (int) $wallet->balance_paise;
         $this->ledger(
             $wallet,
             $userId,
             'DRIVER',
             'CREDIT',
-            max(0, $earningPaise),
+            $collectPaise,
             $balance,
             $balance,
             'cash_trip',
-            $note,
+            $note !== '' ? $note : 'Cash collected from customer ₹'.number_format($collectPaise / 100, 0),
             $bookingId,
             $commissionPaise,
-            $grossPaise,
+            $collectPaise,
         );
     }
 
@@ -380,6 +486,7 @@ class WalletAccountService
         ?int $bookingId = null,
         int $commissionPaise = 0,
         int $grossPaise = 0,
+        ?string $paymentRef = null,
     ): void {
         if ($paise <= 0 && $kind !== 'withdraw_hold') {
             return;
@@ -388,7 +495,8 @@ class WalletAccountService
             return;
         }
         DB::table('wallet_ledger')->insert($this->filter('wallet_ledger', [
-            'public_ref' => strtoupper(substr($kind, 0, 2)).strtoupper(Str::random(10)),
+            'public_ref' => $paymentRef ?: strtoupper(substr($kind, 0, 2)).strtoupper(Str::random(10)),
+            'payment_ref' => $paymentRef,
             'wallet_id' => $wallet->id,
             'booking_id' => $bookingId,
             'owner_user_id' => $userId,

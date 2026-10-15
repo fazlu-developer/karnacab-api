@@ -331,6 +331,7 @@ class AuthService
                 'created_at' => now(),
             ],
         );
+        $this->forgetPushDevices((int) $user->id, $token);
         $this->touchSeen($user);
 
         return ['ok' => true];
@@ -474,11 +475,49 @@ class AuthService
 
     public function issue(User $user): array
     {
+        $this->rotateDeviceSession($user);
+        $fresh = $user->fresh() ?? $user;
+
         return [
-            'accessToken' => JwtToken::encode((string) $user->id, $user->role, (int) ($user->session_epoch ?? 0)),
+            'accessToken' => JwtToken::encode((string) $fresh->id, $fresh->role, (int) ($fresh->session_epoch ?? 0)),
             'tokenType' => 'Bearer',
-            'user' => $this->present($user),
+            'user' => $this->present($fresh),
         ];
+    }
+
+    private function rotateDeviceSession(User $user): void
+    {
+        if (Schema::hasTable('users') && ! Schema::hasColumn('users', 'session_epoch')) {
+            Schema::table('users', function ($table) {
+                $table->unsignedInteger('session_epoch')->default(0);
+            });
+        }
+        if (! Schema::hasColumn('users', 'session_epoch')) {
+            $this->forgetPushDevices((int) $user->id);
+
+            return;
+        }
+        $epoch = ((int) ($user->session_epoch ?? 0)) + 1;
+        User::query()->where('id', $user->id)->update([
+            'session_epoch' => $epoch,
+            'updated_at' => now(),
+        ]);
+        $user->session_epoch = $epoch;
+        $this->forgetPushDevices((int) $user->id);
+    }
+
+    private function forgetPushDevices(int $userId, ?string $keepToken = null): void
+    {
+        foreach (['push_devices', 'device_tokens'] as $table) {
+            if (! Schema::hasTable($table) || ! Schema::hasColumn($table, 'user_id')) {
+                continue;
+            }
+            $query = DB::table($table)->where('user_id', $userId);
+            if ($keepToken !== null && $keepToken !== '') {
+                $query->where('token', '!=', $keepToken);
+            }
+            $query->delete();
+        }
     }
 
     public function uploadAvatar(User $user, array $data, $file = null): array

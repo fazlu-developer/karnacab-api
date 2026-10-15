@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\User;
 use App\Support\FleetOnboarding;
+use Carbon\Carbon;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -165,6 +166,7 @@ class OperatorFleetService
                 'todayCancelled' => (clone $cancelledToday)->count(),
                 'todayEarningsRupees' => ((int) (clone $completedToday)->sum('bookings.quote_paise')) / 100,
             ],
+            'vehicleFamilies' => app(VehicleCatalogService::class)->families(),
         ];
     }
 
@@ -174,7 +176,10 @@ class OperatorFleetService
         $rows = $this->vehicleRows($fleet);
         $onTrip = $this->activeTripDriverIds($rows);
 
-        return ['vehicles' => array_map(fn ($row) => $this->presentVehicle($row, $onTrip), $rows)];
+        return [
+            'vehicles' => array_map(fn ($row) => $this->presentVehicle($row, $onTrip), $rows),
+            'vehicleFamilies' => app(VehicleCatalogService::class)->families(),
+        ];
     }
 
     public function vehicle(User $actor, int $id): array
@@ -197,7 +202,9 @@ class OperatorFleetService
         $registration = strtoupper(preg_replace('/\s+/', '', (string) ($data['registrationNo'] ?? $data['registration_no'] ?? '')) ?? '');
         abort_unless((bool) preg_match('/^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$/', $registration), 422, 'Enter a valid registration number (BR01AB1234).');
         $category = strtoupper((string) ($data['category'] ?? $data['vehicleType'] ?? ''));
-        abort_unless(in_array($category, self::VEHICLE_TYPES, true), 422, 'Select a vehicle type.');
+        $catalog = app(VehicleCatalogService::class);
+        abort_unless($category !== '' && ($catalog->isVehicleKey($category) || in_array($category, self::VEHICLE_TYPES, true)), 422, 'Select a vehicle type.');
+        $family = strtoupper((string) ($data['family'] ?? $data['vehicleFamily'] ?? $catalog->familyBucket($category)));
         $brand = trim((string) ($data['make'] ?? $data['brand'] ?? ''));
         $model = trim((string) ($data['model'] ?? ''));
         $color = trim((string) ($data['color'] ?? ''));
@@ -209,7 +216,7 @@ class OperatorFleetService
         $documents = array_values(array_filter((array) ($data['documents'] ?? []), 'is_array'));
         $docTypes = array_map(fn ($doc) => strtoupper((string) ($doc['type'] ?? '')), $documents);
         $requiredDocs = ['RC', 'INSURANCE', 'POLLUTION', 'VEHICLE_PHOTO'];
-        if (! in_array($category, ['BIKE', 'E_RICKSHAW'], true)) {
+        if (! in_array($category, ['BIKE', 'SCOOTY', 'E_RICKSHAW'], true) && $family !== 'BIKE') {
             $requiredDocs[] = 'PERMIT';
         }
         $docLabels = [
@@ -238,6 +245,9 @@ class OperatorFleetService
         ];
         if (Schema::hasColumn('vehicles', 'state_id') && $territory['stateId'] > 0) {
             $payload['state_id'] = $territory['stateId'];
+        }
+        if ($family !== '' && Schema::hasColumn('vehicles', 'vehicle_family')) {
+            $payload['vehicle_family'] = $family;
         }
         $this->rememberFleetTerritory($fleet, $territory['stateId'], $territory['districtId']);
         try {
@@ -681,48 +691,125 @@ class OperatorFleetService
         return ['markers' => $markers];
     }
 
-    public function earnings(User $actor): array
+    /**
+     * @param  array{period?: string, offset?: int}  $filters
+     * @return array<string, mixed>
+     */
+    public function earnings(User $actor, array $filters = []): array
     {
         $fleet = $this->requireFleet($actor);
+        $this->settleDueWeeks($fleet);
+        $period = strtolower((string) ($filters['period'] ?? 'week'));
+        if (! in_array($period, ['day', 'week', 'month'], true)) {
+            $period = 'week';
+        }
+        $offset = max(0, (int) ($filters['offset'] ?? 0));
+        $window = $this->reportWindow($period, $offset);
+        $fleetPercent = $this->fleetPercent($fleet);
         $completed = $this->tripsQuery($fleet)->where('bookings.status', 'COMPLETED');
-        $today = now()->timezone('Asia/Kolkata')->startOfDay();
-        $week = now()->timezone('Asia/Kolkata')->startOfWeek();
-        $month = now()->timezone('Asia/Kolkata')->startOfMonth();
-        $grossToday = (int) (clone $completed)->where('bookings.updated_at', '>=', $today)->sum('bookings.quote_paise');
-        $grossWeek = (int) (clone $completed)->where('bookings.updated_at', '>=', $week)->sum('bookings.quote_paise');
-        $grossMonth = (int) (clone $completed)->where('bookings.updated_at', '>=', $month)->sum('bookings.quote_paise');
-        $grossTotal = (int) (clone $completed)->sum('bookings.quote_paise');
-        $percent = 10.0;
-        if (Schema::hasTable('commission_rules')) {
-            $rule = DB::table('commission_rules')->where('active', 1)->orderBy('id')->first();
-            if ($rule && isset($rule->percent)) {
-                $percent = (float) $rule->percent;
+        $periodRows = (clone $completed)
+            ->where('bookings.updated_at', '>=', $window['start'])
+            ->where('bookings.updated_at', '<=', $window['end'])
+            ->orderByDesc('bookings.id')
+            ->limit(80)
+            ->get();
+        $periodGross = 0;
+        $periodShare = 0;
+        $trips = [];
+        foreach ($periodRows as $row) {
+            $gross = (int) ($row->final_fare_paise ?? $row->quote_paise ?? 0);
+            $share = $this->fleetSharePaise($row, $fleetPercent);
+            $periodGross += $gross;
+            $periodShare += $share;
+            $trips[] = [
+                'id' => (string) $row->id,
+                'ref' => $row->public_ref ?? ('#'.$row->id),
+                'fareRupees' => $gross / 100,
+                'fleetRupees' => $share / 100,
+                'completedAt' => $row->updated_at,
+            ];
+        }
+        $allTimeGross = (int) (clone $completed)->sum('bookings.quote_paise');
+        $userId = (int) ($fleet->user_id ?? $actor->id);
+        $wallet = $this->fleetWallet($userId);
+        $credited = 0;
+        $paid = 0;
+        $ledger = [];
+        if ($wallet && Schema::hasTable('wallet_ledger')) {
+            $rows = DB::table('wallet_ledger')->where('wallet_id', $wallet->id)->orderByDesc('id')->limit(80)->get();
+            foreach ($rows as $row) {
+                $amount = (int) ($row->amount_paise ?? 0);
+                $dir = strtoupper((string) ($row->direction ?? ''));
+                $kind = (string) ($row->kind ?? '');
+                $at = Carbon::parse((string) $row->created_at)->timezone('Asia/Kolkata');
+                $ledgerEnd = $window['end']->copy()->addDay()->endOfDay();
+                $inPeriod = $at->betweenIncluded($window['start'], $ledgerEnd);
+                if ($dir === 'CREDIT' && in_array($kind, ['fleet_commission', 'fleet_week_settlement', 'commission'], true)) {
+                    $credited += $amount;
+                }
+                if ($dir === 'DEBIT' && in_array($kind, ['settlement_payout', 'payout', 'settlement'], true)) {
+                    $paid += $amount;
+                }
+                if (! $inPeriod) {
+                    continue;
+                }
+                $ledger[] = [
+                    'id' => (string) $row->id,
+                    'kind' => $kind,
+                    'direction' => strtolower($dir),
+                    'amountRupees' => $amount / 100,
+                    'note' => $row->note ?? '',
+                    'status' => $row->status ?? 'posted',
+                    'createdAt' => $row->created_at,
+                    'bookingId' => $row->booking_id,
+                ];
             }
         }
-        $commissionTotal = (int) round($grossTotal * 0.10);
-        $fleetCommission = (int) round($grossTotal * 0.05);
+        $balance = (int) ($wallet->balance_paise ?? 0);
+        $currentWeek = $this->reportWindow('week', 0);
+        $settleOn = $currentWeek['end']->copy()->addDay()->startOfDay();
+        $now = now()->timezone('Asia/Kolkata');
 
         return [
-            'todayRupees' => $grossToday / 100,
-            'weeklyRupees' => $grossWeek / 100,
-            'monthlyRupees' => $grossMonth / 100,
-            'totalRupees' => $grossTotal / 100,
-            'adminCommissionPercent' => 10,
-            'fleetCommissionPercent' => 5,
-            'commissionPercent' => 5,
-            'commissionRupees' => $fleetCommission / 100,
-            'adminCommissionRupees' => $commissionTotal / 100,
-            'fleetCommissionRupees' => $fleetCommission / 100,
-            'netRupees' => $fleetCommission / 100,
-            'pendingSettlementRupees' => $fleetCommission / 100,
-            'paidSettlementRupees' => 0,
+            'period' => $period,
+            'offset' => $offset,
+            'label' => $window['label'],
+            'from' => $window['start']->toDateString(),
+            'to' => $window['end']->toDateString(),
+            'hasPrevious' => true,
+            'hasNext' => $offset > 0,
+            'periodGrossRupees' => $periodGross / 100,
+            'periodTrips' => count($trips),
+            'periodFleetRupees' => $periodShare / 100,
+            'todayRupees' => $this->sumCompleted($fleet, $this->reportWindow('day', 0)) / 100,
+            'weeklyRupees' => $this->sumCompleted($fleet, $this->reportWindow('week', 0)) / 100,
+            'monthlyRupees' => $this->sumCompleted($fleet, $this->reportWindow('month', 0)) / 100,
+            'totalRupees' => $allTimeGross / 100,
+            'totalEarningRupees' => $allTimeGross / 100,
+            'fleetCommissionPercent' => $fleetPercent,
+            'commissionPercent' => $fleetPercent,
+            'commissionRupees' => $credited / 100,
+            'fleetCommissionRupees' => $credited / 100,
+            'netRupees' => $credited / 100,
+            'walletBalanceRupees' => $balance / 100,
+            'pendingSettlementRupees' => max(0, $periodShare) / 100,
+            'paidSettlementRupees' => $paid / 100,
+            'settlement' => [
+                'mode' => 'weekly',
+                'weekLabel' => $currentWeek['label'],
+                'creditOn' => $settleOn->toDateString(),
+                'status' => $now->lt($settleOn) ? 'credits_next_day_after_week' : 'week_closed',
+                'note' => 'Completed trips for a week are credited the next day after the week ends (Monday).',
+            ],
+            'trips' => $trips,
+            'ledger' => $ledger,
         ];
     }
 
-    public function reports(User $actor): array
+    public function reports(User $actor, array $filters = []): array
     {
         $dash = $this->dashboard($actor);
-        $earnings = $this->earnings($actor);
+        $earnings = $this->earnings($actor, $filters);
         $vehicles = $this->vehicles($actor)['vehicles'];
         $drivers = $this->drivers($actor)['drivers'];
         $bookings = $this->bookings($actor)['bookings'];
@@ -908,6 +995,155 @@ class OperatorFleetService
     private function driversQuery(object $fleet)
     {
         return DB::table('drivers')->where('drivers.fleet_owner_id', $fleet->id);
+    }
+
+    public function settleAllDueWeeks(): int
+    {
+        if (! Schema::hasTable('fleet_owners')) {
+            return 0;
+        }
+        $count = 0;
+        foreach (DB::table('fleet_owners')->orderBy('id')->get() as $fleet) {
+            $count += $this->settleDueWeeks($fleet);
+        }
+
+        return $count;
+    }
+
+    private function settleDueWeeks(object $fleet): int
+    {
+        $userId = (int) ($fleet->user_id ?? 0);
+        if ($userId < 1) {
+            return 0;
+        }
+        $pct = $this->fleetPercent($fleet);
+        $now = now()->timezone('Asia/Kolkata');
+        $posted = 0;
+        for ($offset = 1; $offset <= 12; $offset++) {
+            $window = $this->reportWindow('week', $offset);
+            if ($now->lt($window['end']->copy()->addDay()->startOfDay())) {
+                continue;
+            }
+            $ref = 'FW'.$fleet->id.'-'.$window['start']->isoWeekYear().'W'.$window['start']->isoWeek();
+            $share = 0;
+            $gross = 0;
+            $rows = $this->tripsQuery($fleet)
+                ->where('bookings.status', 'COMPLETED')
+                ->where('bookings.updated_at', '>=', $window['start'])
+                ->where('bookings.updated_at', '<=', $window['end'])
+                ->get();
+            $already = [];
+            if (Schema::hasTable('wallet_ledger')) {
+                $ids = $rows->pluck('id')->all();
+                if ($ids !== []) {
+                    $already = DB::table('wallet_ledger')
+                        ->whereIn('booking_id', $ids)
+                        ->whereIn('kind', ['fleet_commission', 'fleet_week_settlement'])
+                        ->pluck('booking_id')
+                        ->all();
+                }
+            }
+            $creditedIds = array_map('intval', $already);
+            foreach ($rows as $row) {
+                if (in_array((int) $row->id, $creditedIds, true)) {
+                    continue;
+                }
+                $gross += (int) ($row->final_fare_paise ?? $row->quote_paise ?? 0);
+                $share += $this->fleetSharePaise($row, $pct);
+            }
+            if ($share < 1) {
+                continue;
+            }
+            app(WalletAccountService::class)->creditAccount(
+                $userId,
+                'FLEET_OWNER',
+                0,
+                $share,
+                $gross,
+                'fleet_week_settlement',
+                'Week '.$window['label'].' completed trips — fleet commission credited next day',
+                ['FLEET', 'FLEET_OWNER'],
+                $ref,
+            );
+            $posted++;
+        }
+
+        return $posted;
+    }
+
+    /**
+     * @return array{start: Carbon, end: Carbon, label: string}
+     */
+    private function reportWindow(string $period, int $offset): array
+    {
+        $now = now()->timezone('Asia/Kolkata');
+        $offset = max(0, $offset);
+        if ($period === 'day') {
+            $start = $now->copy()->subDays($offset)->startOfDay();
+            $end = $start->copy()->endOfDay();
+            $label = $start->toFormattedDateString();
+        } elseif ($period === 'month') {
+            $start = $now->copy()->subMonthsNoOverflow($offset)->startOfMonth();
+            $end = $start->copy()->endOfMonth();
+            $label = $start->format('F Y');
+        } else {
+            $start = $now->copy()->startOfWeek(Carbon::MONDAY)->subWeeks($offset)->startOfDay();
+            $end = $start->copy()->endOfWeek(Carbon::SUNDAY)->endOfDay();
+            $label = $start->format('j M').' – '.$end->format('j M Y');
+        }
+
+        return ['start' => $start, 'end' => $end, 'label' => $label];
+    }
+
+    private function fleetPercent(object $fleet): float
+    {
+        $pct = app(RideSettingsService::class)->fleetOwnerCommissionPercent();
+        if (Schema::hasColumn('fleet_owners', 'commission_percent') && $fleet->commission_percent !== null && $fleet->commission_percent !== '') {
+            $pct = (float) $fleet->commission_percent;
+        }
+
+        return max(0, min(100, $pct));
+    }
+
+    private function fleetSharePaise(object $row, float $pct): int
+    {
+        $snap = $row->quote_snapshot ?? null;
+        if (is_string($snap)) {
+            $snap = json_decode($snap, true);
+        }
+        if (is_array($snap) && (int) ($snap['fleetCommissionPaise'] ?? 0) > 0) {
+            return (int) $snap['fleetCommissionPaise'];
+        }
+        $total = (int) ($row->final_fare_paise ?? $row->quote_paise ?? 0);
+        $commission = (int) ($row->commission_paise ?? 0);
+        $share = (int) round($total * ($pct / 100));
+        if ($commission > 0 && $share > $commission) {
+            $share = $commission;
+        }
+
+        return max(0, $share);
+    }
+
+    private function sumCompleted(object $fleet, array $window): int
+    {
+        return (int) $this->tripsQuery($fleet)
+            ->where('bookings.status', 'COMPLETED')
+            ->where('bookings.updated_at', '>=', $window['start'])
+            ->where('bookings.updated_at', '<=', $window['end'])
+            ->sum('bookings.quote_paise');
+    }
+
+    private function fleetWallet(int $userId): ?object
+    {
+        if ($userId < 1 || ! Schema::hasTable('wallets')) {
+            return null;
+        }
+        $q = DB::table('wallets')->where('owner_user_id', $userId);
+        if (Schema::hasColumn('wallets', 'owner_type')) {
+            $q->whereIn('owner_type', ['FLEET_OWNER', 'FLEET']);
+        }
+
+        return $q->orderBy('id')->first();
     }
 
     private function tripsQuery(object $fleet)

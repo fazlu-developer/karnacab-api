@@ -664,7 +664,7 @@ class PlatformController extends Controller
     {
         $data = $request->validate(['referralCode' => 'required|string|max:32']);
         $user = $request->user();
-        app(\App\Services\IncentiveService::class)->attachReferralCode($user, $data['referralCode']);
+        app(\App\Services\IncentiveService::class)->attachReferralCode($user, $data['referralCode'], true);
 
         return app(\App\Services\IncentiveService::class)->snapshot($user->fresh());
     }

@@ -243,8 +243,10 @@ class DriverOpsService
                 'dropText' => $row->drop_text,
                 'product' => $row->product,
                 'category' => $row->category,
-                'quotePaise' => (int) $row->quote_paise,
-                'quoteRupees' => ((int) $row->quote_paise) / 100,
+                'quotePaise' => (int) ($row->final_fare_paise ?? $row->quote_paise),
+                'quoteRupees' => ((int) ($row->final_fare_paise ?? $row->quote_paise)) / 100,
+                'collectRupees' => ((int) ($row->final_fare_paise ?? $row->quote_paise)) / 100,
+                'commissionRupees' => ((int) ($row->commission_paise ?? 0)) / 100,
                 'earningRupees' => ((int) ($row->driver_earning_paise ?? max(0, (int) ($row->final_fare_paise ?? $row->quote_paise) - (int) ($row->commission_paise ?? 0)))) / 100,
                 'scheduledAt' => optional($row->scheduled_at)?->toIso8601String(),
                 'updatedAt' => optional($row->updated_at)?->toIso8601String(),
@@ -263,6 +265,8 @@ class DriverOpsService
                 'category' => $row->category,
                 'quotePaise' => (int) ($row->quote_paise ?? 0),
                 'quoteRupees' => ((int) ($row->quote_paise ?? 0)) / 100,
+                'collectRupees' => ((int) ($row->quote_paise ?? 0)) / 100,
+                'commissionRupees' => ((int) ($row->commission_paise ?? max(0, (int) ($row->quote_paise ?? 0) - (int) ($row->driver_earning_paise ?? 0)))) / 100,
                 'earningRupees' => ((int) ($row->driver_earning_paise ?? (int) round(((int) ($row->quote_paise ?? 0)) * 0.9))) / 100,
                 'updatedAt' => $row->updated_at,
             ])->all();
@@ -291,16 +295,19 @@ class DriverOpsService
         if (Schema::hasTable('wallet_ledger')) {
             $cash = DB::table('wallet_ledger')
                 ->where('owner_user_id', $actor->id)
-                ->whereIn('kind', ['cash_trip', 'cash'])
+                ->whereIn('kind', ['cash_trip', 'cash', 'commission', 'trip'])
                 ->orderByDesc('id')
-                ->limit(40)
+                ->limit(80)
                 ->get()
                 ->map(fn ($row) => [
                     'id' => (string) $row->id,
                     'bookingId' => $row->booking_id ? (string) $row->booking_id : null,
                     'kind' => $row->kind,
+                    'direction' => strtoupper((string) ($row->direction ?? 'CREDIT')),
                     'note' => $row->note,
-                    'grossRupees' => ((int) $row->amount_paise) / 100,
+                    'grossRupees' => ((int) ($row->gross_paise ?? $row->amount_paise)) / 100,
+                    'amountRupees' => ((int) $row->amount_paise) / 100,
+                    'commissionRupees' => ((int) ($row->commission_paise ?? 0)) / 100,
                     'earningRupees' => ((int) $row->amount_paise) / 100,
                     'createdAt' => $row->created_at,
                 ])->all();

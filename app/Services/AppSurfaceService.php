@@ -1435,13 +1435,19 @@ class AppSurfaceService
 
     public function walletMe(User $actor): array
     {
-        $ownerType = $actor->role === 'DRIVER' ? 'DRIVER' : 'CUSTOMER';
+        $ownerType = match ($actor->role) {
+            'DRIVER' => 'DRIVER',
+            'FLEET_OWNER' => 'FLEET_OWNER',
+            'ADMIN', 'SUPER_ADMIN' => 'PLATFORM',
+            default => 'CUSTOMER',
+        };
         $row = null;
         if (Schema::hasTable('wallets')) {
             $q = DB::table('wallets')->where('owner_user_id', $actor->id);
             if (Schema::hasColumn('wallets', 'owner_type')) {
-                $q->where(function ($inner) use ($ownerType) {
-                    $inner->where('owner_type', $ownerType)->orWhereNull('owner_type');
+                $aliases = $ownerType === 'FLEET_OWNER' ? ['FLEET_OWNER', 'FLEET'] : [$ownerType];
+                $q->where(function ($inner) use ($aliases) {
+                    $inner->whereIn('owner_type', $aliases)->orWhereNull('owner_type');
                 });
             }
             $row = $q->orderByDesc('id')->first();
@@ -1460,9 +1466,6 @@ class AppSurfaceService
         $ledger = [];
         if ($row && Schema::hasTable('wallet_ledger')) {
             $q = DB::table('wallet_ledger')->where('wallet_id', $row->id);
-            if ($ownerType === 'DRIVER') {
-                $q->whereNotIn('kind', ['commission', 'fleet_commission', 'admin_commission']);
-            }
             $ledger = $q->orderByDesc('id')->limit(80)->get()->map(fn ($item) => [
                 'id' => (string) $item->id,
                 'transactionId' => $item->public_ref ?? ('WL'.$item->id),
@@ -1471,8 +1474,8 @@ class AppSurfaceService
                 'direction' => strtolower((string) ($item->direction ?? '')),
                 'amountPaise' => (int) ($item->amount_paise ?? 0),
                 'amountRupees' => ((int) ($item->amount_paise ?? 0)) / 100,
-                'commissionPaise' => $ownerType === 'DRIVER' ? 0 : (int) ($item->commission_paise ?? 0),
-                'commissionRupees' => $ownerType === 'DRIVER' ? 0 : ((int) ($item->commission_paise ?? 0)) / 100,
+                'commissionPaise' => (int) ($item->commission_paise ?? 0),
+                'commissionRupees' => ((int) ($item->commission_paise ?? 0)) / 100,
                 'balanceBeforeRupees' => ((int) ($item->balance_before_paise ?? 0)) / 100,
                 'balanceAfterRupees' => ((int) ($item->balance_after_paise ?? 0)) / 100,
                 'bookingId' => $item->booking_id ?? null,
@@ -1905,7 +1908,6 @@ class AppSurfaceService
             default => [],
         };
         $showOtp = $actor && in_array($actor->role, ['CUSTOMER', 'ADMIN', 'SUPER_ADMIN'], true);
-        $isDriver = $actor && $actor->role === 'DRIVER';
         $earningPaise = (int) ($row->driver_earning_paise ?? (int) round($total * 0.9));
 
         return [
@@ -1928,8 +1930,11 @@ class AppSurfaceService
             'pickupLng' => $row->pickup_lng !== null ? (float) $row->pickup_lng : null,
             'dropLat' => $row->drop_lat !== null ? (float) $row->drop_lat : null,
             'dropLng' => $row->drop_lng !== null ? (float) $row->drop_lng : null,
-            'quotePaise' => $isDriver ? $earningPaise : $total,
-            'quoteRupees' => ($isDriver ? $earningPaise : $total) / 100,
+            'quotePaise' => $total,
+            'quoteRupees' => $total / 100,
+            'estimatedFareRupees' => $total / 100,
+            'collectRupees' => $total / 100,
+            'commissionRupees' => max(0, $total - $earningPaise) / 100,
             'estimatedEarningsRupees' => $earningPaise / 100,
             'driverEarningRupees' => $earningPaise / 100,
             'paymentStatus' => $row->payment_status,
@@ -1937,8 +1942,10 @@ class AppSurfaceService
             'deliveryPin' => $showOtp && in_array($status, ['out_for_delivery', 'destination', 'in_transit'], true) ? $row->delivery_pin : ($actor && $actor->role === 'DRIVER' ? null : $row->delivery_pin),
             'driverId' => $row->driver_id ? (string) $row->driver_id : null,
             'fare' => [
-                'totalPaise' => $isDriver ? $earningPaise : $total,
-                'totalRupees' => ($isDriver ? $earningPaise : $total) / 100,
+                'totalPaise' => $total,
+                'totalRupees' => $total / 100,
+                'commissionPaise' => max(0, $total - $earningPaise),
+                'commissionRupees' => max(0, $total - $earningPaise) / 100,
                 'driverEarningPaise' => $earningPaise,
                 'driverEarningRupees' => $earningPaise / 100,
                 'currency' => 'INR',

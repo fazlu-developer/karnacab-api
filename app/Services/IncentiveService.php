@@ -35,26 +35,38 @@ class IncentiveService
         return '';
     }
 
-    public function attachReferralCode(User $user, ?string $code): void
+    public function attachReferralCode(User $user, ?string $code, bool $requireValid = false): void
     {
         if (! Schema::hasColumn('users', 'referred_by_user_id')) {
+            abort_if($requireValid, 422, 'Referral codes are not available right now.');
+
             return;
         }
         if (! empty($user->referred_by_user_id)) {
+            abort_if($requireValid, 422, 'A referral code is already saved on this account.');
+
             return;
         }
         $code = strtoupper(trim((string) $code));
         if ($code === '') {
+            abort_if($requireValid, 422, 'Enter a referral code.');
+
             return;
         }
         $referrer = User::query()->where('referral_code', $code)->first();
         if (! $referrer || (int) $referrer->id === (int) $user->id) {
+            abort_if($requireValid, 422, 'Enter a valid referral code.');
+
             return;
         }
         if ($referrer->role !== $user->role) {
+            abort_if($requireValid, 422, 'Use a referral code from the same app.');
+
             return;
         }
         if ($user->phone && $referrer->phone && (string) $user->phone === (string) $referrer->phone) {
+            abort_if($requireValid, 422, 'Enter a valid referral code.');
+
             return;
         }
         User::query()->where('id', $user->id)->update(['referred_by_user_id' => $referrer->id]);
@@ -100,6 +112,7 @@ class IncentiveService
             'referralCode' => $code,
             'shareLink' => $link,
             'role' => $actor->role,
+            'canApplyReferral' => Schema::hasColumn('users', 'referred_by_user_id') && empty($actor->referred_by_user_id),
             'joiningBonusRupees' => (int) $joining['amountRupees'],
             'joiningBonusEnabled' => ! empty($joining['enabled']),
             'referralBonusRupees' => (int) $referral['amountRupees'],

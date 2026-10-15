@@ -185,8 +185,12 @@ class RideSettingsService
         $cover = $cash + max(0, $joiningCreditPaise);
         $eligible = $cover >= $required || ($joiningCreditPaise >= $commission && $commission > 0) || ($required <= 0);
 
+        $shortfall = $eligible ? 0 : max(0, $required - $cover);
+
         return [
             'requiredPaise' => $required,
+            'availablePaise' => $cover,
+            'shortfallPaise' => $shortfall,
             'commissionPaise' => $commission,
             'commissionPercent' => $percent,
             'eligible' => $eligible,

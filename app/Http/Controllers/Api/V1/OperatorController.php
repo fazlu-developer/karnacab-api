@@ -121,12 +121,18 @@ class OperatorController extends Controller
 
     public function earnings(Request $request)
     {
-        return $this->fleet->earnings($request->user());
+        return $this->fleet->earnings($request->user(), [
+            'period' => $request->input('period', 'week'),
+            'offset' => $request->integer('offset'),
+        ]);
     }
 
     public function reports(Request $request)
     {
-        return $this->fleet->reports($request->user());
+        return $this->fleet->reports($request->user(), [
+            'period' => $request->input('period', 'week'),
+            'offset' => $request->integer('offset'),
+        ]);
     }
 
     public function documents(Request $request)
