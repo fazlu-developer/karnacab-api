@@ -32,7 +32,7 @@ class FareService
             $query->where('rental_hours', $hours);
         }
         $rule = $query->orderByDesc('district_id')->first();
-        if (! $rule && in_array($product, ['ONE_WAY', 'SCHEDULE', 'AIRPORT', 'RAILWAY'], true)) {
+        if (! $rule && in_array($product, ['ONE_WAY', 'SCHEDULE', 'AIRPORT', 'RAILWAY', 'PARCEL'], true)) {
             $rule = DB::table('fare_rules')->where('active', 1)->where('product', 'LOCAL_CAB')->where('category', $category)->orderByDesc('district_id')->first();
         }
         if (! $rule && $product === 'MULTI_STOP') {
@@ -68,12 +68,12 @@ class FareService
         $preNight = $basePaise + $distancePaise + $extraPaise + $waitingPaise + $driverAllowPaise + $nightStayPaise + $rentalExtraPaise + $stopPaise;
         $nightPaise = ! empty($input['night']) ? (int) round(($preNight * $rule->night_percent) / 100) : 0;
         $taxable = $preNight + $nightPaise;
-        $toll = $rule->apply_toll ? (int) ($input['tollPaise'] ?? 0) : 0;
-        $parking = $rule->apply_parking ? (int) ($input['parkingPaise'] ?? 0) : 0;
+        $toll = 0;
+        $parking = 0;
         $gstBase = $rule->apply_gst_to_base ? $taxable : 0;
         $gstPct = (float) ($rule->gst_percent ?? app(RideSettingsService::class)->gstPercent());
         $gstPaise = (int) round(($gstBase * $gstPct) / 100);
-        $beforeDiscount = $taxable + $toll + $parking + $gstPaise;
+        $beforeDiscount = $taxable + $gstPaise;
         $discountPaise = min($beforeDiscount, (int) $rule->discount_paise + (int) round(($beforeDiscount * $rule->discount_percent) / 100));
         $totalPaise = max(0, $beforeDiscount - $discountPaise);
 
@@ -105,6 +105,7 @@ class FareService
             'listRupees' => $beforeDiscount / 100,
             'discountRupees' => $discountPaise / 100,
             'note' => 'Quote from admin fare_rules. Driver is not assigned.',
+            'extrasNote' => 'Toll tax and parking are extra. You pay them separately; they are not included in this fare.',
         ];
     }
 

@@ -239,6 +239,7 @@ class DriverOpsService
                 'id' => (string) $row->id,
                 'publicRef' => $row->public_ref,
                 'status' => $row->status,
+                'lifecycle' => \App\Support\BookingStatus::lifecycle((string) $row->status),
                 'pickupText' => $row->pickup_text,
                 'dropText' => $row->drop_text,
                 'product' => $row->product,

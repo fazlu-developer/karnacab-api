@@ -29,7 +29,7 @@ class ServiceArea
         }
 
         $stateId = self::stateIdFor($detected);
-        $districtId = self::districtIdNear($lat, $lng, $stateId);
+        $districtId = DistrictLocator::resolve($lat, $lng, $address, $stateId);
         $hasFix = $lat !== null && $lng !== null;
 
         return [
@@ -306,24 +306,6 @@ class ServiceArea
                 return null;
             }
             $id = DB::table('states')->where('name', 'like', $canonical.'%')->value('id');
-
-            return $id ? (int) $id : null;
-        } catch (Throwable) {
-            return null;
-        }
-    }
-
-    private static function districtIdNear(?float $lat, ?float $lng, ?int $stateId): ?int
-    {
-        if (! $stateId) {
-            return null;
-        }
-        try {
-            if (! Schema::hasTable('districts')) {
-                return null;
-            }
-            $q = DB::table('districts')->where('state_id', $stateId)->orderBy('name');
-            $id = $q->value('id');
 
             return $id ? (int) $id : null;
         } catch (Throwable) {

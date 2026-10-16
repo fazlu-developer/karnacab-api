@@ -91,6 +91,7 @@ Route::middleware('jwt')->group(function () {
     Route::post('/v1/places/recent', function (Request $request) {
         return app(PlatformController::class)->placesSave($request, 'RECENT');
     });
+    Route::delete('/v1/places/recent', [PlatformController::class, 'placesClearRecent']);
     Route::delete('/v1/places/{id}', [PlatformController::class, 'placesDelete']);
 
     Route::post('/v1/bookings', [PlatformController::class, 'bookingsCreate']);

@@ -371,6 +371,13 @@ class PlatformController extends Controller
         return ['ok' => true];
     }
 
+    public function placesClearRecent(Request $request)
+    {
+        UserPlace::query()->where('user_id', $request->user()->id)->where('kind', 'RECENT')->delete();
+
+        return ['ok' => true];
+    }
+
     public function bookingsCreate(Request $request)
     {
         return $this->bookings->create($request->user(), $request->all());
@@ -859,9 +866,9 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
         return $this->surface->parcelQuoteOptions($request->all());
     }
 
-    public function parcelsOne(string $id)
+    public function parcelsOne(Request $request, string $id)
     {
-        return $this->surface->parcelOne($id);
+        return $this->surface->parcelOne($id, $request->user());
     }
 
     public function parcelsPay(Request $request, string $id)

@@ -674,7 +674,7 @@ class AppSurfaceService
             });
         }
 
-        return ['parcels' => $q->limit(100)->get()->map(fn ($row) => $this->presentParcel($row))->all()];
+        return ['parcels' => $q->limit(100)->get()->map(fn ($row) => $this->presentParcel($row, $actor))->all()];
     }
 
     public function parcelCreate(User $actor, array $data): array
@@ -728,7 +728,7 @@ class AppSurfaceService
         );
         $id = DB::table('parcel_shipments')->insertGetId($payload);
 
-        return $this->presentParcel(DB::table('parcel_shipments')->where('id', $id)->first());
+        return $this->presentParcel(DB::table('parcel_shipments')->where('id', $id)->first(), $actor);
     }
 
     public function parcelOne(string $id, ?User $actor = null): array
@@ -753,7 +753,28 @@ class AppSurfaceService
             'updated_at' => now(),
         ]);
 
-        return $this->parcelOne($id, $actor);
+        $out = $this->parcelOne($id, $actor);
+        try {
+            $fresh = DB::table('parcel_shipments')->where('id', $id)->first();
+            if ($fresh && $fresh->pickup_lat && $fresh->pickup_lng) {
+                $out['booking'] = $this->bookings->create($actor, [
+                    'product' => 'PARCEL',
+                    'lockProduct' => true,
+                    'category' => $fresh->category ?? 'BIKE',
+                    'pickupText' => $fresh->pickup_text ?? 'Pickup',
+                    'dropText' => $fresh->drop_text ?? 'Drop',
+                    'pickupLat' => $fresh->pickup_lat,
+                    'pickupLng' => $fresh->pickup_lng,
+                    'dropLat' => $fresh->drop_lat,
+                    'dropLng' => $fresh->drop_lng,
+                    'distanceKm' => $fresh->distance_km ?? 1,
+                    'paymentMode' => $method,
+                ]);
+            }
+        } catch (\Throwable) {
+        }
+
+        return $out;
     }
 
     public function parcelAccept(User $actor, string $id): array
@@ -1031,9 +1052,9 @@ class AppSurfaceService
             }
             $lineBase = $per * $count;
             $lineAllow = ((int) ($unit['driverAllowPaise'] ?? 0)) * $count;
-            $lineToll = ((int) ($unit['tollPaise'] ?? 0)) * $count;
+            $lineToll = 0;
             $lineGst = ((int) ($unit['gstPaise'] ?? 0)) * $count;
-            $lineTotal = $lineBase + $lineAllow + $lineToll + $lineGst;
+            $lineTotal = $lineBase + $lineAllow + $lineGst;
             $quoted[] = array_merge($unit, [
                 'category' => $unit['category'] ?? $line['category'],
                 'count' => $count,
@@ -1055,7 +1076,7 @@ class AppSurfaceService
             }
             $options[] = array_merge($meta, $unit);
         }
-        $total = $base + $allow + $toll + $gst;
+        $total = $base + $allow + $gst;
         $advance = 30;
         $advRow = Schema::hasTable('system_settings') ? DB::table('system_settings')->where('key', 'bulk_advance_percent')->first() : null;
         if ($advRow?->value !== null && is_numeric($advRow->value)) {
@@ -1072,7 +1093,7 @@ class AppSurfaceService
             'driverAllowPaise' => $allow,
             'tollPaise' => $toll,
             'gstPaise' => $gst,
-            'subtotalPaise' => $base + $allow + $toll,
+            'subtotalPaise' => $base + $allow,
             'totalPaise' => $total,
             'totalRupees' => $total / 100,
             'advancePaise' => (int) round($total * ($advance / 100)),
@@ -1199,7 +1220,7 @@ class AppSurfaceService
         }
         $gstPct = (float) ($plan['gstPercent'] ?? 5);
         $gst = (int) round(($base + $allow) * ($gstPct / 100));
-        $total = $base + $allow + $toll + $gst;
+        $total = $base + $allow + $gst;
 
         return [
             'tripKind' => $this->bulkTripKind($data),
@@ -1585,7 +1606,7 @@ class AppSurfaceService
         if ($rule) {
             $per = $this->bulkRuleUnitPaise($rule);
             $allow = (int) ($rule->driver_allow_paise ?? 0);
-            $toll = (int) ($rule->toll_parking_paise ?? $rule->toll_paise ?? 0);
+            $toll = 0;
             $gstPct = (float) ($rule->gst_percent ?? 5);
             $gst = (int) round(($per + $allow) * ($gstPct / 100));
 
@@ -1630,15 +1651,15 @@ class AppSurfaceService
         $total = (int) ($quote['totalPaise'] ?? 0);
         $gst = (int) ($bd['gstPaise'] ?? 0);
         $allow = (int) ($bd['driverAllowPaise'] ?? 0);
-        $toll = (int) (($bd['tollPaise'] ?? 0) + ($bd['parkingPaise'] ?? 0));
-        $per = max(0, $total - $gst - $allow - $toll);
+        $toll = 0;
+        $per = max(0, $total - $gst - $allow);
 
         return array_merge($meta, [
             'category' => $display,
             'perCabPaise' => $per > 0 ? $per : $total,
             'perCabRupees' => ($per > 0 ? $per : $total) / 100,
             'driverAllowPaise' => $allow,
-            'tollPaise' => $toll,
+            'tollPaise' => 0,
             'gstPaise' => $gst,
             'billedKm' => $quote['billedKm'] ?? null,
             'source' => 'fare_rules',
@@ -1895,6 +1916,30 @@ class AppSurfaceService
 
     public function presentParcel(object $row, ?User $actor = null): array
     {
+        if (Schema::hasTable('parcel_shipments')) {
+            if (! Schema::hasColumn('parcel_shipments', 'pickup_otp')) {
+                Schema::table('parcel_shipments', function ($table) {
+                    $table->string('pickup_otp', 8)->nullable();
+                });
+            }
+            if (! Schema::hasColumn('parcel_shipments', 'delivery_pin')) {
+                Schema::table('parcel_shipments', function ($table) {
+                    $table->string('delivery_pin', 8)->nullable();
+                });
+            }
+        }
+        $pickupOtp = trim((string) ($row->pickup_otp ?? ''));
+        $deliveryPin = trim((string) ($row->delivery_pin ?? ''));
+        if ($pickupOtp === '' && Schema::hasColumn('parcel_shipments', 'pickup_otp')) {
+            $pickupOtp = (string) random_int(1000, 9999);
+            DB::table('parcel_shipments')->where('id', $row->id)->update(['pickup_otp' => $pickupOtp]);
+            $row->pickup_otp = $pickupOtp;
+        }
+        if ($deliveryPin === '' && Schema::hasColumn('parcel_shipments', 'delivery_pin')) {
+            $deliveryPin = (string) random_int(1000, 9999);
+            DB::table('parcel_shipments')->where('id', $row->id)->update(['delivery_pin' => $deliveryPin]);
+            $row->delivery_pin = $deliveryPin;
+        }
         $total = (int) ($row->quote_paise ?? 0);
         $status = strtolower((string) $row->status);
         $pickupUrl = ($row->pickup_lat && $row->pickup_lng)
@@ -1911,7 +1956,8 @@ class AppSurfaceService
             'created', 'paid' => ['accept', 'reject'],
             default => [],
         };
-        $showOtp = $actor && in_array($actor->role, ['CUSTOMER', 'ADMIN', 'SUPER_ADMIN'], true);
+        $ownsParcel = $actor && (int) $actor->id === (int) ($row->customer_id ?? 0);
+        $showOtp = $ownsParcel || ($actor && in_array($actor->role, ['ADMIN', 'SUPER_ADMIN'], true));
         $earningPaise = (int) ($row->driver_earning_paise ?? (int) round($total * 0.9));
 
         return [
@@ -1942,8 +1988,12 @@ class AppSurfaceService
             'estimatedEarningsRupees' => $earningPaise / 100,
             'driverEarningRupees' => $earningPaise / 100,
             'paymentStatus' => $row->payment_status,
-            'pickupOtp' => $showOtp ? $row->pickup_otp : null,
-            'deliveryPin' => $showOtp && in_array($status, ['out_for_delivery', 'destination', 'in_transit'], true) ? $row->delivery_pin : ($actor && $actor->role === 'DRIVER' ? null : $row->delivery_pin),
+            'pickupOtp' => $showOtp && ! in_array($status, ['picked_up', 'in_transit', 'destination', 'out_for_delivery', 'delivered', 'cancelled'], true)
+                ? $pickupOtp
+                : null,
+            'deliveryPin' => $showOtp && in_array($status, ['picked_up', 'in_transit', 'destination', 'out_for_delivery'], true)
+                ? $deliveryPin
+                : null,
             'driverId' => $row->driver_id ? (string) $row->driver_id : null,
             'fare' => [
                 'totalPaise' => $total,

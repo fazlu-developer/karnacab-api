@@ -113,9 +113,18 @@ class CmsCatalogService
 
     public function catalog(): array
     {
-        $services = CatalogService::query()->where('active', 1)->orderBy('sort_order')->get();
-        $ride = $services->where('service_group', 'RIDE')->values();
-        $parcel = $services->where('service_group', 'PARCEL')->values();
+        $services = CatalogService::query()
+            ->where(function ($query) {
+                $query->where('active', 1)->orWhere('active', true);
+            })
+            ->orderBy('sort_order')
+            ->orderBy('title')
+            ->get()
+            ->filter(fn ($row) => (int) ($row->active ?? 0) === 1)
+            ->values();
+        $home = $services->reject(fn ($row) => str_starts_with(strtolower((string) ($row->slug ?? '')), 'send-'))->values();
+        $ride = $home->filter(fn ($row) => strtoupper((string) ($row->service_group ?? '')) !== 'PARCEL')->values();
+        $parcel = $home->filter(fn ($row) => strtoupper((string) ($row->service_group ?? '')) === 'PARCEL')->values();
         $packages = DB::table('travel_packages')->where('status', 'PUBLISHED')->orderBy('id')->get();
         $districts = DB::table('districts')->orderBy('name')->get(['id', 'name', 'code']);
 
@@ -124,6 +133,7 @@ class CmsCatalogService
                 ['key' => 'ride', 'title' => 'KarnaRide'],
                 ['key' => 'parcel', 'title' => 'Parcel'],
             ],
+            'homeServices' => $home->map(fn ($row) => $this->service($row))->all(),
             'rideServices' => $ride->map(fn ($row) => $this->service($row))->all(),
             'parcelServices' => $parcel->map(fn ($row) => $this->service($row))->all(),
             'promo' => $this->json(DB::table('system_settings')->where('key', 'cms_home_promo')->value('value')),
@@ -303,7 +313,8 @@ class CmsCatalogService
 
     private function service($row): array
     {
-        $slug = (string) $row->slug;
+        $slug = (string) ($row->slug ?? '');
+        $categoryKey = strtoupper((string) ($row->category_key ?? ''));
 
         return [
             'id' => $row->id,
@@ -311,13 +322,14 @@ class CmsCatalogService
             'title' => $row->title,
             'subtitle' => $row->subtitle,
             'group' => $row->service_group,
+            'categoryKey' => $categoryKey,
             'iconKey' => $row->icon_key ?? null,
             'imageUrl' => $this->publicUpload($row->getAttributes()['image_url'] ?? null),
             'badge' => $row->badge ?? null,
-            'key' => strtoupper(str_replace('-', '_', $slug)),
-            'homeMode' => $this->homeMode($slug),
+            'key' => $categoryKey !== '' ? $categoryKey : strtoupper(str_replace('-', '_', $slug)),
+            'homeMode' => $this->homeMode($slug, $categoryKey),
             'sortOrder' => (int) ($row->sort_order ?? 0),
-            'active' => (bool) $row->active,
+            'active' => (int) ($row->active ?? 0) === 1,
         ];
     }
 
@@ -342,9 +354,9 @@ class CmsCatalogService
         return rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnaride.in'), '/').'/'.ltrim($value, '/');
     }
 
-    private function homeMode(string $slug): string
+    private function homeMode(string $slug, string $categoryKey = ''): string
     {
-        return match ($slug) {
+        $fromSlug = match ($slug) {
             'trip', 'city-ride', 'ride' => 'ride',
             'intercity', 'one-way', 'outstation-one-way' => 'one_way',
             'round-trip', 'round-way', 'outstation-round-trip' => 'round_way',
@@ -357,6 +369,25 @@ class CmsCatalogService
             'travel', 'travel-tours' => 'travel',
             'bulk', 'bulk-booking' => 'bulk',
             'corporate', 'corporate-travel', 'seniors' => 'corporate',
+            default => '',
+        };
+        if ($fromSlug !== '') {
+            return $fromSlug;
+        }
+
+        return match (strtoupper($categoryKey)) {
+            'CITY_RIDE', 'LOCAL_CAB' => 'ride',
+            'ONE_WAY' => 'one_way',
+            'ROUND_WAY' => 'round_way',
+            'RENTAL' => 'rental',
+            'SCHEDULE' => 'schedule',
+            'RAILWAY' => 'railway',
+            'AIRPORT' => 'airport',
+            'MULTI_STOP' => 'multi_stop',
+            'PARCEL' => 'parcel',
+            'TRAVEL' => 'travel',
+            'BULK' => 'bulk',
+            'CORPORATE' => 'corporate',
             default => str_replace('-', '_', $slug),
         };
     }

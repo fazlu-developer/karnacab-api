@@ -9,6 +9,7 @@ use App\Models\Driver;
 use App\Models\DriverDocument;
 use App\Models\User;
 use App\Support\BookingProductSchema;
+use App\Support\FareCommissionSplit;
 use App\Support\BookingStatus;
 use App\Support\Geo;
 use App\Support\ServiceArea;
@@ -56,11 +57,15 @@ class BookingService
         $distanceKm = (float) ($resolved['distanceKm'] ?? $dto['distanceKm'] ?? Geo::haversineKm($pickupLat, $pickupLng, $dropLat, $dropLng));
         $dto['distanceKm'] = $distanceKm;
         $dto['product'] = FareService::cityOrOutstation((string) ($dto['product'] ?? 'LOCAL_CAB'), $distanceKm);
+        $districtId = $this->resolveDistrictId($dto + [
+            'pickupLat' => $pickupLat,
+            'pickupLng' => $pickupLng,
+        ], $actor);
         $quote = $this->fares->quote([
             'product' => $dto['product'],
             'category' => $dto['category'],
             'distanceKm' => $distanceKm,
-            'districtId' => $dto['districtId'] ?? $actor->district_id,
+            'districtId' => $districtId,
             'hours' => $dto['hours'] ?? null,
             'night' => $dto['night'] ?? false,
             'stopCount' => isset($dto['stops']) ? count($dto['stops']) : ($dto['stopCount'] ?? 0),
@@ -103,16 +108,19 @@ class BookingService
             }
         }
 
-        $timeout = 600;
         $radius = $this->settings->radiusKm();
         $product = strtoupper((string) ($dto['product'] ?? 'LOCAL_CAB'));
+        $timeout = self::searchesNearbyNow($product) ? 600 : $this->settings->requestTimeoutSeconds();
         $scheduledAt = null;
-        if (! empty($dto['scheduledAt'])) {
+        if (! empty($dto['scheduledAt']) && ! self::searchesNearbyNow($product)) {
             try {
                 $scheduledAt = \Illuminate\Support\Carbon::parse($dto['scheduledAt']);
             } catch (\Throwable) {
                 $scheduledAt = null;
             }
+        }
+        if (self::searchesNearbyNow($product)) {
+            $dto['scheduledAt'] = null;
         }
         $futureSchedule = $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(5));
         $driverDispatch = self::driverCanAccept($product) && ! $futureSchedule;
@@ -127,7 +135,7 @@ class BookingService
             (string) $dto['category'],
             $radius,
             false,
-            isset($dto['districtId']) ? (int) $dto['districtId'] : ($actor->district_id ? (int) $actor->district_id : null),
+            $districtId,
             (string) ($dto['product'] ?? 'LOCAL_CAB'),
         ) : [];
         $mode = $this->normalizePaymentMode($dto['paymentMode'] ?? $dto['payment_mode'] ?? 'CASH');
@@ -139,7 +147,7 @@ class BookingService
         $booking = Booking::query()->create($this->filterColumns([
             'public_ref' => strtoupper(Str::random(8)),
             'customer_id' => $actor->id,
-            'district_id' => $this->resolveDistrictId($dto, $actor),
+            'district_id' => $districtId,
             'product' => $dto['product'],
             'category' => $dto['category'],
             'status' => $status,
@@ -408,9 +416,14 @@ class BookingService
         return $this->present($booking, $actor);
     }
 
+    public static function searchesNearbyNow(string $product): bool
+    {
+        return in_array(strtoupper($product), ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY'], true);
+    }
+
     public static function driverCanAccept(string $product): bool
     {
-        return in_array(strtoupper($product), ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'SCHEDULE'], true);
+        return self::searchesNearbyNow($product);
     }
 
     public function cancel(User $actor, string $id, array $data = []): array
@@ -572,7 +585,6 @@ class BookingService
         $actualKm = (float) ($booking->actual_distance_km ?: $trackedKm);
         $commissionPercent = (float) (DB::table('commission_rules')->where('active', 1)->orderBy('id')->value('percent') ?? 10);
         $commission = (int) round($totalPaise * ($commissionPercent / 100));
-        $fleetShare = 0;
         $fleetPct = 0.0;
         $vehicleRow = $booking->vehicle_id
             ? DB::table('vehicles')->where('id', $booking->vehicle_id)->first()
@@ -581,21 +593,17 @@ class BookingService
         if ($fleetOwnerId < 1) {
             $fleetOwnerId = null;
         }
-        if ($fleetOwnerId) {
-            $fleetPct = app(RideSettingsService::class)->fleetOwnerCommissionPercent();
-            if (Schema::hasTable('fleet_owners') && Schema::hasColumn('fleet_owners', 'commission_percent')) {
-                $own = DB::table('fleet_owners')->where('id', $fleetOwnerId)->value('commission_percent');
-                if ($own !== null && $own !== '') {
-                    $fleetPct = (float) $own;
-                }
+        if ($fleetOwnerId && Schema::hasTable('fleet_owners') && Schema::hasColumn('fleet_owners', 'commission_percent')) {
+            $own = DB::table('fleet_owners')->where('id', $fleetOwnerId)->value('commission_percent');
+            if ($own !== null && $own !== '') {
+                $fleetPct = (float) $own;
             }
-            $fleetShare = (int) round($totalPaise * (max(0, min(100, $fleetPct)) / 100));
         }
+        $split = FareCommissionSplit::split($totalPaise, $commission, $fleetPct);
+        $fleetShare = $split['fleetPaise'];
+        $platformShare = $split['platformPaise'];
+        $districtShare = $split['districtHeadPaise'];
         $earning = max(0, $totalPaise - $commission);
-        if ($fleetShare > $commission) {
-            $fleetShare = $commission;
-        }
-        $platformShare = max(0, $commission - $fleetShare);
 
         $booking->update($this->filterColumns([
             'status' => BookingStatus::COMPLETED,
@@ -605,6 +613,9 @@ class BookingService
             'wait_minutes' => $wait,
             'final_fare_paise' => $totalPaise,
             'commission_paise' => $commission,
+            'platform_commission_paise' => $platformShare,
+            'district_head_commission_paise' => $districtShare,
+            'fleet_commission_paise' => $fleetShare,
             'driver_earning_paise' => $earning,
             'quote_snapshot' => array_merge($snapshot, [
                 'final' => $quote,
@@ -613,7 +624,8 @@ class BookingService
                 'driverEarningPaise' => $earning,
                 'fleetCommissionPaise' => $fleetShare,
                 'platformCommissionPaise' => $platformShare,
-                'fleetCommissionPercent' => $fleetPct,
+                'districtHeadCommissionPaise' => $districtShare,
+                'fleetCommissionPercent' => $split['fleetPercent'],
                 'durationSeconds' => $duration,
                 'waitMinutes' => $wait,
             ]),
@@ -637,6 +649,12 @@ class BookingService
         }
         if ($platformShare > 0) {
             $this->creditPlatformWallet((int) $booking->id, $platformShare, $commission);
+        }
+        if ($fleetOwnerId && $fleetShare > 0) {
+            $this->creditFleetWallet((int) $fleetOwnerId, (int) $booking->id, $fleetShare, $commission);
+        }
+        if ($districtShare > 0) {
+            $this->creditDistrictWallet($booking->district_id ? (int) $booking->district_id : null, (int) $booking->id, $districtShare, $commission);
         }
         $this->debitCustomerWallet((int) $booking->customer_id, (int) $booking->id, $totalPaise, (string) ($booking->payment_mode ?? 'CASH'));
         try {
@@ -1111,7 +1129,7 @@ class BookingService
         $rows = Booking::query()
             ->where('status', BookingStatus::SEARCHING)
             ->whereNull('driver_id')
-            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'SCHEDULE'])
+            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY'])
             ->orderByDesc('id')
             ->limit(20)
             ->get();
@@ -1166,7 +1184,7 @@ class BookingService
             ->whereIn('id', $ids)
             ->where('status', BookingStatus::SEARCHING)
             ->whereNull('driver_id')
-            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'SCHEDULE'])
+            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY'])
             ->orderByDesc('id')
             ->get()
             ->map(function (Booking $row) use ($actor, $driver) {
@@ -1657,7 +1675,7 @@ class BookingService
             $amountPaise,
             $grossPaise,
             'fleet_commission',
-            'Fleet owner 5% commission ₹'.number_format($amountPaise / 100, 0),
+            'Fleet cut from the district 4% ₹'.number_format($amountPaise / 100, 0),
             ['FLEET', 'FLEET_OWNER'],
         );
     }
@@ -1683,6 +1701,32 @@ class BookingService
         );
     }
 
+    private function creditDistrictWallet(?int $districtId, int $bookingId, int $amountPaise, int $grossPaise): void
+    {
+        if ($amountPaise <= 0 || ! $districtId || ! Schema::hasTable('users')) {
+            return;
+        }
+        $userId = (int) (DB::table('users')
+            ->where('role', 'DISTRICT_HEAD')
+            ->where('district_id', $districtId)
+            ->where('status', 'ACTIVE')
+            ->orderBy('id')
+            ->value('id') ?? 0);
+        if ($userId < 1) {
+            return;
+        }
+        app(WalletAccountService::class)->creditAccount(
+            $userId,
+            'DISTRICT_HEAD',
+            $bookingId,
+            $amountPaise,
+            $grossPaise,
+            'district_head_commission',
+            'District Head share ₹'.number_format($amountPaise / 100, 0),
+            ['DISTRICT_HEAD'],
+        );
+    }
+
     /**
      * @param  array<string, mixed>  $row
      * @return array<string, mixed>
@@ -1701,23 +1745,19 @@ class BookingService
      */
     private function resolveDistrictId(array $dto, User $actor): ?int
     {
-        $id = isset($dto['districtId']) ? (int) $dto['districtId'] : ($actor->district_id ? (int) $actor->district_id : 0);
-        if ($id > 0) {
-            return $id;
+        $pickup = (string) ($dto['pickupText'] ?? $dto['pickup'] ?? '');
+        $lat = isset($dto['pickupLat']) ? (float) $dto['pickupLat'] : (isset($dto['pickup_lat']) ? (float) $dto['pickup_lat'] : null);
+        $lng = isset($dto['pickupLng']) ? (float) $dto['pickupLng'] : (isset($dto['pickup_lng']) ? (float) $dto['pickup_lng'] : null);
+        $stateId = $actor->state_id ? (int) $actor->state_id : null;
+        $fromPickup = \App\Support\DistrictLocator::resolve($lat, $lng, $pickup, $stateId);
+        if ($fromPickup) {
+            return $fromPickup;
         }
-        if (! Schema::hasTable('districts')) {
-            return null;
+        if (isset($dto['districtId']) && (int) $dto['districtId'] > 0) {
+            return (int) $dto['districtId'];
         }
-        $hay = strtolower(trim((string) (($dto['pickupText'] ?? $dto['pickup'] ?? '').' '.($dto['dropText'] ?? $dto['drop'] ?? ''))));
-        if ($hay === '') {
-            return null;
-        }
-        $rows = DB::table('districts')->orderByRaw('CHAR_LENGTH(name) desc')->get(['id', 'name']);
-        foreach ($rows as $row) {
-            $name = strtolower((string) $row->name);
-            if ($name !== '' && str_contains($hay, $name)) {
-                return (int) $row->id;
-            }
+        if ($actor->district_id) {
+            return (int) $actor->district_id;
         }
 
         return null;

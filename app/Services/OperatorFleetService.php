@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\User;
+use App\Support\FareCommissionSplit;
 use App\Support\FleetOnboarding;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
@@ -1097,31 +1098,38 @@ class OperatorFleetService
 
     private function fleetPercent(object $fleet): float
     {
-        $pct = app(RideSettingsService::class)->fleetOwnerCommissionPercent();
         if (Schema::hasColumn('fleet_owners', 'commission_percent') && $fleet->commission_percent !== null && $fleet->commission_percent !== '') {
-            $pct = (float) $fleet->commission_percent;
+            return min(FareCommissionSplit::DISTRICT_PERCENT, max(0, (float) $fleet->commission_percent));
+        }
+        if (Schema::hasTable('system_settings')) {
+            $stored = DB::table('system_settings')->where('key', 'fleet_cut_percent_'.$fleet->id)->value('value');
+            if (is_numeric($stored)) {
+                return min(FareCommissionSplit::DISTRICT_PERCENT, max(0, (float) $stored));
+            }
         }
 
-        return max(0, min(100, $pct));
+        return 0.0;
     }
 
     private function fleetSharePaise(object $row, float $pct): int
     {
+        if (Schema::hasColumn('bookings', 'fleet_commission_paise') && isset($row->fleet_commission_paise)) {
+            return (int) $row->fleet_commission_paise;
+        }
         $snap = $row->quote_snapshot ?? null;
         if (is_string($snap)) {
             $snap = json_decode($snap, true);
         }
-        if (is_array($snap) && (int) ($snap['fleetCommissionPaise'] ?? 0) > 0) {
+        if (is_array($snap) && isset($snap['fleetCommissionPaise']) && is_numeric($snap['fleetCommissionPaise'])) {
             return (int) $snap['fleetCommissionPaise'];
         }
         $total = (int) ($row->final_fare_paise ?? $row->quote_paise ?? 0);
         $commission = (int) ($row->commission_paise ?? 0);
-        $share = (int) round($total * ($pct / 100));
-        if ($commission > 0 && $share > $commission) {
-            $share = $commission;
+        if ($commission < 1 && $total > 0) {
+            $commission = (int) round($total * FareCommissionSplit::TOTAL_PERCENT / 100);
         }
 
-        return max(0, $share);
+        return FareCommissionSplit::split($total, $commission, $pct)['fleetPaise'];
     }
 
     private function sumCompleted(object $fleet, array $window): int
