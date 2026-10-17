@@ -185,6 +185,7 @@ class DriverOpsService
                 $lng = $actor->last_lng !== null ? (float) $actor->last_lng : null;
                 $radius = app(\App\Services\RideSettingsService::class)->radiusKm();
                 $dismissals = app(OfferDismissal::class);
+                $hasBookingLink = Schema::hasColumn('parcel_shipments', 'booking_id');
                 $parcels = DB::table('parcel_shipments')
                     ->whereNull('driver_id')
                     ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
@@ -192,7 +193,10 @@ class DriverOpsService
                     ->orderByDesc('id')
                     ->limit(20)
                     ->get()
-                    ->filter(function ($row) use ($driver, $lat, $lng, $radius, $dismissals) {
+                    ->filter(function ($row) use ($driver, $lat, $lng, $radius, $dismissals, $hasBookingLink) {
+                        if ($hasBookingLink && ! empty($row->booking_id)) {
+                            return false;
+                        }
                         if ($driver && $dismissals->hidden((int) $driver->id, 'parcel', (string) $row->id)) {
                             return false;
                         }

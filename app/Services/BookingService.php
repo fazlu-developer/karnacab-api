@@ -112,17 +112,20 @@ class BookingService
         $product = strtoupper((string) ($dto['product'] ?? 'LOCAL_CAB'));
         $timeout = self::searchesNearbyNow($product) ? 600 : $this->settings->requestTimeoutSeconds();
         $scheduledAt = null;
-        if (! empty($dto['scheduledAt']) && ! self::searchesNearbyNow($product)) {
+        $keepFlightTime = in_array($product, ['AIRPORT', 'RAILWAY'], true);
+        if (! empty($dto['scheduledAt']) && (! self::searchesNearbyNow($product) || $keepFlightTime)) {
             try {
                 $scheduledAt = \Illuminate\Support\Carbon::parse($dto['scheduledAt']);
             } catch (\Throwable) {
                 $scheduledAt = null;
             }
         }
-        if (self::searchesNearbyNow($product)) {
+        if (self::searchesNearbyNow($product) && ! $keepFlightTime) {
             $dto['scheduledAt'] = null;
+        } elseif ($scheduledAt !== null) {
+            $dto['scheduledAt'] = $scheduledAt->toDateTimeString();
         }
-        $futureSchedule = $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(5));
+        $futureSchedule = ! $keepFlightTime && $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(5));
         $driverDispatch = self::driverCanAccept($product) && ! $futureSchedule;
         if ($product === 'RENTAL' && empty($dto['scheduledAt'])) {
             $dto['scheduledAt'] = now()->addHour()->toIso8601String();
@@ -266,18 +269,36 @@ class BookingService
             $driverUser = $driver?->user;
         }
 
+        $location = $driverUser && $driverUser->last_lat !== null ? [
+            'lat' => (float) $driverUser->last_lat,
+            'lng' => (float) $driverUser->last_lng,
+            'heading' => $driverUser->last_heading ?? null,
+            'recordedAt' => optional($driverUser->location_updated_at)?->toIso8601String(),
+            'stale' => $driverUser->location_updated_at
+                ? $driverUser->location_updated_at->lt(now()->subSeconds($this->settings->locationStaleSeconds()))
+                : true,
+        ] : null;
+        $onTrip = in_array($booking->status, [BookingStatus::TRIP_STARTED, BookingStatus::OTP_VERIFIED, BookingStatus::LEGACY_STARTED, 'ONGOING'], true);
+        $targetLat = $onTrip ? $booking->drop_lat : $booking->pickup_lat;
+        $targetLng = $onTrip ? $booking->drop_lng : $booking->pickup_lng;
+        $remainingKm = null;
+        $etaMinutes = null;
+        if ($location && $targetLat !== null && $targetLng !== null) {
+            $remainingKm = Geo::haversineKm((float) $location['lat'], (float) $location['lng'], (float) $targetLat, (float) $targetLng);
+            $etaMinutes = max(1, (int) ceil(($remainingKm / 25) * 60));
+        }
+
         return [
             'booking' => $presented,
             'driver' => $presented['driver'] ?? null,
-            'location' => $driverUser && $driverUser->last_lat !== null ? [
-                'lat' => (float) $driverUser->last_lat,
-                'lng' => (float) $driverUser->last_lng,
-                'heading' => $driverUser->last_heading ?? null,
-                'recordedAt' => optional($driverUser->location_updated_at)?->toIso8601String(),
-                'stale' => $driverUser->location_updated_at
-                    ? $driverUser->location_updated_at->lt(now()->subSeconds($this->settings->locationStaleSeconds()))
-                    : true,
+            'location' => $location,
+            'target' => $targetLat !== null && $targetLng !== null ? [
+                'lat' => (float) $targetLat,
+                'lng' => (float) $targetLng,
+                'kind' => $onTrip ? 'drop' : 'pickup',
             ] : null,
+            'remainingKm' => $remainingKm,
+            'etaMinutes' => $etaMinutes,
         ];
     }
 
@@ -345,6 +366,7 @@ class BookingService
 
         abort_unless($assigned, 409, 'Booking has already been accepted by another driver.');
         $booking = Booking::query()->findOrFail($id);
+        $this->syncLinkedParcel($booking, 'assigned');
         Log::info('booking.accepted', ['bookingId' => $booking->id, 'driverId' => $driver->id]);
         $presented = $this->present($booking, $actor);
         $noticeBooking = $booking;
@@ -482,6 +504,7 @@ class BookingService
             'otp_verified_at' => now(),
             'trip_started_at' => now(),
         ]));
+        $this->syncLinkedParcel($booking, 'picked_up');
         Log::info('booking.otp_verified', ['bookingId' => $booking->id]);
 
         return $this->present($booking->fresh(), $actor);
@@ -534,6 +557,7 @@ class BookingService
                 'status' => BookingStatus::DRIVER_ARRIVED,
                 'arrived_at' => now(),
             ]));
+            $this->syncLinkedParcel($booking, 'arrived');
             $this->push->notifyUsers(
                 [(int) $booking->customer_id],
                 'Driver has arrived',
@@ -630,6 +654,7 @@ class BookingService
                 'waitMinutes' => $wait,
             ]),
         ]));
+        $this->syncLinkedParcel($booking, 'delivered');
         Driver::query()->where('id', $driver->id)->update(['duty_status' => 'online']);
         $payMode = strtoupper((string) ($booking->payment_mode ?? 'CASH'));
         $collectNote = 'Cash collected from customer ₹'.number_format($totalPaise / 100, 0);
@@ -968,6 +993,21 @@ class BookingService
     /**
      * @return array<string, mixed>|null
      */
+    private function syncLinkedParcel(Booking $booking, string $parcelStatus): void
+    {
+        if (strtoupper((string) $booking->product) !== 'PARCEL' || ! Schema::hasTable('parcel_shipments')) {
+            return;
+        }
+        if (! Schema::hasColumn('parcel_shipments', 'booking_id')) {
+            return;
+        }
+        DB::table('parcel_shipments')->where('booking_id', $booking->id)->update([
+            'driver_id' => $booking->driver_id,
+            'status' => $parcelStatus,
+            'updated_at' => now(),
+        ]);
+    }
+
     private function customerPayload(Booking $row, ?User $actor): ?array
     {
         $customer = User::query()->find($row->customer_id);

@@ -113,6 +113,7 @@ class CmsCatalogService
 
     public function catalog(): array
     {
+        app(\App\Services\VehicleCatalogService::class)->ensureVehicleCategoriesColumn();
         $services = CatalogService::query()
             ->where(function ($query) {
                 $query->where('active', 1)->orWhere('active', true);
@@ -330,6 +331,7 @@ class CmsCatalogService
             'homeMode' => $this->homeMode($slug, $categoryKey),
             'sortOrder' => (int) ($row->sort_order ?? 0),
             'active' => (int) ($row->active ?? 0) === 1,
+            'vehicleKeys' => app(\App\Services\VehicleCatalogService::class)->keysFromService($row),
         ];
     }
 

@@ -757,7 +757,7 @@ class AppSurfaceService
         try {
             $fresh = DB::table('parcel_shipments')->where('id', $id)->first();
             if ($fresh && $fresh->pickup_lat && $fresh->pickup_lng) {
-                $out['booking'] = $this->bookings->create($actor, [
+                $created = $this->bookings->create($actor, [
                     'product' => 'PARCEL',
                     'lockProduct' => true,
                     'category' => $fresh->category ?? 'BIKE',
@@ -770,6 +770,16 @@ class AppSurfaceService
                     'distanceKm' => $fresh->distance_km ?? 1,
                     'paymentMode' => $method,
                 ]);
+                $bookingId = $created['id'] ?? null;
+                if ($bookingId) {
+                    $this->ensureParcelBookingColumn();
+                    DB::table('parcel_shipments')->where('id', $id)->update(['booking_id' => $bookingId]);
+                    if (! empty($fresh->pickup_otp)) {
+                        DB::table('bookings')->where('id', $bookingId)->update(['start_otp' => $fresh->pickup_otp]);
+                    }
+                    $created['startOtp'] = $fresh->pickup_otp;
+                }
+                $out['booking'] = $created;
             }
         } catch (\Throwable) {
         }
@@ -780,11 +790,25 @@ class AppSurfaceService
     public function parcelAccept(User $actor, string $id): array
     {
         $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
+        $this->ensureParcelBookingColumn();
+        $row = DB::table('parcel_shipments')->where('id', $id)->first();
+        abort_unless($row, 404, 'Parcel not found');
         DB::table('parcel_shipments')->where('id', $id)->update([
             'driver_id' => $driver->id,
             'status' => 'assigned',
             'updated_at' => now(),
         ]);
+        if (! empty($row->booking_id)) {
+            DB::table('bookings')
+                ->where('id', $row->booking_id)
+                ->whereNull('driver_id')
+                ->update(array_filter([
+                    'driver_id' => $driver->id,
+                    'status' => 'DRIVER_ACCEPTED',
+                    'start_otp' => $row->pickup_otp ?: null,
+                    'updated_at' => now(),
+                ], fn ($value) => $value !== null));
+        }
 
         return $this->parcelOne($id, $actor);
     }
@@ -825,14 +849,55 @@ class AppSurfaceService
             'deliver' => 'delivered',
             'delivered' => 'delivered',
         ];
-        $status = $map[$action] ?? $action;
+        $current = strtolower((string) $row->status);
+        if ($action === 'arrive' && in_array($current, ['assigned', 'paid', 'created'], true)) {
+            $status = 'arrived';
+        } else {
+            $status = $map[$action] ?? $action;
+        }
         $patch = ['status' => $status, 'updated_at' => now()];
+        $this->syncParcelBooking($row, $status);
         if ($status === 'delivered') {
             $this->settleParcel($row, $actor);
         }
         DB::table('parcel_shipments')->where('id', $id)->update($patch);
 
         return $this->parcelOne($id, $actor);
+    }
+
+    private function ensureParcelBookingColumn(): void
+    {
+        if (! Schema::hasTable('parcel_shipments') || Schema::hasColumn('parcel_shipments', 'booking_id')) {
+            return;
+        }
+        Schema::table('parcel_shipments', function ($table) {
+            $table->unsignedBigInteger('booking_id')->nullable()->index();
+        });
+    }
+
+    private function syncParcelBooking(object $row, string $status): void
+    {
+        $this->ensureParcelBookingColumn();
+        $fresh = DB::table('parcel_shipments')->where('id', $row->id)->first();
+        $bookingId = $fresh->booking_id ?? null;
+        if (! $bookingId) {
+            return;
+        }
+        $bookingStatus = match ($status) {
+            'assigned' => 'DRIVER_ACCEPTED',
+            'arrived' => 'DRIVER_ARRIVED',
+            'picked_up' => 'TRIP_STARTED',
+            'delivered' => 'COMPLETED',
+            'cancelled' => 'CUSTOMER_CANCELLED',
+            default => null,
+        };
+        if ($bookingStatus === null) {
+            return;
+        }
+        DB::table('bookings')->where('id', $bookingId)->update([
+            'status' => $bookingStatus,
+            'updated_at' => now(),
+        ]);
     }
 
     private function settleParcel(object $row, ?User $actor): void
@@ -1949,7 +2014,8 @@ class AppSurfaceService
             ? 'https://www.google.com/maps/dir/?api=1&destination='.$row->drop_lat.','.$row->drop_lng.'&travelmode=driving'
             : null;
         $actions = match ($status) {
-            'assigned' => ['verify_otp', 'cancel'],
+            'assigned' => ['arrive', 'verify_otp', 'cancel'],
+            'arrived' => ['verify_otp', 'cancel'],
             'picked_up' => ['transit'],
             'in_transit' => ['arrive', 'out_for_delivery'],
             'destination', 'out_for_delivery' => ['deliver'],
