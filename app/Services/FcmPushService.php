@@ -23,8 +23,12 @@ class FcmPushService
                 ->get(['user_id', 'online', 'duty_status'])
                 ->filter(function ($row) {
                     $duty = strtolower((string) $row->duty_status);
+                    if (in_array($duty, ['offline', 'off', 'inactive'], true)) {
+                        return true;
+                    }
+                    $onDuty = in_array($duty, ['online', 'available', 'on_trip', 'on_delivery'], true);
 
-                    return (int) $row->online !== 1 || ! in_array($duty, ['online', 'available'], true);
+                    return (int) $row->online !== 1 && ! $onDuty;
                 })
                 ->pluck('user_id')
                 ->map(fn ($id) => (int) $id)
@@ -103,9 +107,10 @@ class FcmPushService
             $payloadData['imageUrl'] = $imageUrl;
         }
         $silent = ($data['silent'] ?? '') === '1' || ($data['event'] ?? '') === 'accepted';
+        $bookingAlert = ! $silent && (($data['event'] ?? '') === 'new_booking' || ($data['type'] ?? '') === 'booking_offer');
         $channel = $silent
             ? 'karnacab_silent'
-            : ((str_contains((string) ($data['type'] ?? ''), 'booking') || ($data['event'] ?? '') === 'new_booking') ? 'karnacab_booking' : 'karnacab_default');
+            : ($bookingAlert ? 'karnacab_booking' : 'karnacab_default');
         $androidNotification = [
             'channel_id' => $channel,
             'notification_priority' => 'PRIORITY_HIGH',
@@ -120,31 +125,34 @@ class FcmPushService
         if ($imageUrl) {
             $androidNotification['image'] = $imageUrl;
         }
+        $android = ['priority' => 'HIGH'];
+        if (! $bookingAlert) {
+            $android['notification'] = $androidNotification;
+        }
         $message = [
-            'message' => [
+            'message' => array_filter([
                 'token' => $token,
-                'notification' => array_filter([
+                'notification' => $bookingAlert ? null : array_filter([
                     'title' => $title,
                     'body' => $body,
                     'image' => $imageUrl,
                 ]),
                 'data' => $payloadData,
-                'android' => [
-                    'priority' => 'HIGH',
-                    'notification' => $androidNotification,
-                ],
+                'android' => $android,
                 'apns' => [
+                    'headers' => ['apns-priority' => $bookingAlert ? '10' : '5'],
                     'payload' => [
                         'aps' => array_filter([
                             'alert' => ['title' => $title, 'body' => $body],
-                            'sound' => $silent ? null : 'default',
+                            'sound' => $silent ? null : ($bookingAlert ? 'default' : 'default'),
                             'badge' => 1,
                             'mutable-content' => 1,
+                            'content-available' => $bookingAlert ? 1 : null,
                         ], fn ($value) => $value !== null),
                     ],
                     'fcm_options' => array_filter(['image' => $imageUrl]),
                 ],
-            ],
+            ], fn ($value) => $value !== null),
         ];
         try {
             $response = Http::withToken($access)

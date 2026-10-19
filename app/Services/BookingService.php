@@ -204,29 +204,27 @@ class BookingService
         $opsTitle = $driverDispatch
             ? 'New ride request'
             : 'Assign a driver · '.str_replace('_', ' ', $product);
-        app()->terminating(function () use ($booking, $matches, $driverDispatch, $opsTitle) {
-            try {
-                if ($driverDispatch && $matches !== []) {
-                    $this->writeOffers($booking, $matches);
-                    $this->push->notifyUsers(
-                        array_map(fn ($row) => (int) ($row['userId'] ?? 0), $matches),
-                        'New KarnaRide booking',
-                        trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
-                        [
-                            'type' => 'booking_offer',
-                            'event' => 'new_booking',
-                            'bookingId' => (string) $booking->id,
-                        ],
-                    );
-                }
-                $this->notifyOps($booking, $opsTitle);
-            } catch (\Throwable $e) {
-                Log::warning('booking.notify_failed', [
-                    'bookingId' => $booking->id,
-                    'error' => $e->getMessage(),
-                ]);
+        try {
+            if ($driverDispatch && $matches !== []) {
+                $this->writeOffers($booking, $matches);
+                $this->push->notifyUsers(
+                    array_map(fn ($row) => (int) ($row['userId'] ?? 0), $matches),
+                    'New KarnaRide booking',
+                    trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
+                    [
+                        'type' => 'booking_offer',
+                        'event' => 'new_booking',
+                        'bookingId' => (string) $booking->id,
+                    ],
+                );
             }
-        });
+            $this->notifyOps($booking, $opsTitle);
+        } catch (\Throwable $e) {
+            Log::warning('booking.notify_failed', [
+                'bookingId' => $booking->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
 
         return $presented;
     }
@@ -440,7 +438,7 @@ class BookingService
 
     public static function searchesNearbyNow(string $product): bool
     {
-        return in_array(strtoupper($product), ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY'], true);
+        return in_array(strtoupper($product), ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP'], true);
     }
 
     public static function driverCanAccept(string $product): bool
@@ -576,7 +574,7 @@ class BookingService
         }
 
         if (in_array($action, ['complete', 'completed'], true)) {
-            $result = $this->complete($actor, $id, $otp);
+            $result = $this->complete($actor, $id, $otp, isset($extra['durationSeconds']) ? (int) $extra['durationSeconds'] : null);
             app(DriverSessionService::class)->finishPendingLogout($actor);
 
             return $result;
@@ -585,7 +583,7 @@ class BookingService
         abort(422, 'Unsupported booking action');
     }
 
-    public function complete(User $actor, string $id, ?string $otp = null): array
+    public function complete(User $actor, string $id, ?string $otp = null, ?int $durationSeconds = null): array
     {
         $booking = $this->assignedToDriver($actor, $id);
         abort_unless(in_array($booking->status, [BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', BookingStatus::OTP_VERIFIED], true), 422, 'Trip has not started.');
@@ -594,19 +592,24 @@ class BookingService
         $pin = preg_replace('/\D+/', '', (string) $otp) ?? '';
         abort_unless($pin !== '' && hash_equals((string) $booking->end_otp, $pin), 422, 'Invalid completion PIN');
 
-        $started = $booking->trip_started_at ?: $booking->updated_at;
-        $duration = max(1, now()->diffInSeconds($started));
-        $wait = 0;
-        if ($booking->arrived_at && $booking->trip_started_at) {
-            $wait = max(0, (int) floor($booking->arrived_at->diffInSeconds($booking->trip_started_at) / 60));
+        $startedAt = $booking->trip_started_at;
+        $duration = $startedAt ? max(1, (int) abs($startedAt->diffInSeconds(now()))) : 1;
+        if ($durationSeconds !== null && $durationSeconds > $duration) {
+            $duration = min($durationSeconds, 86400);
         }
-        $trackedKm = (float) ($booking->actual_distance_km ?: 0);
+        $wait = 0;
+        if ($booking->arrived_at && $startedAt) {
+            $wait = max(0, (int) floor(abs($booking->arrived_at->diffInSeconds($startedAt)) / 60));
+        }
+        $trackedKm = $this->drivenKmFromLogs($booking);
         $this->applyRouteFare($booking, $trackedKm, 0, $wait);
         $booking->refresh();
         $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
         $quote = is_array($snapshot['live'] ?? null) ? $snapshot['live'] : $snapshot;
         $totalPaise = (int) ($quote['totalPaise'] ?? $booking->quote_paise);
-        $actualKm = (float) ($booking->actual_distance_km ?: $trackedKm);
+        $snapshotBeforeFare = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        $bookedKm = (float) ($snapshotBeforeFare['bookedDistanceKm'] ?? $booking->distance_km ?? 0);
+        $actualKm = $trackedKm > 0.05 ? $trackedKm : max($bookedKm, (float) ($booking->actual_distance_km ?: 0));
         $commissionPercent = (float) (DB::table('commission_rules')->where('active', 1)->orderBy('id')->value('percent') ?? 10);
         $commission = (int) round($totalPaise * ($commissionPercent / 100));
         $fleetPct = 0.0;
@@ -804,6 +807,11 @@ class BookingService
         }
 
         $allowed = $this->allowedActions($row, $actor);
+        $lifecycle = BookingStatus::lifecycle((string) $row->status);
+        $lifecycleLabel = str_replace('_', ' ', $lifecycle);
+        if ($lifecycle === 'pending_review') {
+            $lifecycleLabel = 'Awaiting admin review';
+        }
 
         return [
             'id' => (string) $row->id,
@@ -817,8 +825,8 @@ class BookingService
             'paymentType' => $this->paymentTypeLabel($row->payment_mode ?? 'CASH'),
             'ratings' => $this->ratingsPayload($row),
             'customerReview' => $this->customerReview($row),
-            'lifecycle' => BookingStatus::lifecycle((string) $row->status),
-            'lifecycleLabel' => str_replace('_', ' ', BookingStatus::lifecycle((string) $row->status)),
+            'lifecycle' => $lifecycle,
+            'lifecycleLabel' => $lifecycleLabel,
             'pickupText' => $row->pickup_text,
             'dropText' => $row->drop_text,
             'pickupLat' => $row->pickup_lat !== null ? (float) $row->pickup_lat : null,
@@ -826,7 +834,10 @@ class BookingService
             'dropLat' => $row->drop_lat !== null ? (float) $row->drop_lat : null,
             'dropLng' => $row->drop_lng !== null ? (float) $row->drop_lng : null,
             'distanceKm' => $row->distance_km !== null ? (float) $row->distance_km : null,
-            'actualDistanceKm' => $row->actual_distance_km ?? null,
+            'bookedDistanceKm' => isset($snapshot['bookedDistanceKm']) ? (float) $snapshot['bookedDistanceKm'] : ($row->distance_km !== null ? (float) $row->distance_km : null),
+            'actualDistanceKm' => ($row->actual_distance_km !== null && (float) $row->actual_distance_km > 0)
+                ? (float) $row->actual_distance_km
+                : ($row->distance_km !== null ? (float) $row->distance_km : null),
             'durationSeconds' => $row->duration_seconds ?? null,
             'waitMinutes' => $row->wait_minutes ?? null,
             'quotePaise' => (int) $row->quote_paise,
@@ -1169,7 +1180,7 @@ class BookingService
         $rows = Booking::query()
             ->where('status', BookingStatus::SEARCHING)
             ->whereNull('driver_id')
-            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY'])
+            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP'])
             ->orderByDesc('id')
             ->limit(20)
             ->get();
@@ -1197,15 +1208,13 @@ class BookingService
             return;
         }
         $userId = (int) $actor->id;
-        app()->terminating(function () use ($pushes, $userId) {
-            foreach ($pushes as $push) {
-                $this->push->notifyUsers([$userId], $push['title'], $push['body'], [
-                    'type' => 'booking_offer',
-                    'event' => 'new_booking',
-                    'bookingId' => $push['bookingId'],
-                ]);
-            }
-        });
+        foreach ($pushes as $push) {
+            $this->push->notifyUsers([$userId], $push['title'], $push['body'], [
+                'type' => 'booking_offer',
+                'event' => 'new_booking',
+                'bookingId' => $push['bookingId'],
+            ]);
+        }
     }
 
     public function offersForDriver(User $actor): array
@@ -1410,6 +1419,28 @@ class BookingService
         return null;
     }
 
+    private function drivenKmFromLogs(Booking $booking): float
+    {
+        $stored = (float) ($booking->actual_distance_km ?? 0);
+        if (! Schema::hasTable('trip_km_logs')) {
+            return $stored;
+        }
+        $points = DB::table('trip_km_logs')->where('booking_id', $booking->id)->orderBy('id')->get(['lat', 'lng']);
+        $km = 0.0;
+        $prev = null;
+        foreach ($points as $point) {
+            if ($prev !== null) {
+                $delta = Geo::haversineKm((float) $prev->lat, (float) $prev->lng, (float) $point->lat, (float) $point->lng);
+                if ($delta >= 0.01 && $delta <= 8) {
+                    $km += $delta;
+                }
+            }
+            $prev = $point;
+        }
+
+        return round(max($stored, $km), 3);
+    }
+
     public function trackTripProgress(User $actor, string $bookingId, float $lat, float $lng): void
     {
         if (! Schema::hasColumn('bookings', 'actual_distance_km')) {
@@ -1430,7 +1461,7 @@ class BookingService
         $delta = Geo::haversineKm($prevLat, $prevLng, $lat, $lng);
         $tracked = (float) ($booking->actual_distance_km ?? 0);
         $counted = 0.0;
-        if ($delta > 0.03 && $delta <= 8) {
+        if ($delta >= 0.01 && $delta <= 8) {
             $counted = $delta;
             $tracked += $delta;
         }

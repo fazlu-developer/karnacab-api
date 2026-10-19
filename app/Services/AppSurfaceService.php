@@ -894,10 +894,21 @@ class AppSurfaceService
         if ($bookingStatus === null) {
             return;
         }
-        DB::table('bookings')->where('id', $bookingId)->update([
+        $patch = [
             'status' => $bookingStatus,
             'updated_at' => now(),
-        ]);
+        ];
+        if ($bookingStatus === 'COMPLETED') {
+            $patch['trip_ended_at'] = now();
+            if (! empty($fresh->quote_paise)) {
+                $patch['final_fare_paise'] = (int) $fresh->quote_paise;
+            }
+            if (! empty($fresh->distance_km)) {
+                $patch['actual_distance_km'] = $fresh->distance_km;
+                $patch['distance_km'] = $fresh->distance_km;
+            }
+        }
+        DB::table('bookings')->where('id', $bookingId)->update($patch);
     }
 
     private function settleParcel(object $row, ?User $actor): void
@@ -1038,7 +1049,7 @@ class AppSurfaceService
         DB::table('travel_bookings')->where('id', $id)->update([
             'payment_status' => 'paid',
             'payment_method' => $method,
-            'status' => 'confirmed',
+            'status' => 'pending_review',
             'updated_at' => now(),
         ]);
         $row = DB::table('travel_bookings')->where('id', $id)->first();
@@ -1178,7 +1189,7 @@ class AppSurfaceService
         $payload = [
             'public_ref' => $ref,
             'customer_id' => $actor->id,
-            'status' => 'confirmed',
+            'status' => 'pending_review',
             'created_at' => now(),
             'updated_at' => now(),
         ];
@@ -1318,7 +1329,7 @@ class AppSurfaceService
         $payload = [
             'public_ref' => $ref,
             'customer_id' => $actor->id,
-            'status' => 'confirmed',
+            'status' => 'pending_review',
             'created_at' => now(),
             'updated_at' => now(),
         ];
@@ -1445,7 +1456,7 @@ class AppSurfaceService
             'ok' => true,
             'publicRef' => $row->public_ref,
             'status' => $row->status,
-            'statusLabel' => ucfirst((string) $row->status),
+            'statusLabel' => $this->reviewStatusLabel((string) $row->status),
             'plan' => $quote['plan'] ?? null,
             'category' => $row->category ?? null,
             'tripKind' => $row->trip_kind ?? 'ONE_WAY',
@@ -1497,7 +1508,7 @@ class AppSurfaceService
             'corporate_account_id' => $accountId,
             'product' => 'CORPORATE',
             'category' => strtoupper((string) ($corp->category ?? 'SEDAN')),
-            'status' => 'CONFIRMED',
+            'status' => 'PENDING_REVIEW',
             'pickup_text' => $corp->pickup_text ?? ($data['pickupText'] ?? 'Pickup'),
             'drop_text' => $corp->drop_text ?? ($data['dropText'] ?? 'Drop'),
             'pickup_lat' => $corp->pickup_lat ?? ($data['pickupLat'] ?? 25.8748),
@@ -1798,7 +1809,7 @@ class AppSurfaceService
             'ok' => true,
             'publicRef' => $row->public_ref,
             'status' => $row->status,
-            'statusLabel' => ucfirst((string) $row->status),
+            'statusLabel' => $this->reviewStatusLabel((string) $row->status),
             'eventKey' => $row->event_key ?? null,
             'tripKind' => $row->trip_kind ?? ($quote['tripKind'] ?? 'ONE_WAY'),
             'category' => $row->category ?? null,
@@ -1855,7 +1866,7 @@ class AppSurfaceService
             'customer_id' => $actor->id,
             'product' => 'BULK',
             'category' => strtoupper((string) ($bulk->category ?? $data['category'] ?? 'SEDAN')),
-            'status' => 'CONFIRMED',
+            'status' => 'PENDING_REVIEW',
             'pickup_text' => $bulk->pickup_text ?? ($data['pickupText'] ?? 'Pickup'),
             'drop_text' => $bulk->drop_text ?? ($data['dropText'] ?? 'Drop'),
             'pickup_lat' => $bulk->pickup_lat ?? ($data['pickupLat'] ?? 25.8748),
@@ -2007,6 +2018,23 @@ class AppSurfaceService
         }
         $total = (int) ($row->quote_paise ?? 0);
         $status = strtolower((string) $row->status);
+        $bookingStatus = null;
+        if (! empty($row->booking_id)) {
+            $linked = DB::table('bookings')->where('id', $row->booking_id)->first();
+            if ($linked) {
+                $bookingStatus = (string) $linked->status;
+                if ($bookingStatus === 'COMPLETED' && ! in_array($status, ['delivered', 'cancelled'], true)) {
+                    $status = 'delivered';
+                    DB::table('parcel_shipments')->where('id', $row->id)->update([
+                        'status' => 'delivered',
+                        'updated_at' => now(),
+                    ]);
+                }
+                if (! empty($linked->final_fare_paise)) {
+                    $total = (int) $linked->final_fare_paise;
+                }
+            }
+        }
         $pickupUrl = ($row->pickup_lat && $row->pickup_lng)
             ? 'https://www.google.com/maps/dir/?api=1&destination='.$row->pickup_lat.','.$row->pickup_lng.'&travelmode=driving'
             : null;
@@ -2031,9 +2059,11 @@ class AppSurfaceService
             'kind' => 'parcel',
             'publicRef' => $row->public_ref,
             'customerId' => (string) $row->customer_id,
-            'status' => $row->status,
-            'statusLabel' => str_replace('_', ' ', $status),
-            'lifecycle' => $status,
+            'status' => $status,
+            'statusLabel' => $status === 'delivered' ? 'Completed' : str_replace('_', ' ', $status),
+            'lifecycle' => $status === 'delivered' ? 'completed' : $status,
+            'bookingId' => ! empty($row->booking_id) ? (string) $row->booking_id : null,
+            'bookingStatus' => $bookingStatus,
             'lane' => ! empty($row->bihar_lane) ? 'BIHAR' : 'LOCAL',
             'biharLane' => (bool) $row->bihar_lane,
             'parcelType' => $row->parcel_type,
@@ -2144,7 +2174,7 @@ class AppSurfaceService
             'id' => (string) $row->id,
             'publicRef' => $row->public_ref,
             'status' => $row->status,
-            'statusLabel' => ucfirst((string) $row->status),
+            'statusLabel' => $this->reviewStatusLabel((string) $row->status),
             'paymentStatus' => $row->payment_status,
             'paymentMethod' => $row->payment_method ?? null,
             'guests' => $guests,
@@ -2196,7 +2226,7 @@ class AppSurfaceService
             'customer_id' => $actor->id,
             'product' => 'TRAVEL',
             'category' => strtoupper((string) ($pkg->vehicle_category ?? 'TRAVELLER')),
-            'status' => 'CONFIRMED',
+            'status' => 'PENDING_REVIEW',
             'pickup_text' => $travel->pickup_text ?: ($pkg->origin ?? 'Pickup'),
             'drop_text' => $pkg->destination ?? 'Tour',
             'pickup_lat' => 25.8748,
@@ -2216,6 +2246,15 @@ class AppSurfaceService
         ], fn ($key) => Schema::hasColumn('bookings', $key), ARRAY_FILTER_USE_KEY);
 
         return (int) DB::table('bookings')->insertGetId($payload);
+    }
+
+    private function reviewStatusLabel(string $status): string
+    {
+        return match (strtolower($status)) {
+            'pending_review' => 'Awaiting admin review',
+            'approved', 'confirmed' => 'Approved',
+            default => ucfirst(str_replace('_', ' ', $status)),
+        };
     }
 
     private function presentCoupon(object $row): array
