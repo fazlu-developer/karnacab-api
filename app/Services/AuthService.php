@@ -310,6 +310,8 @@ class AuthService
             'inServiceState' => $area['allowed'],
             'serviceArea' => $area['state'],
             'detectedState' => $area['state'],
+            'stateId' => $area['stateId'],
+            'districtId' => $area['districtId'],
             'serviceStates' => ServiceArea::states(),
             'message' => $message,
         ];

@@ -13,6 +13,7 @@ use App\Support\FareCommissionSplit;
 use App\Support\BookingStatus;
 use App\Support\Geo;
 use App\Support\ServiceArea;
+use App\Support\ServiceMaintenance;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -39,14 +40,16 @@ class BookingService
         $dropLng = isset($dto['dropLng']) ? (float) $dto['dropLng'] : null;
         abort_unless($pickupLat !== null && $pickupLng !== null, 422, 'Pickup coordinates are required');
         abort_unless($dropLat !== null && $dropLng !== null, 422, 'Drop coordinates are required');
-        ServiceArea::assertTrip($dto + [
+        $areaInput = $dto + [
             'pickupLat' => $pickupLat,
             'pickupLng' => $pickupLng,
             'dropLat' => $dropLat,
             'dropLng' => $dropLng,
             'pickupText' => $dto['pickupText'] ?? $dto['pickup_text'] ?? null,
             'dropText' => $dto['dropText'] ?? $dto['drop_text'] ?? null,
-        ]);
+        ];
+        ServiceArea::assertTrip($areaInput);
+        ServiceMaintenance::assertOpen((string) ($dto['product'] ?? 'LOCAL_CAB'), $areaInput);
 
         $resolved = $this->fares->withResolvedTripDistance($dto + [
             'pickupLat' => $pickupLat,

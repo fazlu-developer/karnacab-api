@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\CatalogService;
 use App\Models\CmsPage;
+use App\Support\ServiceMaintenance;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -128,15 +129,16 @@ class CmsCatalogService
         $parcel = $home->filter(fn ($row) => strtoupper((string) ($row->service_group ?? '')) === 'PARCEL')->values();
         $packages = DB::table('travel_packages')->where('status', 'PUBLISHED')->orderBy('id')->get();
         $districts = DB::table('districts')->orderBy('name')->get(['id', 'name', 'code']);
+        $maintenance = ServiceMaintenance::forCatalog();
 
         return [
             'tabs' => [
                 ['key' => 'ride', 'title' => 'KarnaRide'],
                 ['key' => 'parcel', 'title' => 'Parcel'],
             ],
-            'homeServices' => $home->map(fn ($row) => $this->service($row))->all(),
-            'rideServices' => $ride->map(fn ($row) => $this->service($row))->all(),
-            'parcelServices' => $parcel->map(fn ($row) => $this->service($row))->all(),
+            'homeServices' => $home->map(fn ($row) => $this->service($row, $maintenance))->all(),
+            'rideServices' => $ride->map(fn ($row) => $this->service($row, $maintenance))->all(),
+            'parcelServices' => $parcel->map(fn ($row) => $this->service($row, $maintenance))->all(),
             'promo' => $this->json(DB::table('system_settings')->where('key', 'cms_home_promo')->value('value')),
             'districts' => $districts,
             'packages' => $packages->map(fn ($row) => [
@@ -312,7 +314,7 @@ class CmsCatalogService
         })->all();
     }
 
-    private function service($row): array
+    private function service($row, array $maintenance = []): array
     {
         $slug = (string) ($row->slug ?? '');
         $categoryKey = strtoupper((string) ($row->category_key ?? ''));
@@ -332,6 +334,7 @@ class CmsCatalogService
             'sortOrder' => (int) ($row->sort_order ?? 0),
             'active' => (int) ($row->active ?? 0) === 1,
             'vehicleKeys' => app(\App\Services\VehicleCatalogService::class)->keysFromService($row),
+            'maintenance' => $maintenance[(int) $row->id] ?? ['everywhere' => false, 'stateIds' => [], 'districtIds' => []],
         ];
     }
 

@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Support\Geo;
 use App\Support\ServiceArea;
+use App\Support\ServiceMaintenance;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
@@ -14,6 +15,7 @@ class FareService
     {
         ServiceArea::assertTrip($input);
         $product = strtoupper((string) ($input['product'] ?? 'LOCAL_CAB'));
+        ServiceMaintenance::assertOpen($product, $input);
         if (in_array($product, ['LOCAL', 'TRIP', 'CAB'], true)) {
             $product = 'LOCAL_CAB';
         }
