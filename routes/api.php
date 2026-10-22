@@ -153,6 +153,7 @@ Route::middleware('jwt')->group(function () {
     Route::get('/v1/wallets/me', [PlatformController::class, 'walletMe']);
     Route::post('/v1/wallets/me/topup', [PlatformController::class, 'walletTopup']);
     Route::post('/v1/payments/payu/hash', [PlatformController::class, 'payuHash']);
+    Route::post('/v1/payments/payu/advance', [PlatformController::class, 'payuAdvance']);
     Route::post('/v1/payments/payu/confirm', [PlatformController::class, 'payuConfirm']);
     Route::get('/v1/wallets/commission-policy', fn () => ['percent' => 0]);
     Route::get('/v1/wallets/{id}', [PlatformController::class, 'walletMe']);

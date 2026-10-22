@@ -154,7 +154,17 @@ class BookingService
         }
         $mode = $this->normalizePaymentMode($dto['paymentMode'] ?? $dto['payment_mode'] ?? 'CASH');
         if ($prebook && $mode === 'CASH') {
-            abort(422, 'Cash cannot confirm a pre-booking. Pay the 10% advance with wallet or UPI.');
+            abort(422, 'Cash cannot confirm a pre-booking. Pay the 10% advance with PayU or wallet.');
+        }
+        $payuTxn = trim((string) ($dto['payuTxnId'] ?? $dto['payu_txn_id'] ?? ''));
+        if ($prebook && $mode === 'UPI') {
+            abort_unless($payuTxn !== '', 422, 'Pay the 10% advance with PayU to confirm this booking.');
+            $intent = DB::table('payment_intents')->where('txnid', $payuTxn)->where('user_id', $actor->id)->first();
+            abort_unless($intent && ($intent->status ?? '') === 'captured', 422, 'PayU advance is not paid yet.');
+            abort_unless((int) $intent->amount_paise >= (int) ($quote['advancePaise'] ?? 0), 422, 'PayU advance is less than 10%.');
+            $quote['advancePaidPaise'] = (int) ($quote['advancePaise'] ?? 0);
+            $quote['payuTxnId'] = $payuTxn;
+            $quote['commissionSettled'] = true;
         }
         if ($mode === 'WALLET') {
             $balance = app(CustomerWallet::class)->balancePaise((int) $actor->id);
@@ -211,7 +221,11 @@ class BookingService
             app(CustomerWallet::class)->debit((int) $actor->id, (int) $quote['advancePaise'], 'Pre-booking advance 10%', (int) $booking->id, 'advance');
             $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
             $snapshot['advancePaidPaise'] = (int) $quote['advancePaise'];
+            $snapshot['commissionSettled'] = true;
             $booking->update($this->filterColumns(['quote_snapshot' => $snapshot]));
+        }
+        if ($prebook && (int) ($quote['advancePaidPaise'] ?? 0) > 0) {
+            $this->settleAdvanceCommission($booking->fresh(), (int) $quote['advancePaise']);
         }
 
         Log::info('booking.created', [
@@ -631,8 +645,13 @@ class BookingService
         $snapshotBeforeFare = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
         $bookedKm = (float) ($snapshotBeforeFare['bookedDistanceKm'] ?? $booking->distance_km ?? 0);
         $actualKm = $trackedKm > 0.05 ? $trackedKm : max($bookedKm, (float) ($booking->actual_distance_km ?: 0));
+        $advancePaid = (int) ($snapshotBeforeFare['advancePaidPaise'] ?? $snapshot['advancePaidPaise'] ?? 0);
+        $commissionSettled = (bool) ($snapshotBeforeFare['commissionSettled'] ?? $snapshot['commissionSettled'] ?? false)
+            || ($advancePaid > 0 && (bool) ($snapshotBeforeFare['prebook'] ?? $snapshot['prebook'] ?? false));
         $commissionPercent = (float) (DB::table('commission_rules')->where('active', 1)->orderBy('id')->value('percent') ?? 10);
-        $commission = (int) round($totalPaise * ($commissionPercent / 100));
+        $commission = $commissionSettled && $advancePaid > 0
+            ? $advancePaid
+            : (int) round($totalPaise * ($commissionPercent / 100));
         $fleetPct = 0.0;
         $vehicleRow = $booking->vehicle_id
             ? DB::table('vehicles')->where('id', $booking->vehicle_id)->first()
@@ -648,9 +667,11 @@ class BookingService
             }
         }
         $split = FareCommissionSplit::split($totalPaise, $commission, $fleetPct);
-        $fleetShare = $split['fleetPaise'];
-        $platformShare = $split['platformPaise'];
-        $districtShare = $split['districtHeadPaise'];
+        $fleetShare = $commissionSettled ? 0 : $split['fleetPaise'];
+        $platformShare = $commissionSettled
+            ? (int) ($snapshotBeforeFare['platformCommissionPaise'] ?? $snapshot['platformCommissionPaise'] ?? $commission)
+            : $split['platformPaise'];
+        $districtShare = $commissionSettled ? 0 : $split['districtHeadPaise'];
         $earning = max(0, $totalPaise - $commission);
 
         $booking->update($this->filterColumns([
@@ -681,32 +702,42 @@ class BookingService
         $this->syncLinkedParcel($booking, 'delivered');
         Driver::query()->where('id', $driver->id)->update(['duty_status' => 'online']);
         $payMode = strtoupper((string) ($booking->payment_mode ?? 'CASH'));
-        $collectNote = 'Cash collected from customer ₹'.number_format($totalPaise / 100, 0);
-        if (in_array($payMode, ['CASH', 'COD', 'CASH_ON_DELIVERY'], true)) {
+        if ($commissionSettled) {
             app(WalletAccountService::class)->recordCashTrip(
                 (int) $driver->user_id,
                 (int) $booking->id,
-                $totalPaise,
-                $commission,
-                $totalPaise,
-                $collectNote,
+                $earning,
+                0,
+                $earning,
+                'Driver fare collected ₹'.number_format($earning / 100, 0).'. Admin commission already received.',
             );
-            $this->debitDriverCommission((int) $driver->user_id, (int) $booking->id, $commission, $totalPaise);
         } else {
-            $this->creditDriverWallet((int) $driver->user_id, (int) $booking->id, $totalPaise, $commission, $totalPaise);
-            $this->debitDriverCommission((int) $driver->user_id, (int) $booking->id, $commission, $totalPaise);
+            $collectNote = 'Cash collected from customer ₹'.number_format($totalPaise / 100, 0);
+            if (in_array($payMode, ['CASH', 'COD', 'CASH_ON_DELIVERY'], true)) {
+                app(WalletAccountService::class)->recordCashTrip(
+                    (int) $driver->user_id,
+                    (int) $booking->id,
+                    $totalPaise,
+                    $commission,
+                    $totalPaise,
+                    $collectNote,
+                );
+                $this->debitDriverCommission((int) $driver->user_id, (int) $booking->id, $commission, $totalPaise);
+            } else {
+                $this->creditDriverWallet((int) $driver->user_id, (int) $booking->id, $totalPaise, $commission, $totalPaise);
+                $this->debitDriverCommission((int) $driver->user_id, (int) $booking->id, $commission, $totalPaise);
+            }
+            if ($platformShare > 0) {
+                $this->creditPlatformWallet((int) $booking->id, $platformShare, $commission);
+            }
+            if ($fleetOwnerId && $fleetShare > 0) {
+                $this->creditFleetWallet((int) $fleetOwnerId, (int) $booking->id, $fleetShare, $commission);
+            }
+            if ($districtShare > 0) {
+                $this->creditDistrictWallet($booking->district_id ? (int) $booking->district_id : null, (int) $booking->id, $districtShare, $commission);
+            }
+            $this->debitCustomerWallet((int) $booking->customer_id, (int) $booking->id, max(0, $totalPaise - $advancePaid), (string) ($booking->payment_mode ?? 'CASH'));
         }
-        if ($platformShare > 0) {
-            $this->creditPlatformWallet((int) $booking->id, $platformShare, $commission);
-        }
-        if ($fleetOwnerId && $fleetShare > 0) {
-            $this->creditFleetWallet((int) $fleetOwnerId, (int) $booking->id, $fleetShare, $commission);
-        }
-        if ($districtShare > 0) {
-            $this->creditDistrictWallet($booking->district_id ? (int) $booking->district_id : null, (int) $booking->id, $districtShare, $commission);
-        }
-        $advancePaid = (int) ($snapshot['advancePaidPaise'] ?? 0);
-        $this->debitCustomerWallet((int) $booking->customer_id, (int) $booking->id, max(0, $totalPaise - $advancePaid), (string) ($booking->payment_mode ?? 'CASH'));
         try {
             app(IncentiveService::class)->onBookingCompleted($booking->fresh());
         } catch (\Throwable $e) {
@@ -1714,6 +1745,28 @@ class BookingService
             fn ($key) => Schema::hasColumn('wallet_ledger', $key),
             ARRAY_FILTER_USE_KEY,
         );
+    }
+
+    private function settleAdvanceCommission(Booking $booking, int $advancePaise): void
+    {
+        if ($advancePaise <= 0) {
+            return;
+        }
+        $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        $totalPaise = (int) ($snapshot['totalPaise'] ?? $booking->quote_paise ?? 0);
+        $snapshot['advancePaidPaise'] = $advancePaise;
+        $snapshot['commissionSettled'] = true;
+        $snapshot['commissionPercent'] = 10;
+        $snapshot['commissionPaise'] = $advancePaise;
+        $snapshot['platformCommissionPaise'] = $advancePaise;
+        $snapshot['driverEarningPaise'] = max(0, $totalPaise - $advancePaise);
+        $booking->update($this->filterColumns([
+            'quote_snapshot' => $snapshot,
+            'commission_paise' => $advancePaise,
+            'platform_commission_paise' => $advancePaise,
+            'driver_earning_paise' => max(0, $totalPaise - $advancePaise),
+        ]));
+        $this->creditPlatformWallet((int) $booking->id, $advancePaise, $advancePaise);
     }
 
     private function debitDriverCommission(int $userId, int $bookingId, int $commissionPaise, int $grossPaise): void

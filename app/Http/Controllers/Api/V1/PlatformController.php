@@ -701,6 +701,13 @@ class PlatformController extends Controller
         return app(\App\Services\PayUService::class)->startTopup($request->user(), $rupees);
     }
 
+    public function payuAdvance(Request $request)
+    {
+        $rupees = (float) ($request->input('amountRupees') ?? $request->input('amount') ?? 0);
+
+        return app(\App\Services\PayUService::class)->startAdvance($request->user(), $rupees);
+    }
+
     public function payuCheckout(string $txnid)
     {
         return response(app(\App\Services\PayUService::class)->checkoutPage($txnid), 200, [

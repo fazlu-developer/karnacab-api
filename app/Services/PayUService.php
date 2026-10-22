@@ -17,7 +17,20 @@ class PayUService
             ? app(RideSettingsService::class)->driverTopupMinRupees()
             : 1;
         abort_unless($rupees >= $min, 422, 'Minimum add money is ₹'.$min.'.');
-        abort_unless($rupees <= 50000, 422, 'Maximum top-up is ₹50,000');
+
+        return $this->start($actor, $rupees, 'topup', 'KarnaRide wallet top-up');
+    }
+
+    public function startAdvance(User $actor, float $rupees): array
+    {
+        abort_unless($rupees >= 1, 422, 'Advance amount is missing.');
+
+        return $this->start($actor, $rupees, 'booking_advance', 'KarnaRide booking advance');
+    }
+
+    private function start(User $actor, float $rupees, string $purpose, string $productinfo): array
+    {
+        abort_unless($rupees <= 50000, 422, 'Maximum payment is ₹50,000');
         abort_unless($this->key() !== '' && $this->salt() !== '', 422, 'PayU is not configured');
         $this->ensureTables();
         $txnid = 'KC'.strtoupper(Str::random(14));
@@ -25,7 +38,6 @@ class PayUService
         $email = $this->email($actor);
         $firstname = $this->firstName($actor);
         $phone = $this->phone($actor);
-        $productinfo = 'KarnaRide wallet top-up';
         $hash = $this->requestHash($txnid, $amount, $productinfo, $firstname, $email);
         $payload = [
             'txnid' => $txnid,
@@ -33,6 +45,7 @@ class PayUService
             'amount_paise' => (int) round($rupees * 100),
             'status' => 'initiated',
             'gateway' => 'payu',
+            'purpose' => $purpose,
             'created_at' => now(),
             'updated_at' => now(),
         ];
@@ -89,7 +102,7 @@ class PayUService
         $email = $this->email($user);
         $firstname = $this->firstName($user);
         $phone = $this->phone($user);
-        $productinfo = 'KarnaRide wallet top-up';
+        $productinfo = $this->productInfo($row);
         $hash = $this->requestHash($txnid, $amount, $productinfo, $firstname, $email);
         $action = $this->payuUrl();
         $returnHost = rtrim((string) (request()?->getSchemeAndHttpHost() ?: config('app.url')), '/');
@@ -156,7 +169,9 @@ HTML;
         if (($intent->status ?? '') === 'captured') {
             return $this->presentResult($intent, already: true);
         }
-        $this->creditWallet((int) $intent->user_id, (int) $intent->amount_paise, $txnid);
+        if ($this->purpose($intent) !== 'booking_advance') {
+            $this->creditWallet((int) $intent->user_id, (int) $intent->amount_paise, $txnid);
+        }
         DB::table('payment_intents')->where('id', $intent->id)->update($this->filter('payment_intents', [
             'status' => 'captured',
             'gateway_status' => 'success',
@@ -183,7 +198,9 @@ HTML;
             abort(422, 'Invalid PayU hash');
         }
         if (in_array($status, ['success', 'captured'], true)) {
-            $this->creditWallet((int) $intent->user_id, (int) $intent->amount_paise, $txnid);
+            if ($this->purpose($intent) !== 'booking_advance') {
+                $this->creditWallet((int) $intent->user_id, (int) $intent->amount_paise, $txnid);
+            }
             DB::table('payment_intents')->where('id', $intent->id)->update($this->filter('payment_intents', [
                 'status' => 'captured',
                 'gateway_status' => $status,
@@ -275,6 +292,18 @@ HTML;
         }
     }
 
+    private function purpose(object $intent): string
+    {
+        return (string) ($intent->purpose ?? 'topup');
+    }
+
+    private function productInfo(object $intent): string
+    {
+        return $this->purpose($intent) === 'booking_advance'
+            ? 'KarnaRide booking advance'
+            : 'KarnaRide wallet top-up';
+    }
+
     private function requestHash(string $txnid, string $amount, string $productinfo, string $firstname, string $email): string
     {
         $seq = $this->key().'|'.$txnid.'|'.$amount.'|'.$productinfo.'|'.$firstname.'|'.$email.'|||||||||||'.$this->salt();
@@ -354,8 +383,14 @@ HTML;
                 $table->unsignedInteger('amount_paise')->default(0);
                 $table->string('status', 24)->default('initiated');
                 $table->string('gateway', 24)->nullable();
+                $table->string('purpose', 32)->default('topup');
                 $table->string('gateway_status', 32)->nullable();
                 $table->timestamps();
+            });
+        }
+        if (Schema::hasTable('payment_intents') && ! Schema::hasColumn('payment_intents', 'purpose')) {
+            Schema::table('payment_intents', function ($table) {
+                $table->string('purpose', 32)->default('topup');
             });
         }
         if (! Schema::hasTable('wallets')) {
