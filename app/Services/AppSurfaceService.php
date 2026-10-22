@@ -335,6 +335,18 @@ class AppSurfaceService
                 $subject = 'Lost & found';
             }
             $description = (string) ($request->input('description') ?? $request->input('message') ?? '');
+            $bookingKey = trim((string) ($request->input('bookingId') ?? $request->input('booking_id') ?? ''));
+            $bookingId = null;
+            if ($bookingKey !== '' && Schema::hasTable('bookings')) {
+                $bookingId = DB::table('bookings')->where('public_ref', $bookingKey)->value('id');
+                if ($bookingId === null && ctype_digit($bookingKey)) {
+                    $bookingId = DB::table('bookings')->where('id', (int) $bookingKey)->value('id');
+                }
+                if ($bookingId && ! str_contains($subject, $bookingKey) && ! str_contains($subject, (string) (DB::table('bookings')->where('id', $bookingId)->value('public_ref') ?? ''))) {
+                    $ref = (string) DB::table('bookings')->where('id', $bookingId)->value('public_ref');
+                    $subject = trim($ref.' · '.$subject);
+                }
+            }
             $payload = [
                 'public_ref' => strtoupper(Str::random(8)),
                 'user_id' => $actor->id,
@@ -345,7 +357,7 @@ class AppSurfaceService
                 'description' => $description,
                 'message' => $description,
                 'type' => $request->input('type') ?? $kind,
-                'booking_id' => $request->input('bookingId') ?? $request->input('booking_id'),
+                'booking_id' => $bookingId,
                 'priority' => 'medium',
                 'created_at' => now(),
                 'updated_at' => now(),

@@ -12,6 +12,7 @@ use App\Support\BookingProductSchema;
 use App\Support\FareCommissionSplit;
 use App\Support\BookingStatus;
 use App\Support\Geo;
+use App\Support\IndiaTime;
 use App\Support\ServiceArea;
 use App\Support\ServiceMaintenance;
 use Illuminate\Support\Facades\Cache;
@@ -116,7 +117,7 @@ class BookingService
         $timeout = self::searchesNearbyNow($product) ? 600 : $this->settings->requestTimeoutSeconds();
         $scheduledAt = null;
         $keepFlightTime = in_array($product, ['AIRPORT', 'RAILWAY'], true);
-        $keepChosenTime = $keepFlightTime || in_array($product, ['ONE_WAY', 'ROUND_WAY'], true);
+        $keepChosenTime = $keepFlightTime || in_array($product, ['ONE_WAY', 'ROUND_WAY', 'SCHEDULE', 'LOCAL_CAB'], true);
         if (! empty($dto['scheduledAt']) && (! self::searchesNearbyNow($product) || $keepChosenTime)) {
             try {
                 $scheduledAt = \Illuminate\Support\Carbon::parse($dto['scheduledAt']);
@@ -129,7 +130,8 @@ class BookingService
         } elseif ($scheduledAt !== null) {
             $dto['scheduledAt'] = $scheduledAt->toDateTimeString();
         }
-        $futureSchedule = $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(5)) && ($product === 'ONE_WAY' || ! $keepFlightTime);
+        $advanceProducts = array_keys(\App\Support\AdvancePayment::PRODUCTS);
+        $futureSchedule = $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(5)) && in_array($product, $advanceProducts, true);
         $driverDispatch = self::driverCanAccept($product) && ! $futureSchedule;
         if ($product === 'RENTAL' && empty($dto['scheduledAt'])) {
             $dto['scheduledAt'] = now()->addHour()->toIso8601String();
@@ -145,19 +147,25 @@ class BookingService
             $districtId,
             (string) ($dto['product'] ?? 'LOCAL_CAB'),
         ) : [];
-        $prebook = $futureSchedule && in_array($product, ['ONE_WAY', 'ROUND_WAY'], true);
-        if ($prebook) {
+        $collectAdvance = \App\Support\AdvancePayment::enabled($product);
+        if ($collectAdvance) {
             $totalPaise = (int) ($quote['totalPaise'] ?? 0);
             $quote['prebook'] = true;
             $quote['advancePercent'] = 10;
             $quote['advancePaise'] = (int) round($totalPaise * 0.10);
+            if ((int) $quote['advancePaise'] < 1) {
+                $collectAdvance = false;
+                $quote['prebook'] = false;
+                $quote['advancePercent'] = 0;
+                $quote['advancePaise'] = 0;
+            }
         }
         $mode = $this->normalizePaymentMode($dto['paymentMode'] ?? $dto['payment_mode'] ?? 'CASH');
-        if ($prebook && $mode === 'CASH') {
-            abort(422, 'Cash cannot confirm a pre-booking. Pay the 10% advance with PayU or wallet.');
+        if ($collectAdvance && $mode === 'CASH') {
+            abort(422, 'Cash cannot confirm this booking. Pay the 10% advance with PayU or wallet.');
         }
         $payuTxn = trim((string) ($dto['payuTxnId'] ?? $dto['payu_txn_id'] ?? ''));
-        if ($prebook && $mode === 'UPI') {
+        if ($collectAdvance && $mode === 'UPI') {
             abort_unless($payuTxn !== '', 422, 'Pay the 10% advance with PayU to confirm this booking.');
             $intent = DB::table('payment_intents')->where('txnid', $payuTxn)->where('user_id', $actor->id)->first();
             abort_unless($intent && ($intent->status ?? '') === 'captured', 422, 'PayU advance is not paid yet.');
@@ -168,12 +176,12 @@ class BookingService
         }
         if ($mode === 'WALLET') {
             $balance = app(CustomerWallet::class)->balancePaise((int) $actor->id);
-            $dueNow = $prebook ? (int) ($quote['advancePaise'] ?? 0) : (int) $quote['totalPaise'];
-            abort_unless($balance >= $dueNow, 422, $prebook ? 'Add wallet balance to pay the 10% advance.' : 'Add wallet balance to pay with wallet.');
+            $dueNow = $collectAdvance ? (int) ($quote['advancePaise'] ?? 0) : (int) $quote['totalPaise'];
+            abort_unless($balance >= $dueNow, 422, $collectAdvance ? 'Add wallet balance to pay the 10% advance.' : 'Add wallet balance to pay with wallet.');
         }
 
         $booking = Booking::query()->create($this->filterColumns([
-            'public_ref' => strtoupper(Str::random(8)),
+            'public_ref' => $this->nextPublicRef(),
             'customer_id' => $actor->id,
             'district_id' => $districtId,
             'product' => $dto['product'],
@@ -217,15 +225,26 @@ class BookingService
         ]));
 
         $this->storeStops($booking, is_array($dto['stops'] ?? null) ? $dto['stops'] : []);
-        if ($prebook && $mode === 'WALLET' && (int) ($quote['advancePaise'] ?? 0) > 0) {
-            app(CustomerWallet::class)->debit((int) $actor->id, (int) $quote['advancePaise'], 'Pre-booking advance 10%', (int) $booking->id, 'advance');
+        if ($collectAdvance && $mode === 'WALLET' && (int) ($quote['advancePaise'] ?? 0) > 0) {
+            app(CustomerWallet::class)->debit((int) $actor->id, (int) $quote['advancePaise'], '10% advance for booking '.$booking->public_ref.' paid to admin', (int) $booking->id, 'advance');
             $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
             $snapshot['advancePaidPaise'] = (int) $quote['advancePaise'];
             $snapshot['commissionSettled'] = true;
+            $quote['advancePaidPaise'] = (int) $quote['advancePaise'];
             $booking->update($this->filterColumns(['quote_snapshot' => $snapshot]));
         }
-        if ($prebook && (int) ($quote['advancePaidPaise'] ?? 0) > 0) {
-            $this->settleAdvanceCommission($booking->fresh(), (int) $quote['advancePaise']);
+        if ($collectAdvance && (int) ($quote['advancePaidPaise'] ?? 0) > 0) {
+            $fresh = $booking->fresh();
+            $this->settleAdvanceCommission($fresh, (int) $quote['advancePaise']);
+            if ($mode !== 'WALLET') {
+                app(CustomerWallet::class)->recordMemo(
+                    (int) $actor->id,
+                    (int) $fresh->id,
+                    (int) $quote['advancePaise'],
+                    '10% advance for booking '.$fresh->public_ref.' paid to admin',
+                    'advance',
+                );
+            }
         }
 
         Log::info('booking.created', [
@@ -473,7 +492,7 @@ class BookingService
 
     public static function searchesNearbyNow(string $product): bool
     {
-        return in_array(strtoupper($product), ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP'], true);
+        return in_array(strtoupper($product), ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'SCHEDULE'], true);
     }
 
     public static function driverCanAccept(string $product): bool
@@ -637,6 +656,9 @@ class BookingService
             $wait = max(0, (int) floor(abs($booking->arrived_at->diffInSeconds($startedAt)) / 60));
         }
         $trackedKm = $this->drivenKmFromLogs($booking);
+        $bookedSnapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        $bookedWait = (int) (($bookedSnapshot['fareInputs']['waitMinutes'] ?? 0));
+        $wait = max($wait, $bookedWait);
         $this->applyRouteFare($booking, $trackedKm, 0, $wait);
         $booking->refresh();
         $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
@@ -665,6 +687,12 @@ class BookingService
             if ($own !== null && $own !== '') {
                 $fleetPct = (float) $own;
             }
+        }
+        if ($fleetPct <= 0 && $fleetOwnerId && Schema::hasTable('system_settings')) {
+            $ownCut = DB::table('system_settings')->where('key', 'fleet_cut_percent_'.$fleetOwnerId)->value('value');
+            $global = DB::table('system_settings')->where('key', 'fleet_owner_commission_percent')->value('value');
+            $picked = is_numeric($ownCut) ? (float) $ownCut : (is_numeric($global) ? (float) $global : 0);
+            $fleetPct = $picked;
         }
         $split = FareCommissionSplit::split($totalPaise, $commission, $fleetPct);
         $fleetShare = $commissionSettled ? 0 : $split['fleetPaise'];
@@ -709,7 +737,15 @@ class BookingService
                 $earning,
                 0,
                 $earning,
-                'Driver fare collected ₹'.number_format($earning / 100, 0).'. Admin commission already received.',
+                'Booking '.$booking->public_ref.': admin commission 10% already collected from the customer. You receive 90% ₹'.number_format($earning / 100, 0).'.',
+            );
+            app(CustomerWallet::class)->recordMemo(
+                (int) $booking->customer_id,
+                (int) $booking->id,
+                $earning,
+                '90% fare for booking '.$booking->public_ref.' sent to the driver',
+                'driver_fare',
+                'SENT',
             );
         } else {
             $collectNote = 'Cash collected from customer ₹'.number_format($totalPaise / 100, 0);
@@ -896,6 +932,8 @@ class BookingService
             'quotePaise' => (int) $row->quote_paise,
             'driverId' => $row->driver_id ? (string) $row->driver_id : null,
             'scheduledAt' => optional($row->scheduled_at)?->toIso8601String(),
+            'scheduledAtLabel' => IndiaTime::format($row->scheduled_at),
+            'returnAtLabel' => IndiaTime::format($row->return_at ?? null),
             'prebook' => (bool) ($snapshot['prebook'] ?? false),
             'advancePercent' => (int) ($snapshot['advancePercent'] ?? 0),
             'advancePaise' => (int) ($snapshot['advancePaise'] ?? 0),
@@ -1242,7 +1280,7 @@ class BookingService
             ->where(function ($query) {
                 $query->whereNull('scheduled_at')->orWhere('scheduled_at', '<=', now()->addMinutes(5));
             })
-            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP'])
+            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'SCHEDULE'])
             ->orderByDesc('id')
             ->limit(20)
             ->get();
@@ -1298,7 +1336,7 @@ class BookingService
             ->where(function ($query) {
                 $query->whereNull('scheduled_at')->orWhere('scheduled_at', '<=', now()->addMinutes(5));
             })
-            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY'])
+            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'SCHEDULE'])
             ->orderByDesc('id')
             ->get()
             ->map(function (Booking $row) use ($actor, $driver) {
@@ -1645,6 +1683,15 @@ class BookingService
         $booking->quote_snapshot = $snapshot;
 
         return $remaining;
+    }
+
+    private function nextPublicRef(): string
+    {
+        do {
+            $ref = 'KR'.now()->timezone('Asia/Kolkata')->format('ymd').strtoupper(Str::random(4));
+        } while (Booking::query()->where('public_ref', $ref)->exists());
+
+        return $ref;
     }
 
     private function notifyOps(Booking $booking, string $title): void

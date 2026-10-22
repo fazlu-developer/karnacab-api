@@ -215,22 +215,25 @@ class OperatorFleetService
         abort_unless($color !== '', 422, 'Enter vehicle colour.');
         abort_unless($year >= 1990 && $year <= ((int) date('Y') + 1), 422, 'Enter a valid year.');
         $documents = array_values(array_filter((array) ($data['documents'] ?? []), 'is_array'));
-        $docTypes = array_map(fn ($doc) => strtoupper((string) ($doc['type'] ?? '')), $documents);
-        $requiredDocs = ['RC', 'INSURANCE', 'POLLUTION', 'VEHICLE_PHOTO'];
-        if (! in_array($category, ['BIKE', 'SCOOTY', 'E_RICKSHAW'], true) && $family !== 'BIKE') {
-            $requiredDocs[] = 'PERMIT';
+        $later = (bool) ($data['documentsLater'] ?? false);
+        if (! $later) {
+            $docTypes = array_map(fn ($doc) => strtoupper((string) ($doc['type'] ?? '')), $documents);
+            $requiredDocs = ['RC', 'INSURANCE', 'POLLUTION', 'VEHICLE_PHOTO'];
+            if (! in_array($category, ['BIKE', 'SCOOTY', 'E_RICKSHAW'], true) && $family !== 'BIKE') {
+                $requiredDocs[] = 'PERMIT';
+            }
+            $docLabels = [
+                'RC' => 'registration certificate',
+                'INSURANCE' => 'insurance',
+                'POLLUTION' => 'PUC',
+                'VEHICLE_PHOTO' => 'vehicle photo',
+                'PERMIT' => 'permit',
+            ];
+            $missingDocs = array_values(array_filter($requiredDocs, fn ($type) => ! in_array($type, $docTypes, true)));
+            abort_if($missingDocs !== [], 422, 'Upload the '.implode(', ', array_map(fn ($type) => $docLabels[$type], $missingDocs)).'.');
         }
-        $docLabels = [
-            'RC' => 'registration certificate',
-            'INSURANCE' => 'insurance',
-            'POLLUTION' => 'PUC',
-            'VEHICLE_PHOTO' => 'vehicle photo',
-            'PERMIT' => 'permit',
-        ];
-        $missingDocs = array_values(array_filter($requiredDocs, fn ($type) => ! in_array($type, $docTypes, true)));
-        abort_if($missingDocs !== [], 422, 'Upload the '.implode(', ', array_map(fn ($type) => $docLabels[$type], $missingDocs)).'.');
         $territory = $this->resolveTerritory($fleet, $actor, $data);
-        $payload = [
+        $payload = $this->onlyColumns('vehicles', [
             'fleet_owner_id' => $fleet->id,
             'registration_no' => $registration,
             'category' => $category,
@@ -243,20 +246,28 @@ class OperatorFleetService
             'created_at' => now(),
             'updated_at' => now(),
             'district_id' => $territory['districtId'],
-        ];
-        if (Schema::hasColumn('vehicles', 'state_id') && $territory['stateId'] > 0) {
-            $payload['state_id'] = $territory['stateId'];
-        }
-        if ($family !== '' && Schema::hasColumn('vehicles', 'vehicle_family')) {
-            $payload['vehicle_family'] = $family;
-        }
+            'state_id' => $territory['stateId'] > 0 ? $territory['stateId'] : null,
+            'vehicle_family' => $family !== '' ? $family : null,
+        ]);
         $this->rememberFleetTerritory($fleet, $territory['stateId'], $territory['districtId']);
+        $id = 0;
         try {
             $id = DB::table('vehicles')->insertGetId($payload);
         } catch (QueryException $e) {
             $duplicate = ($e->errorInfo[0] ?? '') === '23000' || str_contains($e->getMessage(), 'Duplicate');
             abort_if($duplicate, 409, 'Registration number already exists.');
-            throw $e;
+            if (isset($payload['status']) && str_contains($e->getMessage(), 'status')) {
+                $payload['status'] = 'pending';
+                try {
+                    $id = DB::table('vehicles')->insertGetId($payload);
+                } catch (QueryException $again) {
+                    report($again);
+                    abort(422, 'Could not save this vehicle. Check the registration number and try again.');
+                }
+            } else {
+                report($e);
+                abort(422, 'Could not save this vehicle. Check the registration number and try again.');
+            }
         }
         $this->audit($actor, $fleet, 'vehicle.created', 'vehicle', $id, null, $payload);
         foreach ($documents as $doc) {
@@ -339,7 +350,7 @@ class OperatorFleetService
             abort_unless($existing->role === 'DRIVER', 422, 'That account is not a driver.');
             $driverId = DB::table('drivers')->where('user_id', $existing->id)->value('id');
             abort_unless($driverId, 422, 'Driver profile missing for this user.');
-            DB::table('drivers')->where('id', $driverId)->update([
+            DB::table('drivers')->where('id', $driverId)->update($this->onlyColumns('drivers', array_merge([
                 'fleet_owner_id' => $fleet->id,
                 'license_no' => $license,
                 'city' => $territory['city'],
@@ -347,12 +358,12 @@ class OperatorFleetService
                 'district_id' => $territory['districtId'],
                 'driver_type' => 'fleet_driver',
                 'updated_at' => now(),
-            ]);
-            DB::table('users')->where('id', $existing->id)->update([
+            ], $this->driverIdentity($data))));
+            DB::table('users')->where('id', $existing->id)->update($this->onlyColumns('users', [
                 'state_id' => $territory['stateId'],
                 'district_id' => $territory['districtId'],
                 'updated_at' => now(),
-            ]);
+            ]));
             $this->rememberFleetTerritory($fleet, $territory['stateId'], $territory['districtId']);
             $this->storeDriverDocuments((int) $driverId, $data);
             $this->audit($actor, $fleet, 'driver.linked', 'driver', (int) $driverId, null, ['userId' => $existing->id]);
@@ -360,7 +371,7 @@ class OperatorFleetService
             return $this->driver($actor, (int) $driverId);
         }
         try {
-            $userId = DB::table('users')->insertGetId([
+            $userId = DB::table('users')->insertGetId($this->onlyColumns('users', [
                 'role' => 'DRIVER',
                 'status' => 'PENDING',
                 'name' => $name,
@@ -371,7 +382,7 @@ class OperatorFleetService
                 'district_id' => $territory['districtId'],
                 'created_at' => now(),
                 'updated_at' => now(),
-            ]);
+            ]));
         } catch (QueryException $e) {
             $duplicate = ($e->errorInfo[0] ?? '') === '23000' || str_contains($e->getMessage(), 'Duplicate');
             abort_if($duplicate, 422, 'A user with this mobile number or email already exists.');
@@ -401,7 +412,13 @@ class OperatorFleetService
         if (Schema::hasColumn('drivers', 'application_submitted_at')) {
             $driverPayload['application_submitted_at'] = now();
         }
-        $driverId = DB::table('drivers')->insertGetId($driverPayload);
+        $driverPayload = array_merge($driverPayload, $this->driverIdentity($data));
+        try {
+            $driverId = DB::table('drivers')->insertGetId($this->onlyColumns('drivers', $driverPayload));
+        } catch (QueryException $e) {
+            report($e);
+            abort(422, 'Could not save this driver. Check the mobile number and try again.');
+        }
         $this->rememberFleetTerritory($fleet, $territory['stateId'], $territory['districtId']);
         $this->storeDriverDocuments($driverId, $data);
         $this->audit($actor, $fleet, 'driver.created', 'driver', $driverId, null, ['userId' => $userId]);
@@ -800,7 +817,8 @@ class OperatorFleetService
                 'weekLabel' => $currentWeek['label'],
                 'creditOn' => $settleOn->toDateString(),
                 'status' => $now->lt($settleOn) ? 'credits_next_day_after_week' : 'week_closed',
-                'note' => 'Completed trips for a week are credited the next day after the week ends (Monday).',
+                'note' => 'This week’s completed bookings and fleet commission are totalled on Monday. Admin or the district head sends that amount to your bank and the transfer is saved as a transaction.',
+                'districtHead' => $this->districtHeadName($fleet),
             ],
             'trips' => $trips,
             'ledger' => $ledger,
@@ -1103,6 +1121,9 @@ class OperatorFleetService
         }
         if (Schema::hasTable('system_settings')) {
             $stored = DB::table('system_settings')->where('key', 'fleet_cut_percent_'.$fleet->id)->value('value');
+            if (! is_numeric($stored)) {
+                $stored = DB::table('system_settings')->where('key', 'fleet_owner_commission_percent')->value('value');
+            }
             if (is_numeric($stored)) {
                 return min(FareCommissionSplit::DISTRICT_PERCENT, max(0, (float) $stored));
             }
@@ -1113,7 +1134,7 @@ class OperatorFleetService
 
     private function fleetSharePaise(object $row, float $pct): int
     {
-        if (Schema::hasColumn('bookings', 'fleet_commission_paise') && isset($row->fleet_commission_paise)) {
+        if (Schema::hasColumn('bookings', 'fleet_commission_paise') && isset($row->fleet_commission_paise) && (int) $row->fleet_commission_paise > 0) {
             return (int) $row->fleet_commission_paise;
         }
         $snap = $row->quote_snapshot ?? null;
@@ -1139,6 +1160,21 @@ class OperatorFleetService
             ->where('bookings.updated_at', '>=', $window['start'])
             ->where('bookings.updated_at', '<=', $window['end'])
             ->sum('bookings.quote_paise');
+    }
+
+    private function districtHeadName(object $fleet): ?string
+    {
+        $districtId = (int) ($fleet->district_id ?? 0);
+        if ($districtId < 1 || ! Schema::hasTable('users')) {
+            return null;
+        }
+        $q = DB::table('users')->where('role', 'DISTRICT_HEAD')->where('district_id', $districtId);
+        if (Schema::hasColumn('users', 'status')) {
+            $q->whereIn('status', ['ACTIVE', 'active']);
+        }
+        $name = $q->orderBy('id')->value('name');
+
+        return $name ? (string) $name : null;
     }
 
     private function fleetWallet(int $userId): ?object
@@ -1237,11 +1273,11 @@ class OperatorFleetService
             'id' => (int) $row->id,
             'registrationNo' => $row->registration_no,
             'vehicleType' => $row->category,
-            'make' => $row->brand,
-            'model' => $row->model,
-            'year' => $row->year,
-            'color' => $row->color,
-            'fuelType' => $row->fuel,
+            'make' => isset($row->brand) ? $row->brand : null,
+            'model' => isset($row->model) ? $row->model : null,
+            'year' => isset($row->year) ? $row->year : null,
+            'color' => isset($row->color) ? $row->color : null,
+            'fuelType' => isset($row->fuel) ? $row->fuel : null,
             'status' => $status,
             'pendingReview' => in_array($status, ['pending_review', 'pending'], true),
             'approved' => ! in_array($status, ['pending_review', 'pending', 'rejected'], true),
@@ -1510,11 +1546,16 @@ class OperatorFleetService
         if (! empty($expires) && Schema::hasColumn($table, 'expires_at')) {
             $payload['expires_at'] = $expires;
         }
-        if ($existing) {
-            DB::table($table)->where('id', $existing)->update($payload);
-        } else {
-            $payload['created_at'] = now();
-            DB::table($table)->insert($payload);
+        try {
+            if ($existing) {
+                DB::table($table)->where('id', $existing)->update($this->onlyColumns($table, $payload));
+            } else {
+                $payload['created_at'] = now();
+                DB::table($table)->insert($this->onlyColumns($table, $payload));
+            }
+        } catch (QueryException $e) {
+            report($e);
+            abort(422, 'Could not save the '.$type.' document.');
         }
     }
 
@@ -1563,8 +1604,8 @@ class OperatorFleetService
         $path = trim($folder, '/').'/'.Str::uuid().'.'.$ext;
         $full = storage_path('app/public/'.$path);
         $dir = dirname($full);
-        abort_unless(is_dir($dir) || mkdir($dir, 0777, true) || is_dir($dir), 500, 'Could not save the attachment');
-        abort_unless(file_put_contents($full, $binary) !== false, 500, 'Could not save the attachment');
+        abort_unless(is_dir($dir) || mkdir($dir, 0777, true) || is_dir($dir), 422, 'Could not save the attachment');
+        abort_unless(file_put_contents($full, $binary) !== false, 422, 'Could not save the attachment');
 
         return [
             'path' => $path,
@@ -1595,6 +1636,40 @@ class OperatorFleetService
         }
 
         return ['stateId' => $stateId, 'districtId' => $districtId, 'city' => $city];
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function driverIdentity(array $data): array
+    {
+        $out = [];
+        $aadhaar = preg_replace('/\D+/', '', (string) ($data['aadhaar'] ?? '')) ?? '';
+        if (preg_match('/^\d{12}$/', $aadhaar)) {
+            $out['aadhaar_last4'] = substr($aadhaar, -4);
+            $out['aadhaar_hash'] = hash('sha256', $aadhaar);
+        }
+        $pan = strtoupper(preg_replace('/\s+/', '', (string) ($data['pan'] ?? '')) ?? '');
+        if (preg_match('/^[A-Z]{5}[0-9]{4}[A-Z]$/', $pan)) {
+            $out['pan_last4'] = substr($pan, -4);
+            $out['pan_hash'] = hash('sha256', $pan);
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     * @return array<string, mixed>
+     */
+    private function onlyColumns(string $table, array $row): array
+    {
+        return array_filter(
+            $row,
+            fn ($key) => Schema::hasColumn($table, (string) $key),
+            ARRAY_FILTER_USE_KEY,
+        );
     }
 
     private function rememberFleetTerritory(object $fleet, int $stateId, int $districtId): void

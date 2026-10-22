@@ -143,6 +143,10 @@ class FareService
             )))) ?: [2, 4, 6, 8, 12],
             'rentalPackages' => $this->rentalPackages(),
             'schedule' => ['reminderMinutes' => 60],
+            'advancePayment' => [
+                'percent' => 10,
+                'products' => \App\Support\AdvancePayment::enabledMap(),
+            ],
             'transfer' => [
                 'airport' => ['placeTypes' => ['airport'], 'requiresFlightNumber' => true],
                 'railway' => ['placeTypes' => ['train_station'], 'requiresTrainNumber' => true],

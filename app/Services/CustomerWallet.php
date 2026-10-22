@@ -77,4 +77,43 @@ class CustomerWallet
             ARRAY_FILTER_USE_KEY,
         ));
     }
+
+    /** A booking payment line that does not change the wallet balance. */
+    public function recordMemo(int $userId, int $bookingId, int $amountPaise, string $note, string $kind, string $direction = 'DEBIT'): void
+    {
+        if ($amountPaise <= 0 || $bookingId < 1 || ! Schema::hasTable('wallets') || ! Schema::hasTable('wallet_ledger')) {
+            return;
+        }
+        $wallet = $this->find($userId);
+        if (! $wallet) {
+            app(WalletAccountService::class)->ensureWallet($userId, 'CUSTOMER');
+            $wallet = $this->find($userId);
+        }
+        if (! $wallet) {
+            return;
+        }
+        $exists = DB::table('wallet_ledger')->where('wallet_id', $wallet->id)->where('booking_id', $bookingId);
+        if (Schema::hasColumn('wallet_ledger', 'kind')) {
+            $exists->where('kind', $kind);
+        }
+        if ($exists->exists()) {
+            return;
+        }
+        $balance = (int) $wallet->balance_paise;
+        DB::table('wallet_ledger')->insert(array_filter([
+            'public_ref' => 'WM'.strtoupper(Str::random(10)),
+            'wallet_id' => $wallet->id,
+            'booking_id' => $bookingId,
+            'owner_user_id' => $userId,
+            'account' => 'CUSTOMER',
+            'direction' => $direction,
+            'amount_paise' => $amountPaise,
+            'balance_before_paise' => $balance,
+            'balance_after_paise' => $balance,
+            'kind' => $kind,
+            'status' => 'posted',
+            'note' => $note,
+            'created_at' => now(),
+        ], fn ($key) => Schema::hasColumn('wallet_ledger', $key), ARRAY_FILTER_USE_KEY));
+    }
 }
