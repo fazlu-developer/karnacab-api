@@ -157,7 +157,12 @@ class IncentiveService
             ->where('status', 'paid')
             ->exists();
         $waitingKyc = $row->role === 'DRIVER' && ! in_array($kyc, ['verified', 'approved', 'active'], true);
-        $status = $paid ? 'bonus_paid' : ($waitingKyc ? 'waiting_kyc' : ($rides >= $needed ? 'eligible' : 'in_progress'));
+        $stored = Schema::hasTable('incentives')
+            ? (string) DB::table('incentives')->where('user_id', $actor->id)->where('kind', $actor->role === 'DRIVER' ? 'driver_referral' : 'customer_referral')->where('related_user_id', $row->id)->value('status')
+            : '';
+        $status = in_array($stored, ['paid', 'credited'], true) || $paid
+            ? 'credited'
+            : ($stored === 'eligible' || (! $waitingKyc && $rides >= max(1, $needed)) ? 'eligible' : 'pending');
 
         return [
             'id' => (string) $row->id,
@@ -254,7 +259,7 @@ class IncentiveService
             ],
             [
                 'title' => 'Refer a driver ₹'.$snap['referralBonusRupees'],
-                'subtitle' => 'You get ₹'.$snap['referralBonusRupees'].' when they complete signup and KYC. They get joining bonus ₹'.$snap['joiningBonusRupees'].'. Code '.$snap['referralCode'],
+                'subtitle' => 'You get ₹'.$snap['referralBonusRupees'].' once, after their KYC is verified and their first ride is completed. They get joining bonus ₹'.$snap['joiningBonusRupees'].'. Code '.$snap['referralCode'],
                 'progressTrips' => collect($snap['referred'])->where('status', 'bonus_paid')->count(),
                 'targetTrips' => max(1, count($snap['referred'])),
                 'progress' => collect($snap['referred'])->isEmpty()
@@ -269,40 +274,132 @@ class IncentiveService
 
     public function grantDriverReferralOnSignup(Driver $newDriver): void
     {
-        $this->maybeGrantDriverReferral($newDriver, 0);
+        $this->syncDriverReferral($newDriver, 0);
     }
 
     private function maybeGrantDriverReferral(Driver $newDriver, int $bookingId): void
     {
-        if (! Schema::hasColumn('users', 'referred_by_user_id')) {
+        $this->syncDriverReferral($newDriver, $bookingId);
+    }
+
+    /**
+     * Joining bonus is credited separately when KYC is verified.
+     * Referral bonus stays pending until KYC is verified and the first completed ride, then credited once.
+     */
+    private function syncDriverReferral(Driver $newDriver, int $bookingId): void
+    {
+        $this->alignReferralPolicy();
+        if (! Schema::hasColumn('users', 'referred_by_user_id') || ! Schema::hasTable('incentives')) {
             return;
         }
         $newUser = User::query()->find($newDriver->user_id);
+        if ($newUser === null) {
+            return;
+        }
         $referrerId = (int) ($newUser->referred_by_user_id ?? 0);
         if ($referrerId < 1 || $referrerId === (int) $newUser->id) {
             return;
         }
-        $needed = $this->settings->driverReferralRequiredRides();
-        $kyc = strtolower((string) ($newDriver->kyc_status ?? ''));
-        $kycDone = in_array($kyc, ['approved', 'verified', 'active'], true);
-        if ($bookingId > 0 && $needed > 0) {
-            if ($this->completedDriverRides((int) $newDriver->id) < $needed) {
+        if ($bookingId > 0) {
+            $booking = Booking::query()->find($bookingId);
+            $status = strtoupper((string) ($booking?->status ?? ''));
+            if ($booking === null || $status !== 'COMPLETED' || (int) $booking->driver_id !== (int) $newDriver->id) {
                 return;
             }
-        } elseif (! $kycDone) {
-            return;
         }
-        if ($this->alreadyPaid($referrerId, 'driver_referral', (int) $newUser->id)) {
-            return;
-        }
+        $kyc = strtolower((string) ($newDriver->kyc_status ?? ''));
+        $kycDone = in_array($kyc, ['approved', 'verified', 'active'], true);
+        $needed = max(1, $this->settings->driverReferralRequiredRides());
+        $rides = $this->completedDriverRides((int) $newDriver->id);
+        $ready = $kycDone && $rides >= $needed;
         $offer = app(TerritoryBonusService::class)->resolve('DRIVER', 'referral', $newUser->state_id ? (int) $newUser->state_id : null, $newUser->district_id ? (int) $newUser->district_id : null);
         $rupees = (int) ($offer['amountRupees'] ?: $this->settings->driverReferralBonusRupees());
-        if ($rupees < 1) {
+        $paise = max(0, $rupees) * 100;
+        $referredId = (int) $newUser->id;
+
+        try {
+            $this->creditReferralOnce($referrerId, $referredId, $bookingId, $ready, $paise, $rupees);
+        } catch (\Throwable $exception) {
+            $message = $exception->getMessage();
+            if (! str_contains($message, 'Duplicate') && ! str_contains($message, '1062') && ! str_contains($message, 'incentives_referral_once')) {
+                throw $exception;
+            }
+        }
+    }
+
+    private function creditReferralOnce(int $referrerId, int $referredId, int $bookingId, bool $ready, int $paise, int $rupees): void
+    {
+        DB::transaction(function () use ($referrerId, $referredId, $bookingId, $ready, $paise, $rupees) {
+            $locked = DB::table('incentives')->where('kind', 'driver_referral')->where('related_user_id', $referredId)->lockForUpdate()->get();
+            if ($locked->contains(fn ($row) => in_array((string) $row->status, ['paid', 'credited'], true))) {
+                return;
+            }
+            $row = $locked->first();
+            $now = now();
+            $payload = [
+                'user_id' => $referrerId,
+                'kind' => 'driver_referral',
+                'amount_paise' => $paise,
+                'status' => $ready ? 'eligible' : 'pending',
+                'related_user_id' => $referredId,
+                'booking_id' => $bookingId > 0 ? $bookingId : ($row->booking_id ?? null),
+                'note' => $ready
+                    ? 'Eligible after verified KYC and the first completed ride'
+                    : 'Pending until KYC is verified and the first ride is completed',
+                'updated_at' => $now,
+            ];
+            if ($row === null) {
+                $payload['created_at'] = $now;
+                $id = (int) DB::table('incentives')->insertGetId($payload);
+            } else {
+                $id = (int) $row->id;
+                DB::table('incentives')->where('id', $id)->update($payload);
+            }
+            $fresh = DB::table('incentives')->where('id', $id)->lockForUpdate()->first();
+            if ($fresh === null || ! $ready || $paise < 1 || in_array((string) $fresh->status, ['paid', 'credited'], true)) {
+                return;
+            }
+            $this->creditCash($referrerId, 'DRIVER', $paise, 'driver_referral', $bookingId > 0 ? $bookingId : null, 'Referral bonus ₹'.$rupees.' after referred driver completed the first ride');
+            DB::table('incentives')->where('id', $id)->whereNotIn('status', ['paid', 'credited'])->update([
+                'status' => 'credited',
+                'booking_id' => $bookingId > 0 ? $bookingId : $fresh->booking_id,
+                'note' => 'Referral bonus credited once after the first completed ride',
+                'updated_at' => now(),
+            ]);
+        });
+    }
+
+    private function alignReferralPolicy(): void
+    {
+        static $done = false;
+        if ($done || ! Schema::hasTable('system_settings')) {
             return;
         }
-        $paise = $rupees * 100;
-        $this->creditCash($referrerId, 'DRIVER', $paise, 'driver_referral', $bookingId > 0 ? $bookingId : null, 'Referral bonus ₹'.$rupees.' when referred driver completed KYC');
-        $this->recordIncentive($referrerId, 'driver_referral', $paise, $bookingId > 0 ? $bookingId : null, (int) $newUser->id, 'Referral bonus when referred driver completed signup');
+        $done = true;
+        if (Schema::hasTable('incentives')) {
+            try {
+                Schema::table('incentives', function ($table) {
+                    $table->unique(['kind', 'related_user_id'], 'incentives_referral_once');
+                });
+            } catch (\Throwable) {
+                // Index already exists, or older duplicate rows still need a manual cleanup.
+            }
+        }
+        $now = now();
+        $rides = DB::table('system_settings')->where('key', 'driver_referral_required_rides')->value('value');
+        if ($rides === null || in_array((string) $rides, ['0', '10'], true)) {
+            DB::table('system_settings')->updateOrInsert(
+                ['key' => 'driver_referral_required_rides'],
+                ['value' => '1', 'updated_at' => $now, 'created_at' => $now],
+            );
+        }
+        $amount = DB::table('system_settings')->where('key', 'driver_referral_bonus_rupees')->value('value');
+        if ($amount === null || (string) $amount === '150') {
+            DB::table('system_settings')->updateOrInsert(
+                ['key' => 'driver_referral_bonus_rupees'],
+                ['value' => '50', 'updated_at' => $now, 'created_at' => $now],
+            );
+        }
     }
 
     private function maybeGrantCustomerJoining(User $customer, int $bookingId): void

@@ -116,19 +116,20 @@ class BookingService
         $timeout = self::searchesNearbyNow($product) ? 600 : $this->settings->requestTimeoutSeconds();
         $scheduledAt = null;
         $keepFlightTime = in_array($product, ['AIRPORT', 'RAILWAY'], true);
-        if (! empty($dto['scheduledAt']) && (! self::searchesNearbyNow($product) || $keepFlightTime)) {
+        $keepChosenTime = $keepFlightTime || $product === 'ONE_WAY';
+        if (! empty($dto['scheduledAt']) && (! self::searchesNearbyNow($product) || $keepChosenTime)) {
             try {
                 $scheduledAt = \Illuminate\Support\Carbon::parse($dto['scheduledAt']);
             } catch (\Throwable) {
                 $scheduledAt = null;
             }
         }
-        if (self::searchesNearbyNow($product) && ! $keepFlightTime) {
+        if (self::searchesNearbyNow($product) && ! $keepChosenTime) {
             $dto['scheduledAt'] = null;
         } elseif ($scheduledAt !== null) {
             $dto['scheduledAt'] = $scheduledAt->toDateTimeString();
         }
-        $futureSchedule = ! $keepFlightTime && $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(5));
+        $futureSchedule = $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(5)) && ($product === 'ONE_WAY' || ! $keepFlightTime);
         $driverDispatch = self::driverCanAccept($product) && ! $futureSchedule;
         if ($product === 'RENTAL' && empty($dto['scheduledAt'])) {
             $dto['scheduledAt'] = now()->addHour()->toIso8601String();
