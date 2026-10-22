@@ -34,11 +34,14 @@ class CustomerWallet
         $wallet = $this->find($userId);
         abort_unless($wallet, 422, 'Wallet not found');
         if ($bookingId && Schema::hasTable('wallet_ledger') && Schema::hasColumn('wallet_ledger', 'booking_id')) {
-            $exists = DB::table('wallet_ledger')
+            $existsQuery = DB::table('wallet_ledger')
                 ->where('wallet_id', $wallet->id)
                 ->where('booking_id', $bookingId)
-                ->whereIn('direction', ['debit', 'DEBIT'])
-                ->exists();
+                ->whereIn('direction', ['debit', 'DEBIT']);
+            if (Schema::hasColumn('wallet_ledger', 'kind')) {
+                $existsQuery->where('kind', $kind);
+            }
+            $exists = $existsQuery->exists();
             if ($exists) {
                 return;
             }
