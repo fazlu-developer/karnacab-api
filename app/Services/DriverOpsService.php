@@ -928,17 +928,12 @@ class DriverOpsService
         $rows = \App\Models\Booking::query()
             ->whereNotNull('scheduled_at')
             ->whereNotIn('status', \App\Support\BookingStatus::terminal())
-            ->where(function ($inner) use ($driver, $category) {
-                $inner->where('driver_id', $driver->id)
-                    ->orWhere(function ($open) use ($category) {
-                        $open->whereNull('driver_id')
-                            ->whereIn('status', array_merge(\App\Support\BookingStatus::searching(), ['CONFIRMED']));
-                        if ($category) {
-                            $open->where(function ($cat) use ($category) {
-                                $cat->where('category', $category)->orWhereNull('category');
-                            });
-                        }
-                    });
+            ->whereNull('driver_id')
+            ->whereIn('status', array_merge(\App\Support\BookingStatus::searching(), ['CONFIRMED']))
+            ->when($category, function ($query) use ($category) {
+                $query->where(function ($cat) use ($category) {
+                    $cat->where('category', $category)->orWhereNull('category');
+                });
             })
             ->orderBy('scheduled_at')
             ->limit(40)
@@ -948,12 +943,7 @@ class DriverOpsService
             $presented = app(BookingService::class)->present($row, $actor);
             $presented['kind'] = 'ride';
             $presented['scheduled'] = true;
-            $allowed = $presented['allowedActions'] ?? [];
-            $presented['actions'] = $row->driver_id
-                ? (in_array('activate', $allowed, true)
-                    ? array_values(array_filter(['activate', in_array('cancel', $allowed, true) ? 'cancel' : null]))
-                    : (in_array('cancel', $allowed, true) ? ['cancel'] : ['view']))
-                : ['accept', 'reject'];
+            $presented['actions'] = ['accept', 'reject'];
 
             return $presented;
         })->all();

@@ -466,9 +466,17 @@ class PlatformController extends Controller
     public function bookingsReschedule(Request $request, string $id)
     {
         $booking = \App\Models\Booking::query()->findOrFail($id);
-        $booking->update(['scheduled_at' => $request->input('scheduledAt')]);
+        abort_unless((int) $request->user()->id === (int) $booking->customer_id, 403, 'Only the customer can change this booking.');
+        $when = $request->input('scheduledAt');
+        abort_unless($when, 422, 'Choose a new date and time.');
+        $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        unset($snapshot['reminder3h']);
+        $booking->update([
+            'scheduled_at' => $when,
+            'quote_snapshot' => $snapshot,
+        ]);
 
-        return $this->bookings->present($booking->fresh());
+        return $this->bookings->present($booking->fresh(), $request->user());
     }
 
     public function bookingsRate(Request $request, string $id)

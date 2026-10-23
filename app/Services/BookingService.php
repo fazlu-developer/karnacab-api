@@ -150,7 +150,12 @@ class BookingService
             $districtId,
             (string) ($dto['product'] ?? 'LOCAL_CAB'),
         ) : [];
+        // One-way and round-trip nearby searches pay the full fare after the trip.
+        // A future schedule collects 10% only after a driver accepts.
         $collectAdvance = \App\Support\AdvancePayment::enabled($product) && ! $futureSchedule;
+        if (in_array($product, ['ONE_WAY', 'ROUND_WAY'], true)) {
+            $collectAdvance = false;
+        }
         if ($collectAdvance) {
             $totalPaise = (int) ($quote['totalPaise'] ?? 0);
             $quote['prebook'] = true;
@@ -1634,11 +1639,19 @@ class BookingService
             if ($km > $radius) {
                 continue;
             }
+            $alreadyOffered = Schema::hasTable('booking_driver_requests')
+                && DB::table('booking_driver_requests')
+                    ->where('booking_id', $booking->id)
+                    ->where('driver_id', $driver->id)
+                    ->exists();
             $this->writeOffers($booking, [[
                 'driverId' => (int) $driver->id,
                 'userId' => (int) $actor->id,
                 'distanceKm' => round($km, 2),
             ]]);
+            if ($alreadyOffered) {
+                continue;
+            }
             $pushes[] = [
                 'title' => 'New KarnaRide booking',
                 'body' => trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
