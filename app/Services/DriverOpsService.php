@@ -271,7 +271,7 @@ class DriverOpsService
                 'needsAdvance' => ! empty($snapshot['advanceAfterAccept']) && $advancePaid < 1,
                 'customerPhone' => $phone,
                 'actions' => (string) $row->status === 'SCHEDULED'
-                    ? ($advancePaid > 0 ? ['activate'] : ['activate', 'cancel'])
+                    ? ($advancePaid > 0 ? ['activate'] : [])
                     : [],
             ];
         })->all();

@@ -169,6 +169,10 @@ class BookingService
             }
         }
         $mode = $this->normalizePaymentMode($dto['paymentMode'] ?? $dto['payment_mode'] ?? 'CASH');
+        $laterAdvance = $futureSchedule && \App\Support\AdvancePayment::enabled($product);
+        if ($laterAdvance && $mode === 'CASH') {
+            $mode = 'UPI';
+        }
         if ($collectAdvance && $mode === 'CASH') {
             abort(422, 'Cash cannot confirm this booking. Pay the 10% advance with PayU or wallet.');
         }
@@ -182,10 +186,9 @@ class BookingService
             $quote['payuTxnId'] = $payuTxn;
             $quote['commissionSettled'] = true;
         }
-        if ($mode === 'WALLET') {
+        if ($mode === 'WALLET' && $collectAdvance) {
             $balance = app(CustomerWallet::class)->balancePaise((int) $actor->id);
-            $dueNow = $collectAdvance ? (int) ($quote['advancePaise'] ?? 0) : (int) $quote['totalPaise'];
-            abort_unless($balance >= $dueNow, 422, $collectAdvance ? 'Add wallet balance to pay the 10% advance.' : 'Add wallet balance to pay with wallet.');
+            abort_unless($balance >= (int) ($quote['advancePaise'] ?? 0), 422, 'Add wallet balance to pay the 10% advance.');
         }
 
         $booking = Booking::query()->create($this->filterColumns([
@@ -461,6 +464,13 @@ class BookingService
                 ];
                 $title = NotificationTemplates::fill($notice['title'], $vars);
                 $body = NotificationTemplates::fill($notice['body'], $vars);
+                $snap = is_array($noticeBooking->quote_snapshot) ? $noticeBooking->quote_snapshot : [];
+                $futureAccept = $noticeBooking->scheduled_at
+                    && \Illuminate\Support\Carbon::parse($noticeBooking->scheduled_at)->greaterThan(now()->addMinutes(5));
+                if ($futureAccept && ! empty($snap['advanceAfterAccept']) && (int) ($snap['advancePaidPaise'] ?? 0) < 1) {
+                    $title = 'Driver accepted. Pay 10% to confirm';
+                    $body = 'Pay the 10% commission with PayU or wallet to confirm booking '.$noticeBooking->public_ref.'.';
+                }
                 if (in_array('in_app', $notice['channels'], true) || in_array('push', $notice['channels'], true)) {
                     $this->push->notifyUsers(
                         [(int) $noticeBooking->customer_id],
@@ -978,7 +988,10 @@ class BookingService
             'advancePaise' => (int) ($snapshot['advancePaise'] ?? 0),
             'advancePaidPaise' => (int) ($snapshot['advancePaidPaise'] ?? 0),
             'advanceAfterAccept' => ! empty($snapshot['advanceAfterAccept']),
-            'needsAdvance' => ! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1,
+            'needsAdvance' => ! empty($snapshot['advanceAfterAccept'])
+                && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1
+                && (string) $row->status === 'SCHEDULED'
+                && ! empty($row->driver_id),
             'canActivate' => $this->scheduleCanActivate($row),
             'roundTripPhase' => strtoupper((string) $row->product) === 'ROUND_WAY'
                 ? ($snapshot['roundTripPhase'] ?? (empty($snapshot['oneSideCompletedAt']) ? null : 'waiting'))
@@ -1119,27 +1132,45 @@ class BookingService
             ->get();
         foreach ($rows as $booking) {
             $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
-            if (! empty($snapshot['reminder3h'])) {
+            if (! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1) {
+                continue;
+            }
+            if (! $booking->driver_id) {
                 continue;
             }
             $when = \App\Support\IndiaTime::format($booking->scheduled_at) ?: 'the scheduled time';
-            $title = 'Upcoming ride';
-            $body = 'Booking '.$booking->public_ref.' is at '.$when.'. Be ready about 3 hours before pickup.';
             $ids = [(int) $booking->customer_id];
-            if ($booking->driver_id) {
-                $driverUserId = Driver::query()->where('id', $booking->driver_id)->value('user_id');
-                if ($driverUserId) {
-                    $ids[] = (int) $driverUserId;
-                }
+            $driverUserId = $booking->driver_id
+                ? Driver::query()->where('id', $booking->driver_id)->value('user_id')
+                : null;
+            if ($driverUserId) {
+                $ids[] = (int) $driverUserId;
             }
-            $this->push->notifyUsers($ids, $title, $body, [
-                'type' => 'trip',
-                'event' => 'ride_reminder',
-                'bookingId' => (string) $booking->id,
-            ]);
-            $snapshot['reminder3h'] = now()->toIso8601String();
-            $booking->update($this->filterColumns(['quote_snapshot' => $snapshot]));
-            $sent++;
+            $dueAt = \Illuminate\Support\Carbon::parse($booking->scheduled_at);
+            $within45 = $dueAt->lte(now()->addMinutes(45));
+            $changed = false;
+            if ($within45 && empty($snapshot['reminder45m'])) {
+                $this->push->notifyUsers($ids, 'Ride is almost due', 'Booking '.$booking->public_ref.' is at '.$when.'. Customer be ready. Driver can activate the booking.', [
+                    'type' => 'trip',
+                    'event' => 'ride_reminder',
+                    'bookingId' => (string) $booking->id,
+                ]);
+                $snapshot['reminder45m'] = now()->toIso8601String();
+                $changed = true;
+                $sent++;
+            } elseif (empty($snapshot['reminder3h'])) {
+                $this->push->notifyUsers($ids, 'Upcoming ride', 'Booking '.$booking->public_ref.' is at '.$when.'. Be ready about 3 hours before pickup.', [
+                    'type' => 'trip',
+                    'event' => 'ride_reminder',
+                    'bookingId' => (string) $booking->id,
+                ]);
+                $snapshot['reminder3h'] = now()->toIso8601String();
+                $changed = true;
+                $sent++;
+            }
+            if ($changed) {
+                $booking->update($this->filterColumns(['quote_snapshot' => $snapshot]));
+            }
         }
 
         return $sent;
@@ -1227,15 +1258,11 @@ class BookingService
      */
     private function scheduledDriverActions(Booking $row): array
     {
-        $actions = [];
         if ($this->scheduleCanActivate($row)) {
-            $actions[] = 'activate';
-        }
-        if (! $this->commissionLocksDriver($row)) {
-            $actions[] = 'cancel';
+            return ['activate'];
         }
 
-        return $actions;
+        return [];
     }
 
     /**
@@ -1319,8 +1346,20 @@ class BookingService
         $booking = Booking::query()->find($id);
         abort_unless($booking, 404, 'Booking not found');
         abort_unless((int) $booking->customer_id === (int) $actor->id, 403, 'This booking is not yours.');
-        abort_unless((string) $booking->status === 'SCHEDULED', 422, 'Wait until a driver accepts this scheduled booking.');
+        $status = (string) $booking->status;
+        $future = $booking->scheduled_at && \Illuminate\Support\Carbon::parse($booking->scheduled_at)->greaterThan(now()->addMinutes(5));
+        abort_unless(in_array($status, ['SCHEDULED', BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED], true), 422, 'Wait until a driver accepts this scheduled booking.');
+        abort_unless($future || $status === 'SCHEDULED', 422, 'Wait until a driver accepts this scheduled booking.');
         $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        $product = strtoupper((string) $booking->product);
+        if (empty($snapshot['advanceAfterAccept']) && $future && in_array($product, ['ONE_WAY', 'ROUND_WAY'], true)) {
+            $snapshot['advanceAfterAccept'] = true;
+            $snapshot['prebook'] = true;
+            $snapshot['advancePercent'] = 10;
+            if ((int) ($snapshot['advancePaise'] ?? 0) < 1) {
+                $snapshot['advancePaise'] = (int) round(((int) ($booking->quote_paise ?? 0)) * 0.10);
+            }
+        }
         abort_unless(! empty($snapshot['advanceAfterAccept']), 422, 'This booking does not need an advance.');
         if ((int) ($snapshot['advancePaidPaise'] ?? 0) > 0) {
             return $this->present($booking, $actor);
@@ -1340,12 +1379,15 @@ class BookingService
             $snapshot['payuTxnId'] = $payuTxn;
         }
         if ($mode === 'WALLET') {
+            $balance = app(CustomerWallet::class)->balancePaise((int) $actor->id);
+            abort_unless($balance >= $due, 422, 'Add wallet balance to pay the 10% advance.');
             app(CustomerWallet::class)->debit((int) $actor->id, $due, '10% advance for booking '.$booking->public_ref.' paid to admin', (int) $booking->id, 'advance');
         }
         $snapshot['advancePaidPaise'] = $due;
         $snapshot['commissionSettled'] = true;
         $booking->update($this->filterColumns([
             'payment_mode' => $mode,
+            'status' => $future ? 'SCHEDULED' : $status,
             'quote_snapshot' => $snapshot,
         ]));
         $fresh = $booking->fresh();
@@ -1363,8 +1405,8 @@ class BookingService
         if ($driverUserId) {
             $this->push->notifyUsers(
                 [(int) $driverUserId],
-                '10% advance paid',
-                'Customer paid the 10% for '.$fresh->public_ref.'. Activate the booking or call the customer. Commission was not taken from your wallet.',
+                '10% commission paid',
+                'Customer paid the 10% for '.$fresh->public_ref.'. You cannot cancel. Call the customer, then activate when it is time. Commission was not taken from your wallet.',
                 ['type' => 'trip', 'event' => 'advance_paid', 'bookingId' => (string) $fresh->id],
             );
         }
@@ -1808,7 +1850,7 @@ class BookingService
         if (str_contains($raw, 'WALLET') || $raw === 'KARNACAB CASH') {
             return 'WALLET';
         }
-        if (str_contains($raw, 'UPI')) {
+        if (str_contains($raw, 'UPI') || in_array($raw, ['ONLINE', 'PAYU', 'CARD', 'NETBANKING', 'RAZORPAY'], true)) {
             return 'UPI';
         }
 
