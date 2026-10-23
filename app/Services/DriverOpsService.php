@@ -216,8 +216,9 @@ class DriverOpsService
                     ->all();
             }
         }
+        $scheduled = $this->scheduledOffers($actor);
         $merged = [];
-        foreach (array_merge($rides, $parcels) as $row) {
+        foreach (array_merge($rides, $parcels, $scheduled) as $row) {
             $key = ($row['kind'] ?? 'ride').':'.($row['id'] ?? '');
             $merged[$key] = $row;
         }
@@ -931,7 +932,9 @@ class DriverOpsService
             $presented = app(BookingService::class)->present($row, $actor);
             $presented['kind'] = 'ride';
             $presented['scheduled'] = true;
-            $presented['actions'] = $row->driver_id ? ['view'] : ['accept', 'reject'];
+            $presented['actions'] = $row->driver_id
+                ? (in_array('activate', $presented['allowedActions'] ?? [], true) ? ['activate', 'cancel'] : ['view'])
+                : ['accept', 'reject'];
 
             return $presented;
         })->all();

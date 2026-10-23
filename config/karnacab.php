@@ -1,7 +1,7 @@
 <?php
 
 return [
-    'jwt_ttl' => 60 * 60 * 24 * 7,
+    'jwt_ttl' => 60 * 60 * 24 * 365,
     'api_public_url' => rtrim((string) env('API_PUBLIC_URL', env('APP_URL', 'https://api.karnaride.in')), '/'),
     'leads_notify_email' => (string) env('LEADS_NOTIFY_EMAIL', env('MAIL_FROM_ADDRESS', 'karnaride@gmail.com')),
     'booking_notify_email' => (string) env('BOOKING_NOTIFY_EMAIL', 'karnaride@gmail.com'),

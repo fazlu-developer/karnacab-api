@@ -99,6 +99,8 @@ Route::middleware('jwt')->group(function () {
     Route::get('/v1/bookings/{id}/live', [PlatformController::class, 'bookingsLive']);
     Route::get('/v1/bookings/{id}', [PlatformController::class, 'bookingsOne']);
     Route::post('/v1/bookings/{id}/accept', [PlatformController::class, 'bookingsAccept']);
+    Route::post('/v1/bookings/{id}/advance', [PlatformController::class, 'bookingsAdvance']);
+    Route::post('/v1/bookings/{id}/activate', [PlatformController::class, 'bookingsActivate']);
     Route::post('/v1/bookings/{id}/reject', [PlatformController::class, 'bookingsReject']);
     Route::post('/v1/bookings/{id}/cancel', [PlatformController::class, 'bookingsCancel']);
     Route::post('/v1/bookings/{id}/verify-otp', [PlatformController::class, 'bookingsVerifyOtp']);

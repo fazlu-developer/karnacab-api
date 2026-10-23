@@ -80,7 +80,8 @@ final class BookingStatus
         }
         $map = [
             self::PENDING => [self::SEARCHING, self::CUSTOMER_CANCELLED, self::EXPIRED],
-            self::SEARCHING => [self::DRIVER_ACCEPTED, self::CUSTOMER_CANCELLED, self::EXPIRED],
+            self::SEARCHING => [self::DRIVER_ACCEPTED, 'SCHEDULED', self::CUSTOMER_CANCELLED, self::EXPIRED],
+            'SCHEDULED' => [self::DRIVER_ACCEPTED, self::CUSTOMER_CANCELLED, self::DRIVER_CANCELLED],
             self::LEGACY_REQUESTED => [self::DRIVER_ACCEPTED, self::CUSTOMER_CANCELLED, self::EXPIRED, self::LEGACY_ASSIGNED],
             'DRIVER_SEARCHING' => [self::DRIVER_ACCEPTED, self::CUSTOMER_CANCELLED, self::EXPIRED],
             self::DRIVER_ACCEPTED => [self::DRIVER_ARRIVED, self::CUSTOMER_CANCELLED, self::DRIVER_CANCELLED],
@@ -101,6 +102,7 @@ final class BookingStatus
             'CONFIRMED' => 'confirmed',
             'PENDING_REVIEW' => 'pending_review',
             self::SEARCHING, self::LEGACY_REQUESTED, 'DRIVER_SEARCHING' => 'driver_searching',
+            'SCHEDULED' => 'scheduled',
             self::DRIVER_ACCEPTED, self::LEGACY_ASSIGNED, 'DRIVER_ASSIGNED', 'DRIVER_ARRIVING' => 'driver_assigned',
             self::DRIVER_ARRIVED => 'driver_arrived',
             self::OTP_VERIFIED => 'otp_verified',

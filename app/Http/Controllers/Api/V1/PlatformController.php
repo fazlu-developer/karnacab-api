@@ -403,6 +403,16 @@ class PlatformController extends Controller
         return $this->bookings->accept($request->user(), $id);
     }
 
+    public function bookingsAdvance(Request $request, string $id)
+    {
+        return $this->bookings->payAdvance($request->user(), $id, $request->all());
+    }
+
+    public function bookingsActivate(Request $request, string $id)
+    {
+        return $this->bookings->activate($request->user(), $id);
+    }
+
     public function bookingsReject(Request $request, string $id)
     {
         return $this->bookings->reject($request->user(), $id);

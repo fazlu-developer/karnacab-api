@@ -132,7 +132,10 @@ class BookingService
         }
         $advanceProducts = array_keys(\App\Support\AdvancePayment::PRODUCTS);
         $futureSchedule = $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(5)) && in_array($product, $advanceProducts, true);
-        $driverDispatch = self::driverCanAccept($product) && ! $futureSchedule;
+        $driverDispatch = self::driverCanAccept($product);
+        if ($futureSchedule) {
+            $timeout = max($timeout, $scheduledAt->getTimestamp() - now()->getTimestamp());
+        }
         if ($product === 'RENTAL' && empty($dto['scheduledAt'])) {
             $dto['scheduledAt'] = now()->addHour()->toIso8601String();
         }
@@ -147,7 +150,7 @@ class BookingService
             $districtId,
             (string) ($dto['product'] ?? 'LOCAL_CAB'),
         ) : [];
-        $collectAdvance = \App\Support\AdvancePayment::enabled($product);
+        $collectAdvance = \App\Support\AdvancePayment::enabled($product) && ! $futureSchedule;
         if ($collectAdvance) {
             $totalPaise = (int) ($quote['totalPaise'] ?? 0);
             $quote['prebook'] = true;
@@ -187,7 +190,7 @@ class BookingService
             'product' => $dto['product'],
             'category' => $dto['category'],
             'status' => $status,
-            'search_expires_at' => $driverDispatch ? now()->addSeconds($timeout) : null,
+            'search_expires_at' => $futureSchedule ? $scheduledAt : ($driverDispatch ? now()->addSeconds($timeout) : null),
             'pickup_text' => $dto['pickupText'] ?? $dto['pickup'] ?? 'Pickup',
             'drop_text' => $dto['dropText'] ?? $dto['drop'] ?? 'Drop',
             'pickup_lat' => $pickupLat,
@@ -225,6 +228,16 @@ class BookingService
         ]));
 
         $this->storeStops($booking, is_array($dto['stops'] ?? null) ? $dto['stops'] : []);
+        if ($futureSchedule && \App\Support\AdvancePayment::enabled($product)) {
+            $totalPaise = (int) ($quote['totalPaise'] ?? 0);
+            $quote['prebook'] = true;
+            $quote['advanceAfterAccept'] = true;
+            $quote['advancePercent'] = 10;
+            $quote['advancePaise'] = (int) round($totalPaise * 0.10);
+            $booking->update($this->filterColumns([
+                'quote_snapshot' => array_merge(is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [], $quote),
+            ]));
+        }
         if ($collectAdvance && $mode === 'WALLET' && (int) ($quote['advancePaise'] ?? 0) > 0) {
             app(CustomerWallet::class)->debit((int) $actor->id, (int) $quote['advancePaise'], '10% advance for booking '.$booking->public_ref.' paid to admin', (int) $booking->id, 'advance');
             $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
@@ -399,6 +412,7 @@ class BookingService
             abort_unless($booking, 404, 'Booking not found');
             abort_unless(BookingStatus::isSearching((string) $booking->status) && ! $booking->driver_id, 409, 'Booking has already been accepted by another driver.');
             abort_unless(strcasecmp((string) $vehicle->category, (string) $booking->category) === 0, 422, 'Vehicle category does not match this booking.');
+            $future = $booking->scheduled_at && \Illuminate\Support\Carbon::parse($booking->scheduled_at)->greaterThan(now()->addMinutes(5));
 
             $updated = Booking::query()
                 ->where('id', $booking->id)
@@ -407,10 +421,12 @@ class BookingService
                 ->update($this->filterColumns([
                     'driver_id' => $driver->id,
                     'vehicle_id' => $vehicle->id,
-                    'status' => BookingStatus::DRIVER_ACCEPTED,
+                    'status' => $future ? 'SCHEDULED' : BookingStatus::DRIVER_ACCEPTED,
                 ]));
             abort_unless($updated === 1, 409, 'Booking has already been accepted by another driver.');
-            $driver->update(['duty_status' => 'on_trip']);
+            if (! $future) {
+                $driver->update(['duty_status' => 'on_trip']);
+            }
             $this->markRequest((int) $booking->id, (int) $driver->id, 'ACCEPTED');
             $this->closeOtherOffers((int) $booking->id, (int) $driver->id);
             $assigned = true;
@@ -938,6 +954,8 @@ class BookingService
             'advancePercent' => (int) ($snapshot['advancePercent'] ?? 0),
             'advancePaise' => (int) ($snapshot['advancePaise'] ?? 0),
             'advancePaidPaise' => (int) ($snapshot['advancePaidPaise'] ?? 0),
+            'needsAdvance' => ! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1,
+            'canActivate' => $this->scheduleCanActivate($row),
             'advanceRupees' => ((int) ($snapshot['advancePaise'] ?? 0)) / 100,
             'balanceRupees' => max(0, $total - (int) ($snapshot['advancePaise'] ?? 0)) / 100,
             'searchRadiusKm' => $radius,
@@ -1045,6 +1063,83 @@ class BookingService
     /**
      * @return list<string>
      */
+    private function scheduleCanActivate(Booking $row): bool
+    {
+        if ((string) $row->status !== 'SCHEDULED' || ! $row->scheduled_at) {
+            return false;
+        }
+        $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
+        if (! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1) {
+            return false;
+        }
+
+        return \Illuminate\Support\Carbon::parse($row->scheduled_at)->lte(now()->addMinutes(45));
+    }
+
+    public function payAdvance(User $actor, string $id, array $dto): array
+    {
+        $booking = Booking::query()->find($id);
+        abort_unless($booking, 404, 'Booking not found');
+        abort_unless((int) $booking->customer_id === (int) $actor->id, 403, 'This booking is not yours.');
+        abort_unless((string) $booking->status === 'SCHEDULED', 422, 'Wait until a driver accepts this scheduled booking.');
+        $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        abort_unless(! empty($snapshot['advanceAfterAccept']), 422, 'This booking does not need an advance.');
+        if ((int) ($snapshot['advancePaidPaise'] ?? 0) > 0) {
+            return $this->present($booking, $actor);
+        }
+        $due = (int) ($snapshot['advancePaise'] ?? 0);
+        abort_unless($due > 0, 422, 'This booking does not need an advance.');
+        $mode = $this->normalizePaymentMode($dto['paymentMode'] ?? $dto['payment_mode'] ?? $booking->payment_mode ?? 'UPI');
+        if ($mode === 'CASH') {
+            abort(422, 'Pay the 10% advance with PayU or wallet.');
+        }
+        if ($mode === 'UPI') {
+            $payuTxn = trim((string) ($dto['payuTxnId'] ?? $dto['payu_txn_id'] ?? ''));
+            abort_unless($payuTxn !== '', 422, 'Pay the 10% advance with PayU to confirm this booking.');
+            $intent = DB::table('payment_intents')->where('txnid', $payuTxn)->where('user_id', $actor->id)->first();
+            abort_unless($intent && ($intent->status ?? '') === 'captured', 422, 'PayU advance is not paid yet.');
+            abort_unless((int) $intent->amount_paise >= $due, 422, 'PayU advance is less than 10%.');
+            $snapshot['payuTxnId'] = $payuTxn;
+        }
+        if ($mode === 'WALLET') {
+            app(CustomerWallet::class)->debit((int) $actor->id, $due, '10% advance for booking '.$booking->public_ref.' paid to admin', (int) $booking->id, 'advance');
+        }
+        $snapshot['advancePaidPaise'] = $due;
+        $snapshot['commissionSettled'] = true;
+        $booking->update($this->filterColumns([
+            'payment_mode' => $mode,
+            'quote_snapshot' => $snapshot,
+        ]));
+        $fresh = $booking->fresh();
+        $this->settleAdvanceCommission($fresh, $due);
+        if ($mode !== 'WALLET') {
+            app(CustomerWallet::class)->recordMemo(
+                (int) $actor->id,
+                (int) $fresh->id,
+                $due,
+                '10% advance for booking '.$fresh->public_ref.' paid to admin',
+                'advance',
+            );
+        }
+
+        return $this->present($fresh->fresh(), $actor);
+    }
+
+    public function activate(User $actor, string $id): array
+    {
+        abort_unless($actor->role === 'DRIVER', 403, 'Only drivers can start a scheduled booking.');
+        $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
+        $booking = Booking::query()->where('id', $id)->where('driver_id', $driver->id)->first();
+        abort_unless($booking, 404, 'Booking not found');
+        abort_unless($this->scheduleCanActivate($booking), 422, 'This scheduled booking can be activated 45 minutes before the pickup time, after the customer pays the 10% advance.');
+        $busy = Booking::query()->where('driver_id', $driver->id)->where('id', '!=', $booking->id)->whereIn('status', BookingStatus::openForDriver())->exists();
+        abort_if($busy, 422, 'Finish your current trip before activating this booking.');
+        $booking->update($this->filterColumns(['status' => BookingStatus::DRIVER_ACCEPTED]));
+        $driver->update(['duty_status' => 'on_trip', 'online' => 1]);
+
+        return $this->present($booking->fresh(), $actor);
+    }
+
     private function allowedActions(Booking $row, ?User $actor): array
     {
         $status = (string) $row->status;
@@ -1061,6 +1156,7 @@ class BookingService
                 BookingStatus::DRIVER_ARRIVED,
                 'DRIVER_SEARCHING',
                 'CONFIRMED',
+                'SCHEDULED',
             ], true)) {
                 return ['cancel'];
             }
@@ -1077,6 +1173,7 @@ class BookingService
                 return [];
             }
             return match ($status) {
+                'SCHEDULED' => $this->scheduleCanActivate($row) ? ['activate', 'cancel'] : ['cancel'],
                 BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED, 'DRIVER_ARRIVING' => ['arrive', 'cancel'],
                 BookingStatus::DRIVER_ARRIVED => ['verify_otp'],
                 BookingStatus::OTP_VERIFIED, BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED' => ['complete'],
