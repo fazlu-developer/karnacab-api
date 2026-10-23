@@ -852,6 +852,11 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
         return $this->surface->adsServe($request->query('placement'));
     }
 
+    public function adBanner(string $id)
+    {
+        return $this->surface->adBannerFile($id);
+    }
+
     public function adsNoop()
     {
         return ['ok' => true];

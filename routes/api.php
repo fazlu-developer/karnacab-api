@@ -29,6 +29,7 @@ Route::get('/v1/parcels/catalog', [PlatformController::class, 'parcelCatalog']);
 Route::get('/v1/bulk/catalog', [PlatformController::class, 'bulkCatalog']);
 Route::get('/v1/corporate/catalog', [PlatformController::class, 'corporateCatalog']);
 Route::get('/v1/ads/catalog', fn () => ['ok' => true, 'module' => 'ads']);
+Route::get('/v1/ads/{id}/banner', [PlatformController::class, 'adBanner']);
 Route::get('/v1/support/catalog', [PlatformController::class, 'supportFaqs']);
 Route::get('/v1/support/faqs', [PlatformController::class, 'supportFaqs']);
 Route::get('/v1/safety/catalog', [PlatformController::class, 'safetyCatalog']);

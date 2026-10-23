@@ -49,8 +49,11 @@ class NearbyDriverService
                     ->orWhere('u.location_updated_at', '>=', $staleAfter);
             })
             ->where(function ($q) use ($category) {
-                $q->where('v.category', $category)
-                    ->orWhereRaw('UPPER(v.category) = ?', [strtoupper($category)]);
+                $family = \App\Support\VehicleCategory::family((string) $category);
+                $q->whereIn('v.category', $family);
+                foreach ($family as $item) {
+                    $q->orWhereRaw('UPPER(v.category) = ?', [$item]);
+                }
             })
             ->whereNotExists(function ($q) use ($busyStatuses) {
                 $q->select(DB::raw(1))

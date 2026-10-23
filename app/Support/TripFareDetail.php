@@ -106,6 +106,9 @@ class TripFareDetail
         $customerNote = $isRound
             ? 'Ride charges are one-way km × 2. Driver allowance and waiting between one side complete and return start are added to this total. No separate waiting payment.'
             : 'Ride charges for this '.strtolower(self::serviceLabel($product)).' are shown above.';
+        if ($advancePaid > 0 && $advancePaid < $totalPaise) {
+            $customerNote .= ' 10% was already paid when the driver accepted.';
+        }
         if ($cash) {
             $customerNote .= $advancePaid > 0 && $advancePaid < $totalPaise
                 ? ' Pay the remaining amount in cash to the driver.'

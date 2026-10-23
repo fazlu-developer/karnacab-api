@@ -181,12 +181,11 @@ class DriverOpsService
         if ($dash['canReceiveOffers']) {
             $rides = app(BookingService::class)->offersForDriver($actor);
             if (Schema::hasTable('parcel_shipments')) {
-                $driver = Driver::query()->where('user_id', $actor->id)->first();
+                $driver = Driver::query()->where('user_id', $actor->id)->with('vehicles')->first();
                 $lat = $actor->last_lat !== null ? (float) $actor->last_lat : null;
                 $lng = $actor->last_lng !== null ? (float) $actor->last_lng : null;
                 $radius = app(\App\Services\RideSettingsService::class)->radiusKm();
                 $dismissals = app(OfferDismissal::class);
-                $hasBookingLink = Schema::hasColumn('parcel_shipments', 'booking_id');
                 $parcels = DB::table('parcel_shipments')
                     ->whereNull('driver_id')
                     ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
@@ -194,11 +193,12 @@ class DriverOpsService
                     ->orderByDesc('id')
                     ->limit(20)
                     ->get()
-                    ->filter(function ($row) use ($driver, $lat, $lng, $radius, $dismissals, $hasBookingLink) {
-                        if ($hasBookingLink && ! empty($row->booking_id)) {
+                    ->filter(function ($row) use ($driver, $lat, $lng, $radius, $dismissals) {
+                        if ($driver && $dismissals->hidden((int) $driver->id, 'parcel', (string) $row->id)) {
                             return false;
                         }
-                        if ($driver && $dismissals->hidden((int) $driver->id, 'parcel', (string) $row->id)) {
+                        $vehicleCat = strtoupper((string) ($driver?->vehicles?->first()?->category ?? ''));
+                        if ($vehicleCat !== '' && ! \App\Support\VehicleCategory::sameFamily($vehicleCat, (string) ($row->category ?? ''))) {
                             return false;
                         }
                         if ($driver && Schema::hasColumn('parcel_shipments', 'pickup_lat') && $row->pickup_lat && $lat !== null) {
@@ -966,8 +966,9 @@ class DriverOpsService
             ->whereNull('driver_id')
             ->whereIn('status', array_merge(\App\Support\BookingStatus::searching(), ['CONFIRMED']))
             ->when($category, function ($query) use ($category) {
-                $query->where(function ($cat) use ($category) {
-                    $cat->where('category', $category)->orWhereNull('category');
+                $family = \App\Support\VehicleCategory::family((string) $category);
+                $query->where(function ($cat) use ($family) {
+                    $cat->whereIn('category', $family)->orWhereNull('category');
                 });
             })
             ->orderBy('scheduled_at')

@@ -503,7 +503,12 @@ class AppSurfaceService
         }
         if (Schema::hasColumn('ad_campaigns', 'ends_on')) {
             $q->where(function ($inner) {
-                $inner->whereNull('ends_on')->orWhere('ends_on', '>=', now());
+                $inner->whereNull('ends_on')->orWhereDate('ends_on', '>=', now()->toDateString());
+            });
+        }
+        if (Schema::hasColumn('ad_campaigns', 'placement') && $placement) {
+            $q->where(function ($inner) use ($placement) {
+                $inner->whereNull('placement')->orWhere('placement', $placement)->orWhere('placement', 'home');
             });
         }
         $rows = $q->orderByDesc('id')->limit(20)->get();
@@ -511,7 +516,7 @@ class AppSurfaceService
         return [
             'placement' => $placement,
             'ads' => $rows->map(function ($row) use ($placement) {
-                $image = $row->image_url ?? $row->creative_url ?? null;
+                $image = $this->absoluteAdImage($row);
                 $title = $row->title ?? $row->name ?? 'Ad';
 
                 return [
@@ -524,10 +529,62 @@ class AppSurfaceService
                     'bannerUrl' => $image,
                     'clickUrl' => $row->click_url ?? $row->cta_url ?? $row->target_url ?? null,
                     'ctaUrl' => $row->cta_url ?? $row->click_url ?? null,
-                    'placement' => $placement,
+                    'placement' => $row->placement ?? $placement,
                 ];
-            })->all(),
+            })->filter(fn (array $row) => ! empty($row['imageUrl']))->values()->all(),
         ];
+    }
+
+    public function adBannerFile(string $id)
+    {
+        abort_unless(Schema::hasTable('ad_campaigns'), 404, 'Banner not found');
+        $row = DB::table('ad_campaigns')->where('id', $id)->first();
+        abort_unless($row, 404, 'Banner not found');
+        $url = trim((string) ($row->image_url ?? $row->creative_url ?? ''));
+        if (str_starts_with($url, 'http://') || str_starts_with($url, 'https://')) {
+            return redirect()->away($url);
+        }
+        $key = ltrim(str_replace('\\', '/', (string) ($row->banner_key ?? '')), '/');
+        $candidates = [];
+        if ($key !== '') {
+            $candidates[] = storage_path('app/'.$key);
+            $candidates[] = storage_path('app/public/'.$key);
+            $candidates[] = public_path($key);
+            $candidates[] = dirname(base_path()).DIRECTORY_SEPARATOR.'website'.DIRECTORY_SEPARATOR.'public'.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, $key);
+            $candidates[] = dirname(base_path()).DIRECTORY_SEPARATOR.'management-admin'.DIRECTORY_SEPARATOR.'public'.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, $key);
+        }
+        foreach (['jpg', 'jpeg', 'png', 'webp'] as $ext) {
+            $candidates[] = storage_path('app/ads/'.$id.'.'.$ext);
+            $candidates[] = storage_path('app/public/uploads/ads/'.$id.'.'.$ext);
+        }
+        foreach ($candidates as $path) {
+            if (is_string($path) && is_file($path)) {
+                return response()->file($path, [
+                    'Content-Type' => $row->banner_mime ?: 'image/jpeg',
+                    'Cache-Control' => 'public, max-age=86400',
+                ]);
+            }
+        }
+        abort(404, 'Banner not found');
+    }
+
+    private function absoluteAdImage(object $row): ?string
+    {
+        foreach ([$row->image_url ?? null, $row->creative_url ?? null] as $raw) {
+            $value = trim((string) $raw);
+            if ($value === '') {
+                continue;
+            }
+            if (str_starts_with($value, 'http://') || str_starts_with($value, 'https://')) {
+                return $value;
+            }
+            if (str_starts_with($value, '/')) {
+                return rtrim((string) config('karnacab.api_public_url'), '/').$value;
+            }
+        }
+        $base = rtrim((string) config('karnacab.api_public_url'), '/');
+
+        return $base.'/api/v1/ads/'.$row->id.'/banner';
     }
 
     public function safetyCatalog(): array
@@ -607,9 +664,7 @@ class AppSurfaceService
         $rule = null;
         if ($baseQuery) {
             $rule = (clone $baseQuery)->where('lane', $lane)->where('category', $category)->first()
-                ?: (clone $baseQuery)->where('category', $category)->first()
-                ?: (clone $baseQuery)->where('lane', $lane)->first()
-                ?: (clone $baseQuery)->orderBy('id')->first();
+                ?: (clone $baseQuery)->where('category', $category)->first();
         }
         $minCharge = (int) ($rule->min_charge_paise ?? 4900);
         $included = (float) ($rule->included_km ?? 2);
@@ -697,7 +752,7 @@ class AppSurfaceService
     public function parcelCreate(User $actor, array $data): array
     {
         $quote = $this->parcelQuote($data);
-        $category = strtoupper((string) ($data['category'] ?? $quote['category'] ?? 'BIKE'));
+        $category = strtoupper((string) ($quote['category'] ?? $data['category'] ?? 'BIKE'));
         if ($category === 'TRUCK' || $category === 'MINI 3W' || $category === 'MINI3W') {
             $category = $category === 'TRUCK' ? 'TRUCK' : 'AUTO';
         }
@@ -786,6 +841,7 @@ class AppSurfaceService
                     'dropLng' => $fresh->drop_lng,
                     'distanceKm' => $fresh->distance_km ?? 1,
                     'paymentMode' => $method,
+                    'scheduledAt' => $data['scheduledAt'] ?? $data['scheduled_at'] ?? null,
                 ]);
                 $bookingId = $created['id'] ?? null;
                 if ($bookingId) {
@@ -798,7 +854,12 @@ class AppSurfaceService
                 }
                 $out['booking'] = $created;
             }
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('parcel.booking_dispatch_failed', [
+                'parcelId' => $id,
+                'error' => $e->getMessage(),
+            ]);
+            $out['dispatchError'] = $e->getMessage();
         }
 
         return $out;
@@ -2058,13 +2119,14 @@ class AppSurfaceService
         $dropUrl = ($row->drop_lat && $row->drop_lng)
             ? 'https://www.google.com/maps/dir/?api=1&destination='.$row->drop_lat.','.$row->drop_lng.'&travelmode=driving'
             : null;
+        $isDriver = $actor && $actor->role === 'DRIVER';
         $actions = match ($status) {
             'assigned' => ['arrive', 'verify_otp', 'cancel'],
             'arrived' => ['verify_otp', 'cancel'],
             'picked_up' => ['transit'],
             'in_transit' => ['arrive', 'out_for_delivery'],
             'destination', 'out_for_delivery' => ['deliver'],
-            'created', 'paid' => ['accept', 'reject'],
+            'created', 'paid' => $isDriver ? ['accept', 'reject'] : ['cancel'],
             default => [],
         };
         $ownsParcel = $actor && (int) $actor->id === (int) ($row->customer_id ?? 0);

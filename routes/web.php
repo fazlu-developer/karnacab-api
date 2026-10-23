@@ -1,6 +1,10 @@
 <?php
 
+use App\Http\Controllers\CorsLiveProxyController;
 use Illuminate\Support\Facades\Route;
+
+Route::any('/cors-live/{path}', CorsLiveProxyController::class)
+    ->where('path', '.*');
 
 Route::get('/', function () {
     return [

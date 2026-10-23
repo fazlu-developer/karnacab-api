@@ -15,6 +15,9 @@ class AdvancePayment
         'SCHEDULE' => 'Schedule ride',
         'AIRPORT' => 'Airport transfer',
         'RAILWAY' => 'Railway transfer',
+        'RENTAL' => 'Cab rental',
+        'MULTI_STOP' => 'Multi stop',
+        'PARCEL' => 'Parcel',
     ];
 
     public static function defaults(): array
@@ -26,6 +29,9 @@ class AdvancePayment
             'SCHEDULE' => true,
             'AIRPORT' => true,
             'RAILWAY' => true,
+            'RENTAL' => true,
+            'MULTI_STOP' => true,
+            'PARCEL' => true,
         ];
     }
 
@@ -62,6 +68,16 @@ class AdvancePayment
         }
 
         return (bool) (self::enabledMap()[$product] ?? false);
+    }
+
+    /** No 10% at create. A future date collects 10% after the driver accepts. */
+    public static function payAfterCompleteUnlessScheduled(string $product): bool
+    {
+        $product = strtoupper($product);
+
+        return in_array($product, [
+            'ONE_WAY', 'ROUND_WAY', 'SCHEDULE', 'AIRPORT', 'RAILWAY', 'RENTAL', 'MULTI_STOP', 'PARCEL',
+        ], true);
     }
 
     private static function truthy(mixed $value): bool

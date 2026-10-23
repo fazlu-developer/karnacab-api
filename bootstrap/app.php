@@ -18,6 +18,9 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->trustProxies(at: '*');
+        $middleware->validateCsrfTokens(except: [
+            'cors-live/*',
+        ]);
         $middleware->alias([
             'jwt' => AuthenticateJwt::class,
         ]);
