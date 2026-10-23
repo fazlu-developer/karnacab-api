@@ -15,6 +15,7 @@ use App\Support\Geo;
 use App\Support\IndiaTime;
 use App\Support\ServiceArea;
 use App\Support\ServiceMaintenance;
+use App\Support\TripFareDetail;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -169,7 +170,7 @@ class BookingService
             }
         }
         $mode = $this->normalizePaymentMode($dto['paymentMode'] ?? $dto['payment_mode'] ?? 'CASH');
-        $laterAdvance = $futureSchedule && \App\Support\AdvancePayment::enabled($product);
+        $laterAdvance = $futureSchedule && \App\Support\AdvancePayment::enabled($product) && ! $this->isCityProduct($product);
         if ($laterAdvance && $mode === 'CASH') {
             $mode = 'UPI';
         }
@@ -236,7 +237,7 @@ class BookingService
         ]));
 
         $this->storeStops($booking, is_array($dto['stops'] ?? null) ? $dto['stops'] : []);
-        if ($futureSchedule && \App\Support\AdvancePayment::enabled($product)) {
+        if ($futureSchedule && \App\Support\AdvancePayment::enabled($product) && ! $this->isCityProduct($product)) {
             $totalPaise = (int) ($quote['totalPaise'] ?? 0);
             $quote['prebook'] = true;
             $quote['advanceAfterAccept'] = true;
@@ -582,15 +583,40 @@ class BookingService
         $booking = $this->assignedToDriver($actor, $id);
         abort_unless($booking->status === BookingStatus::DRIVER_ARRIVED, 422, 'Arrive at pickup before verifying OTP.');
         abort_unless(hash_equals((string) $booking->start_otp, trim($otp)), 422, 'Invalid OTP');
-        abort_unless(BookingStatus::canTransition((string) $booking->status, BookingStatus::TRIP_STARTED)
-            || BookingStatus::canTransition((string) $booking->status, BookingStatus::OTP_VERIFIED), 422, 'Invalid booking status');
+        abort_unless(BookingStatus::canTransition((string) $booking->status, BookingStatus::OTP_VERIFIED), 422, 'Invalid booking status');
         $booking->update($this->filterColumns([
-            'status' => BookingStatus::TRIP_STARTED,
+            'status' => BookingStatus::OTP_VERIFIED,
             'otp_verified_at' => now(),
-            'trip_started_at' => now(),
         ]));
         $this->syncLinkedParcel($booking, 'picked_up');
+        $this->push->notifyUsers(
+            [(int) $booking->customer_id],
+            'OTP confirmed',
+            'Your driver confirmed the start OTP. The trip will start next.',
+            ['type' => 'trip', 'event' => 'otp_verified', 'bookingId' => (string) $booking->id],
+        );
         Log::info('booking.otp_verified', ['bookingId' => $booking->id]);
+
+        return $this->present($booking->fresh(), $actor);
+    }
+
+    public function startTrip(User $actor, string $id): array
+    {
+        abort_unless($actor->role === 'DRIVER', 403, 'Only the assigned driver can start the trip');
+        $booking = $this->assignedToDriver($actor, $id);
+        abort_unless((string) $booking->status === BookingStatus::OTP_VERIFIED, 422, 'Confirm the customer OTP before starting the trip.');
+        abort_unless(BookingStatus::canTransition((string) $booking->status, BookingStatus::TRIP_STARTED), 422, 'Invalid booking status');
+        $booking->update($this->filterColumns([
+            'status' => BookingStatus::TRIP_STARTED,
+            'trip_started_at' => $booking->trip_started_at ?: now(),
+        ]));
+        $this->push->notifyUsers(
+            [(int) $booking->customer_id],
+            'Trip started',
+            'Your trip has started.',
+            ['type' => 'trip', 'event' => 'started', 'bookingId' => (string) $booking->id],
+        );
+        Log::info('booking.trip_started', ['bookingId' => $booking->id]);
 
         return $this->present($booking->fresh(), $actor);
     }
@@ -656,11 +682,21 @@ class BookingService
             return $this->present($booking->fresh(), $actor);
         }
 
-        if (in_array($action, ['verify_otp', 'otp', 'start'], true)) {
+        if (in_array($action, ['verify_otp', 'otp'], true)) {
             if ($otp) {
                 return $this->verifyOtp($actor, $id, $otp);
             }
-            abort(422, 'OTP is required to start the trip.');
+            abort(422, 'OTP is required to confirm the trip.');
+        }
+
+        if ($action === 'start') {
+            if ($otp && (string) $booking->status === BookingStatus::DRIVER_ARRIVED) {
+                $this->verifyOtp($actor, $id, $otp);
+
+                return $this->startTrip($actor, $id);
+            }
+
+            return $this->startTrip($actor, $id);
         }
 
         if ($action === 'one_side_complete') {
@@ -684,7 +720,7 @@ class BookingService
     public function complete(User $actor, string $id, ?string $otp = null, ?int $durationSeconds = null): array
     {
         $booking = $this->assignedToDriver($actor, $id);
-        abort_unless(in_array($booking->status, [BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', BookingStatus::OTP_VERIFIED], true), 422, 'Trip has not started.');
+        abort_unless(in_array($booking->status, [BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING'], true), 422, 'Start the trip before completing it.');
         $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
         abort_unless((int) $booking->driver_id === (int) $driver->id, 403, 'Driver is not assigned to this booking.');
         $pin = preg_replace('/\D+/', '', (string) $otp) ?? '';
@@ -950,6 +986,16 @@ class BookingService
         if ($lifecycle === 'pending_review') {
             $lifecycleLabel = 'Awaiting admin review';
         }
+        $fareDetail = TripFareDetail::build($row, $snapshot, $total, $commissionPaise, $earningPaise);
+        $isRound = strtoupper((string) $row->product) === 'ROUND_WAY';
+        $waitMinutes = (int) ($fareDetail['waitingMinutes'] ?? 0);
+        $waitChargeRupees = (float) ($fareDetail['waitingRupees'] ?? 0);
+        $waitLabel = null;
+        if ($isRound && (! empty($snapshot['oneSideCompletedAt']) || $lifecycle === 'completed' || $waitMinutes > 0)) {
+            $waitLabel = $fareDetail['waitingLabel'] ?? $this->waitingLabel($waitMinutes);
+        } elseif ($waitMinutes > 0) {
+            $waitLabel = $this->waitingLabel($waitMinutes);
+        }
 
         return [
             'id' => (string) $row->id,
@@ -993,16 +1039,17 @@ class BookingService
                 && (string) $row->status === 'SCHEDULED'
                 && ! empty($row->driver_id),
             'canActivate' => $this->scheduleCanActivate($row),
-            'roundTripPhase' => strtoupper((string) $row->product) === 'ROUND_WAY'
+            'serviceType' => $fareDetail['serviceLabel'] ?? TripFareDetail::serviceLabel((string) $row->product),
+            'roundTripPhase' => $isRound
                 ? ($snapshot['roundTripPhase'] ?? (empty($snapshot['oneSideCompletedAt']) ? null : 'waiting'))
                 : null,
             'oneSideCompletedAt' => $snapshot['oneSideCompletedAt'] ?? null,
             'returnStartedAt' => $snapshot['returnStartedAt'] ?? null,
-            'waitingMinutes' => empty($snapshot['oneSideCompletedAt']) ? 0 : $this->roundTripWaitingMinutes($row),
-            'waitingLabel' => empty($snapshot['oneSideCompletedAt']) ? null : $this->waitingLabel($this->roundTripWaitingMinutes($row)),
+            'waitingMinutes' => $waitMinutes,
+            'waitingLabel' => $waitLabel,
             'waitingPaisePerMin' => (int) ($snapshot['waitingPaisePerMin'] ?? 0),
-            'waitingChargePaise' => empty($snapshot['oneSideCompletedAt']) ? 0 : $this->roundTripWaitingMinutes($row) * (int) ($snapshot['waitingPaisePerMin'] ?? 0),
-            'waitingChargeRupees' => empty($snapshot['oneSideCompletedAt']) ? 0 : ($this->roundTripWaitingMinutes($row) * (int) ($snapshot['waitingPaisePerMin'] ?? 0)) / 100,
+            'waitingChargePaise' => (int) round($waitChargeRupees * 100),
+            'waitingChargeRupees' => $waitChargeRupees,
             'advanceRupees' => ((int) ($snapshot['advancePaise'] ?? 0)) / 100,
             'balanceRupees' => max(0, $total - (int) ($snapshot['advancePaise'] ?? 0)) / 100,
             'searchRadiusKm' => $radius,
@@ -1043,7 +1090,9 @@ class BookingService
                 'driverEarningRupees' => $earningPaise / 100,
                 'currency' => 'INR',
                 'breakdown' => $snapshot['final']['breakdown'] ?? $snapshot['breakdown'] ?? null,
+                'detail' => $fareDetail,
             ],
+            'fareDetail' => $fareDetail,
             'estimatedFareRupees' => $total / 100,
             'collectRupees' => $total / 100,
             'amountType' => $this->paymentTypeLabel($row->payment_mode ?? 'CASH'),
@@ -1150,11 +1199,24 @@ class BookingService
             $within45 = $dueAt->lte(now()->addMinutes(45));
             $changed = false;
             if ($within45 && empty($snapshot['reminder45m'])) {
-                $this->push->notifyUsers($ids, 'Ride is almost due', 'Booking '.$booking->public_ref.' is at '.$when.'. Customer be ready. Driver can activate the booking.', [
-                    'type' => 'trip',
-                    'event' => 'ride_reminder',
-                    'bookingId' => (string) $booking->id,
-                ]);
+                $this->push->notifyUsers(
+                    [(int) $booking->customer_id],
+                    'Ride is almost due',
+                    'Booking '.$booking->public_ref.' is at '.$when.'. Be ready at pickup.',
+                    ['type' => 'trip', 'event' => 'ride_reminder', 'bookingId' => (string) $booking->id],
+                );
+                if ($driverUserId) {
+                    $this->push->notifyUsers(
+                        [(int) $driverUserId],
+                        'Activate this booking',
+                        'Booking '.$booking->public_ref.' is at '.$when.'. Open the app and activate now.',
+                        [
+                            'type' => 'booking_offer',
+                            'event' => 'activate_reminder',
+                            'bookingId' => (string) $booking->id,
+                        ],
+                    );
+                }
                 $snapshot['reminder45m'] = now()->toIso8601String();
                 $changed = true;
                 $sent++;
@@ -1180,7 +1242,7 @@ class BookingService
     {
         $booking = $this->assignedToDriver($actor, $id);
         abort_unless(strtoupper((string) $booking->product) === 'ROUND_WAY', 422, 'One side complete is only for a round trip.');
-        abort_unless(in_array((string) $booking->status, [BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', BookingStatus::OTP_VERIFIED], true), 422, 'Start the round trip before marking one side complete.');
+            abort_unless(in_array((string) $booking->status, [BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING'], true), 422, 'Start the round trip before marking one side complete.');
         $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
         abort_if(! empty($snapshot['oneSideCompletedAt']), 422, 'One side is already complete.');
         $rate = (int) (DB::table('fare_rules')
@@ -1258,11 +1320,25 @@ class BookingService
      */
     private function scheduledDriverActions(Booking $row): array
     {
+        $actions = [];
         if ($this->scheduleCanActivate($row)) {
-            return ['activate'];
+            $actions[] = 'activate';
+        }
+        if ($this->isCityRide($row) && ! $this->commissionLocksDriver($row)) {
+            $actions[] = 'cancel';
         }
 
-        return [];
+        return $actions;
+    }
+
+    private function isCityRide(object $row): bool
+    {
+        return $this->isCityProduct((string) ($row->product ?? ''));
+    }
+
+    private function isCityProduct(string $product): bool
+    {
+        return in_array(strtoupper($product), ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true);
     }
 
     /**
@@ -1334,7 +1410,7 @@ class BookingService
             return false;
         }
         $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
-        if (! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1) {
+        if (! $this->isCityRide($row) && ! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1) {
             return false;
         }
 
@@ -1420,13 +1496,22 @@ class BookingService
         $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
         $booking = Booking::query()->where('id', $id)->where('driver_id', $driver->id)->first();
         abort_unless($booking, 404, 'Booking not found');
-        abort_unless($this->scheduleCanActivate($booking), 422, 'This scheduled booking can be activated 45 minutes before the pickup time, after the customer pays the 10% advance.');
+        abort_unless($this->scheduleCanActivate($booking), 422, $this->isCityRide($booking)
+            ? 'This scheduled city ride can be activated 45 minutes before pickup.'
+            : 'This scheduled booking can be activated 45 minutes before the pickup time, after the customer pays the 10% advance.');
         $busy = Booking::query()->where('driver_id', $driver->id)->where('id', '!=', $booking->id)->whereIn('status', BookingStatus::openForDriver())->exists();
         abort_if($busy, 422, 'Finish your current trip before activating this booking.');
         $booking->update($this->filterColumns(['status' => BookingStatus::DRIVER_ACCEPTED]));
         $driver->update(['duty_status' => 'on_trip', 'online' => 1]);
+        $fresh = $booking->fresh();
+        $this->push->notifyUsers(
+            [(int) $fresh->customer_id],
+            'Driver is on the way',
+            'Your scheduled ride is active. The driver is heading to pickup.',
+            ['type' => 'trip', 'event' => 'activated', 'bookingId' => (string) $fresh->id],
+        );
 
-        return $this->present($booking->fresh(), $actor);
+        return $this->present($fresh, $actor);
     }
 
     private function allowedActions(Booking $row, ?User $actor): array
@@ -1465,7 +1550,8 @@ class BookingService
                 'SCHEDULED' => $this->scheduledDriverActions($row),
                 BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED, 'DRIVER_ARRIVING' => $this->commissionLocksDriver($row) ? ['arrive'] : ['arrive', 'cancel'],
                 BookingStatus::DRIVER_ARRIVED => ['verify_otp'],
-                BookingStatus::OTP_VERIFIED, BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED' => $this->roundTripActions($row),
+                BookingStatus::OTP_VERIFIED => ['start'],
+                BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED' => $this->roundTripActions($row),
                 default => [],
             };
         }

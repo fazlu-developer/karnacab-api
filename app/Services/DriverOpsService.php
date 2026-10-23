@@ -6,6 +6,7 @@ use App\Mail\EventNoticeMail;
 use App\Models\Driver;
 use App\Models\User;
 use App\Models\Vehicle;
+use App\Support\TripFareDetail;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
@@ -242,9 +243,28 @@ class DriverOpsService
             $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
             $advancePaid = (int) ($snapshot['advancePaidPaise'] ?? 0);
             $total = (int) ($row->final_fare_paise ?? $row->quote_paise);
+            $commissionPaise = (int) ($row->commission_paise ?? 0);
+            $earningPaise = (int) ($row->driver_earning_paise ?? max(0, $total - $commissionPaise));
+            $fareDetail = TripFareDetail::fromRecord($row, $snapshot, $total, $commissionPaise, $earningPaise);
             $phone = null;
-            if ((string) $row->status === 'SCHEDULED' && $advancePaid > 0 && $row->customer_id) {
+            $needsAdvance = ! empty($snapshot['advanceAfterAccept']) && $advancePaid < 1;
+            $cityRide = in_array(strtoupper((string) $row->product), ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true);
+            $canActivate = (string) $row->status === 'SCHEDULED'
+                && $row->scheduled_at
+                && (! $needsAdvance || $cityRide)
+                && \Illuminate\Support\Carbon::parse($row->scheduled_at)->lte(now()->addMinutes(45));
+            if ((string) $row->status === 'SCHEDULED' && ! $needsAdvance && $row->customer_id) {
                 $phone = DB::table('users')->where('id', $row->customer_id)->value('phone');
+            }
+            $mode = strtoupper((string) ($row->payment_mode ?? 'CASH'));
+            $actions = [];
+            if ((string) $row->status === 'SCHEDULED') {
+                if ($canActivate) {
+                    $actions[] = 'activate';
+                }
+                if ($cityRide && $advancePaid < 1) {
+                    $actions[] = 'cancel';
+                }
             }
 
             return [
@@ -256,23 +276,38 @@ class DriverOpsService
                 'pickupText' => $row->pickup_text,
                 'dropText' => $row->drop_text,
                 'product' => $row->product,
+                'serviceType' => $fareDetail['serviceLabel'] ?? TripFareDetail::serviceLabel((string) $row->product),
                 'category' => $row->category,
                 'quotePaise' => $total,
                 'quoteRupees' => $total / 100,
                 'collectRupees' => $total / 100,
-                'commissionRupees' => ((int) ($row->commission_paise ?? 0)) / 100,
-                'earningRupees' => ((int) ($row->driver_earning_paise ?? max(0, $total - (int) ($row->commission_paise ?? 0)))) / 100,
+                'commissionRupees' => $commissionPaise / 100,
+                'earningRupees' => $earningPaise / 100,
+                'estimatedEarningsRupees' => $earningPaise / 100,
+                'bookedDistanceKm' => isset($snapshot['bookedDistanceKm']) ? (float) $snapshot['bookedDistanceKm'] : ($row->distance_km !== null ? (float) $row->distance_km : null),
+                'distanceKm' => $row->distance_km !== null ? (float) $row->distance_km : null,
+                'actualDistanceKm' => $row->actual_distance_km !== null ? (float) $row->actual_distance_km : null,
+                'durationSeconds' => $row->duration_seconds ?? null,
+                'waitMinutes' => $row->wait_minutes ?? ($fareDetail['waitingMinutes'] ?? 0),
+                'waitingMinutes' => $fareDetail['waitingMinutes'] ?? 0,
+                'waitingLabel' => $fareDetail['waitingLabel'] ?? null,
+                'waitingChargeRupees' => $fareDetail['waitingRupees'] ?? 0,
+                'fareDetail' => $fareDetail,
+                'paymentMode' => $row->payment_mode ?? 'CASH',
+                'paymentType' => $mode === 'WALLET' ? 'Wallet' : ($mode === 'UPI' ? 'Online / PayU' : 'Cash'),
+                'amountType' => $mode === 'WALLET' ? 'Wallet' : ($mode === 'UPI' ? 'Online / PayU' : 'Cash'),
                 'scheduledAt' => optional($row->scheduled_at)?->toIso8601String(),
+                'tripStartedAt' => optional($row->trip_started_at)?->toIso8601String(),
+                'tripEndedAt' => optional($row->trip_ended_at)?->toIso8601String(),
                 'updatedAt' => optional($row->updated_at)?->toIso8601String(),
                 'customerRating' => $stars !== null ? round((float) $stars, 1) : null,
                 'prebook' => (bool) ($snapshot['prebook'] ?? false),
                 'advancePaidPaise' => $advancePaid,
                 'balanceRupees' => max(0, $total - (int) ($snapshot['advancePaise'] ?? 0)) / 100,
-                'needsAdvance' => ! empty($snapshot['advanceAfterAccept']) && $advancePaid < 1,
+                'needsAdvance' => $needsAdvance,
+                'canActivate' => $canActivate,
                 'customerPhone' => $phone,
-                'actions' => (string) $row->status === 'SCHEDULED'
-                    ? ($advancePaid > 0 ? ['activate'] : [])
-                    : [],
+                'actions' => $actions,
             ];
         })->all();
         $parcels = [];

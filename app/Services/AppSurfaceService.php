@@ -260,6 +260,11 @@ class AppSurfaceService
             'company' => 'KarnaRide',
             'companyAddress' => 'KarnaRide Mobility Pvt Ltd, India',
             'gstin' => 'GSTIN applied as per fare rules',
+            'fareDetail' => \App\Support\TripFareDetail::fromRecord($row, $snapshot, $totalPaise, $commissionPaise, $earningPaise),
+            'waitingMinutes' => \App\Support\TripFareDetail::waitingMinutes($row, $snapshot),
+            'waitingChargeRupees' => ((int) ($breakdown['waitingPaise'] ?? 0)) / 100,
+            'bookedDistanceKm' => $snapshot['bookedDistanceKm'] ?? $row->distance_km ?? null,
+            'actualDistanceKm' => $row->actual_distance_km ?? null,
         ];
     }
 

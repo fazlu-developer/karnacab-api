@@ -50,9 +50,11 @@ class FareService
         }
         $minKm = (float) $rule->min_km;
         $includedKm = (float) $rule->included_km;
-        $distanceKm = max((float) ($input['distanceKm'] ?? 1), $minKm);
-        if ($product === 'ROUND_WAY' && ($input['roundTrip'] ?? true) !== false) {
-            $distanceKm = max($distanceKm * 2, $minKm);
+        $oneWayKm = max((float) ($input['distanceKm'] ?? 1), 0);
+        $distanceKm = max($oneWayKm, $minKm);
+        $isRound = $product === 'ROUND_WAY' && ($input['roundTrip'] ?? true) !== false;
+        if ($isRound) {
+            $distanceKm = max($oneWayKm * 2, $minKm);
         }
         $extraKm = max(0, $distanceKm - $includedKm);
         $packagePaise = (int) round($includedKm * $rule->per_km_paise);
@@ -84,15 +86,18 @@ class FareService
             'product' => $product,
             'category' => $category,
             'billedKm' => $distanceKm,
+            'oneWayKm' => $isRound ? $oneWayKm : $distanceKm,
             'extraKm' => $extraKm,
             'hours' => $rule->rental_hours ?? $hours,
             'source' => 'server',
+            'waitingPaisePerMin' => (int) ($rule->waiting_paise_per_min ?? 0),
             'breakdown' => [
                 'basePaise' => $basePaise,
                 'distancePaise' => $distancePaise,
                 'extraPaise' => $extraPaise,
                 'waitingPaise' => $waitingPaise,
                 'nightPaise' => $nightPaise,
+                'nightStayPaise' => $nightStayPaise,
                 'tollPaise' => $toll,
                 'parkingPaise' => $parking,
                 'gstPaise' => $gstPaise,
@@ -102,6 +107,18 @@ class FareService
                 'driverAllowPaise' => $driverAllowPaise,
                 'totalPaise' => $totalPaise,
             ],
+            'lines' => $this->quoteLines(
+                $isRound,
+                $oneWayKm,
+                $distanceKm,
+                $waitingPaise,
+                (int) ($input['waitMinutes'] ?? 0),
+                $driverAllowPaise,
+                $nightStayPaise,
+                $gstPaise,
+                $discountPaise,
+                $totalPaise,
+            ),
             'totalPaise' => $totalPaise,
             'totalRupees' => $totalPaise / 100,
             'listRupees' => $beforeDiscount / 100,
@@ -435,5 +452,69 @@ class FareService
             'lng' => $lng,
             'state' => $state,
         ];
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function quoteLines(
+        bool $isRound,
+        float $oneWayKm,
+        float $billedKm,
+        int $waitingPaise,
+        int $waitMinutes,
+        int $driverAllowPaise,
+        int $nightStayPaise,
+        int $gstPaise,
+        int $discountPaise,
+        int $totalPaise,
+    ): array {
+        $roundFarePaise = max(0, $totalPaise - $waitingPaise);
+        $lines = [];
+        $rideChargePaise = max(0, $totalPaise - $waitingPaise - $driverAllowPaise - $nightStayPaise);
+        if ($isRound) {
+            $lines[] = ['key' => 'oneWayKm', 'label' => 'One way distance', 'text' => $this->kmText($oneWayKm)];
+            $lines[] = ['key' => 'roundKm', 'label' => 'Round trip billed (×2)', 'text' => $this->kmText($billedKm)];
+            $lines[] = ['key' => 'rideCharge', 'label' => 'Ride charges', 'rupees' => $rideChargePaise / 100];
+            $lines[] = ['key' => 'allowance', 'label' => 'Driver allowance', 'rupees' => $driverAllowPaise / 100];
+            $lines[] = [
+                'key' => 'waiting',
+                'label' => $waitMinutes > 0 ? 'Waiting charge ('.$waitMinutes.' min)' : 'Waiting charge',
+                'rupees' => $waitingPaise / 100,
+            ];
+            if ($nightStayPaise > 0) {
+                $lines[] = ['key' => 'nightStay', 'label' => 'Night stay', 'rupees' => $nightStayPaise / 100];
+            }
+        } else {
+            $lines[] = ['key' => 'distance', 'label' => 'Distance', 'text' => $this->kmText($billedKm)];
+            $lines[] = ['key' => 'rideCharge', 'label' => 'Ride charges', 'rupees' => $rideChargePaise / 100];
+            if ($waitingPaise > 0 || $waitMinutes > 0) {
+                $lines[] = ['key' => 'waiting', 'label' => 'Waiting charge', 'rupees' => $waitingPaise / 100];
+            }
+            if ($driverAllowPaise > 0) {
+                $lines[] = ['key' => 'allowance', 'label' => 'Driver allowance', 'rupees' => $driverAllowPaise / 100];
+            }
+            if ($nightStayPaise > 0) {
+                $lines[] = ['key' => 'nightStay', 'label' => 'Night stay', 'rupees' => $nightStayPaise / 100];
+            }
+        }
+        if ($gstPaise > 0) {
+            $lines[] = ['key' => 'gst', 'label' => 'GST (included)', 'rupees' => $gstPaise / 100];
+        }
+        if ($discountPaise > 0) {
+            $lines[] = ['key' => 'discount', 'label' => 'Discount', 'rupees' => -($discountPaise / 100)];
+        }
+        $lines[] = ['key' => 'total', 'label' => 'Total fare', 'rupees' => $totalPaise / 100];
+
+        return $lines;
+    }
+
+    private function kmText(float $km): string
+    {
+        if ($km <= 0) {
+            return '—';
+        }
+
+        return number_format($km, $km < 10 ? 2 : 1).' km';
     }
 }

@@ -432,9 +432,12 @@ class PlatformController extends Controller
 
     public function bookingsStart(Request $request, string $id)
     {
-        $data = $request->validate(['otp' => 'required|string']);
+        $otp = trim((string) $request->input('otp', ''));
+        if ($otp !== '') {
+            $this->bookings->verifyOtp($request->user(), $id, $otp);
+        }
 
-        return $this->bookings->verifyOtp($request->user(), $id, $data['otp']);
+        return $this->bookings->startTrip($request->user(), $id);
     }
 
     public function bookingsComplete(Request $request, string $id)

@@ -54,6 +54,9 @@ class AdvancePayment
         if ($product === 'CITY_RIDE' || $product === 'CITY') {
             $product = 'LOCAL_CAB';
         }
+        if ($product === 'LOCAL_CAB') {
+            return false;
+        }
         if (! array_key_exists($product, self::PRODUCTS)) {
             return false;
         }

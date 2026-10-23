@@ -20,15 +20,11 @@ class FcmPushService
         if ($event === 'new_booking' && Schema::hasTable('drivers')) {
             $offline = DB::table('drivers')
                 ->whereIn('user_id', $ids)
-                ->get(['user_id', 'online', 'duty_status'])
+                ->get(['user_id', 'duty_status'])
                 ->filter(function ($row) {
                     $duty = strtolower((string) $row->duty_status);
-                    if (in_array($duty, ['offline', 'off', 'inactive'], true)) {
-                        return true;
-                    }
-                    $onDuty = in_array($duty, ['online', 'available', 'on_trip', 'on_delivery'], true);
 
-                    return (int) $row->online !== 1 && ! $onDuty;
+                    return in_array($duty, ['offline', 'off', 'inactive'], true);
                 })
                 ->pluck('user_id')
                 ->map(fn ($id) => (int) $id)
@@ -107,7 +103,12 @@ class FcmPushService
             $payloadData['imageUrl'] = $imageUrl;
         }
         $silent = ($data['silent'] ?? '') === '1' || ($data['event'] ?? '') === 'accepted';
-        $bookingAlert = ! $silent && (($data['event'] ?? '') === 'new_booking' || ($data['type'] ?? '') === 'booking_offer');
+        $eventName = (string) ($data['event'] ?? '');
+        $bookingAlert = ! $silent && (
+            $eventName === 'new_booking'
+            || $eventName === 'activate_reminder'
+            || ($data['type'] ?? '') === 'booking_offer'
+        );
         $channel = $silent
             ? 'karnacab_silent'
             : ($bookingAlert ? 'karnacab_booking_ring' : 'karnacab_default');
