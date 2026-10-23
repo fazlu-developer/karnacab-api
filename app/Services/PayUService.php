@@ -50,7 +50,7 @@ class PayUService
             'updated_at' => now(),
         ];
         DB::table('payment_intents')->insert($this->filter('payment_intents', $payload));
-        $base = rtrim((string) (request()?->getSchemeAndHttpHost() ?: config('app.url') ?: env('API_PUBLIC_URL')), '/');
+        $base = rtrim((string) config('karnacab.api_public_url'), '/');
         $checkout = $base.'/api/v1/payments/payu/checkout/'.$txnid;
 
         return [
@@ -105,7 +105,7 @@ class PayUService
         $productinfo = $this->productInfo($row);
         $hash = $this->requestHash($txnid, $amount, $productinfo, $firstname, $email);
         $action = $this->payuUrl();
-        $returnHost = rtrim((string) (request()?->getSchemeAndHttpHost() ?: config('app.url')), '/');
+        $returnHost = rtrim((string) config('karnacab.api_public_url'), '/');
         $surl = $returnHost.'/api/v1/payments/webhooks/payu';
         $key = e($this->key());
         $firstnameEsc = e($firstname);

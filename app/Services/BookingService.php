@@ -398,13 +398,15 @@ class BookingService
                 }
             })->orderBy('id')->first()
             : null;
-        $eligibility = $this->settings->walletEligibility(
-            (int) ($wallet->balance_paise ?? 0),
-            (int) ($preview->quote_paise ?? 0),
-            (int) ($wallet->joining_credit_paise ?? 0),
-            (int) ($wallet->frozen_paise ?? 0),
-        );
-        abort_unless($eligibility['eligible'], 422, $eligibility['reason'] ?? 'Wallet balance is too low to accept this booking.');
+        if (! $this->scheduleSkipsDriverWallet($preview)) {
+            $eligibility = $this->settings->walletEligibility(
+                (int) ($wallet->balance_paise ?? 0),
+                (int) ($preview->quote_paise ?? 0),
+                (int) ($wallet->joining_credit_paise ?? 0),
+                (int) ($wallet->frozen_paise ?? 0),
+            );
+            abort_unless($eligibility['eligible'], 422, $eligibility['reason'] ?? 'Wallet balance is too low to accept this booking.');
+        }
 
         $assigned = false;
         DB::transaction(function () use ($id, $driver, $vehicle, &$assigned) {
@@ -584,6 +586,9 @@ class BookingService
         $booking = $this->findVisible($actor, $id);
 
         if (in_array($action, ['cancel', 'cancelled', 'customer_cancelled', 'driver_cancelled'], true)) {
+            if ($actor->role === 'DRIVER' && $this->commissionLocksDriver($booking)) {
+                abort(422, 'The customer already paid the 10% commission. Call the customer and activate the booking. You cannot cancel it.');
+            }
             $target = $actor->role === 'DRIVER' ? BookingStatus::DRIVER_CANCELLED : BookingStatus::CUSTOMER_CANCELLED;
             if (BookingStatus::isTerminal((string) $booking->status)) {
                 return $this->present($booking, $actor);
@@ -643,6 +648,14 @@ class BookingService
             abort(422, 'OTP is required to start the trip.');
         }
 
+        if ($action === 'one_side_complete') {
+            return $this->markOneSideComplete($actor, $id);
+        }
+
+        if ($action === 'start_return') {
+            return $this->startReturn($actor, $id);
+        }
+
         if (in_array($action, ['complete', 'completed'], true)) {
             $result = $this->complete($actor, $id, $otp, isset($extra['durationSeconds']) ? (int) $extra['durationSeconds'] : null);
             app(DriverSessionService::class)->finishPendingLogout($actor);
@@ -667,14 +680,19 @@ class BookingService
         if ($durationSeconds !== null && $durationSeconds > $duration) {
             $duration = min($durationSeconds, 86400);
         }
-        $wait = 0;
-        if ($booking->arrived_at && $startedAt) {
-            $wait = max(0, (int) floor(abs($booking->arrived_at->diffInSeconds($startedAt)) / 60));
-        }
         $trackedKm = $this->drivenKmFromLogs($booking);
         $bookedSnapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
-        $bookedWait = (int) (($bookedSnapshot['fareInputs']['waitMinutes'] ?? 0));
-        $wait = max($wait, $bookedWait);
+        if (strtoupper((string) $booking->product) === 'ROUND_WAY') {
+            abort_unless(! empty($bookedSnapshot['returnStartedAt']), 422, 'Mark one side complete, then start the return trip, before completing with the PIN.');
+            $wait = (int) ($bookedSnapshot['waitingMinutes'] ?? 0);
+        } else {
+            $wait = 0;
+            if ($booking->arrived_at && $startedAt) {
+                $wait = max(0, (int) floor(abs($booking->arrived_at->diffInSeconds($startedAt)) / 60));
+            }
+            $bookedWait = (int) (($bookedSnapshot['fareInputs']['waitMinutes'] ?? 0));
+            $wait = max($wait, $bookedWait);
+        }
         $this->applyRouteFare($booking, $trackedKm, 0, $wait);
         $booking->refresh();
         $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
@@ -753,7 +771,7 @@ class BookingService
                 $earning,
                 0,
                 $earning,
-                'Booking '.$booking->public_ref.': admin commission 10% already collected from the customer. You receive 90% ₹'.number_format($earning / 100, 0).'.',
+                'Booking '.$booking->public_ref.': customer paid the 10% commission online or from wallet. Nothing was deducted from your wallet. 90% remaining ₹'.number_format($earning / 100, 0).'.',
             );
             app(CustomerWallet::class)->recordMemo(
                 (int) $booking->customer_id,
@@ -954,8 +972,19 @@ class BookingService
             'advancePercent' => (int) ($snapshot['advancePercent'] ?? 0),
             'advancePaise' => (int) ($snapshot['advancePaise'] ?? 0),
             'advancePaidPaise' => (int) ($snapshot['advancePaidPaise'] ?? 0),
+            'advanceAfterAccept' => ! empty($snapshot['advanceAfterAccept']),
             'needsAdvance' => ! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1,
             'canActivate' => $this->scheduleCanActivate($row),
+            'roundTripPhase' => strtoupper((string) $row->product) === 'ROUND_WAY'
+                ? ($snapshot['roundTripPhase'] ?? (empty($snapshot['oneSideCompletedAt']) ? null : 'waiting'))
+                : null,
+            'oneSideCompletedAt' => $snapshot['oneSideCompletedAt'] ?? null,
+            'returnStartedAt' => $snapshot['returnStartedAt'] ?? null,
+            'waitingMinutes' => empty($snapshot['oneSideCompletedAt']) ? 0 : $this->roundTripWaitingMinutes($row),
+            'waitingLabel' => empty($snapshot['oneSideCompletedAt']) ? null : $this->waitingLabel($this->roundTripWaitingMinutes($row)),
+            'waitingPaisePerMin' => (int) ($snapshot['waitingPaisePerMin'] ?? 0),
+            'waitingChargePaise' => empty($snapshot['oneSideCompletedAt']) ? 0 : $this->roundTripWaitingMinutes($row) * (int) ($snapshot['waitingPaisePerMin'] ?? 0),
+            'waitingChargeRupees' => empty($snapshot['oneSideCompletedAt']) ? 0 : ($this->roundTripWaitingMinutes($row) * (int) ($snapshot['waitingPaisePerMin'] ?? 0)) / 100,
             'advanceRupees' => ((int) ($snapshot['advancePaise'] ?? 0)) / 100,
             'balanceRupees' => max(0, $total - (int) ($snapshot['advancePaise'] ?? 0)) / 100,
             'searchRadiusKm' => $radius,
@@ -1005,7 +1034,19 @@ class BookingService
             'driverEarningRupees' => $earningPaise / 100,
             'kind' => 'ride',
             'navigation' => $this->navigationPayload($row),
-            'wallet' => $this->driverWalletGate($actor, $total),
+            'wallet' => $this->scheduleSkipsDriverWallet($row)
+                ? [
+                    'eligible' => true,
+                    'reason' => null,
+                    'requiredPaise' => 0,
+                    'availablePaise' => 0,
+                    'shortfallPaise' => 0,
+                    'requiredRupees' => 0,
+                    'availableRupees' => 0,
+                    'shortfallRupees' => 0,
+                    'commissionFromCustomer' => true,
+                ]
+                : $this->driverWalletGate($actor, $total),
         ];
     }
 
@@ -1060,9 +1101,201 @@ class BookingService
         return 'https://www.google.com/maps/dir/?api=1&destination='.(float) $lat.','.(float) $lng.'&travelmode=driving';
     }
 
+    public function remindUpcoming(): int
+    {
+        $sent = 0;
+        $rows = Booking::query()
+            ->whereNotNull('scheduled_at')
+            ->where('scheduled_at', '>', now())
+            ->where('scheduled_at', '<=', now()->addHours(3))
+            ->whereNotIn('status', BookingStatus::terminal())
+            ->orderBy('scheduled_at')
+            ->limit(80)
+            ->get();
+        foreach ($rows as $booking) {
+            $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+            if (! empty($snapshot['reminder3h'])) {
+                continue;
+            }
+            $when = \App\Support\IndiaTime::format($booking->scheduled_at) ?: 'the scheduled time';
+            $title = 'Upcoming ride';
+            $body = 'Booking '.$booking->public_ref.' is at '.$when.'. Be ready about 3 hours before pickup.';
+            $ids = [(int) $booking->customer_id];
+            if ($booking->driver_id) {
+                $driverUserId = Driver::query()->where('id', $booking->driver_id)->value('user_id');
+                if ($driverUserId) {
+                    $ids[] = (int) $driverUserId;
+                }
+            }
+            $this->push->notifyUsers($ids, $title, $body, [
+                'type' => 'trip',
+                'event' => 'ride_reminder',
+                'bookingId' => (string) $booking->id,
+            ]);
+            $snapshot['reminder3h'] = now()->toIso8601String();
+            $booking->update($this->filterColumns(['quote_snapshot' => $snapshot]));
+            $sent++;
+        }
+
+        return $sent;
+    }
+
+    public function markOneSideComplete(User $actor, string $id): array
+    {
+        $booking = $this->assignedToDriver($actor, $id);
+        abort_unless(strtoupper((string) $booking->product) === 'ROUND_WAY', 422, 'One side complete is only for a round trip.');
+        abort_unless(in_array((string) $booking->status, [BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', BookingStatus::OTP_VERIFIED], true), 422, 'Start the round trip before marking one side complete.');
+        $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        abort_if(! empty($snapshot['oneSideCompletedAt']), 422, 'One side is already complete.');
+        $rate = (int) (DB::table('fare_rules')
+            ->where('product', 'ROUND_WAY')
+            ->where('category', $booking->category)
+            ->where('active', 1)
+            ->orderByDesc('district_id')
+            ->value('waiting_paise_per_min') ?? 0);
+        $snapshot['oneSideCompletedAt'] = now()->toIso8601String();
+        $snapshot['roundTripPhase'] = 'waiting';
+        $snapshot['waitingPaisePerMin'] = $rate;
+        $booking->update($this->filterColumns(['quote_snapshot' => $snapshot]));
+        $this->push->notifyUsers(
+            [(int) $booking->customer_id],
+            'One side complete',
+            'The first side of your round trip is complete. Take the time you need. Waiting is added to the fare when the return starts.',
+            ['type' => 'trip', 'event' => 'one_side_complete', 'bookingId' => (string) $booking->id],
+        );
+
+        return $this->present($booking->fresh(), $actor);
+    }
+
+    public function startReturn(User $actor, string $id): array
+    {
+        $booking = $this->assignedToDriver($actor, $id);
+        abort_unless(strtoupper((string) $booking->product) === 'ROUND_WAY', 422, 'Return start is only for a round trip.');
+        $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        abort_unless(! empty($snapshot['oneSideCompletedAt']), 422, 'Mark one side complete before starting the return.');
+        abort_if(! empty($snapshot['returnStartedAt']), 422, 'The return trip has already started.');
+        $minutes = $this->minutesBetween($snapshot['oneSideCompletedAt'], now()->toIso8601String());
+        $snapshot['returnStartedAt'] = now()->toIso8601String();
+        $snapshot['roundTripPhase'] = 'return';
+        $snapshot['waitingMinutes'] = $minutes;
+        $snapshot['waitingLabel'] = $this->waitingLabel($minutes);
+        $inputs = is_array($snapshot['fareInputs'] ?? null) ? $snapshot['fareInputs'] : [];
+        $inputs['waitMinutes'] = $minutes;
+        $snapshot['fareInputs'] = $inputs;
+        $booking->update($this->filterColumns([
+            'quote_snapshot' => $snapshot,
+            'wait_minutes' => $minutes,
+        ]));
+        $fresh = $booking->fresh();
+        $tracked = $this->drivenKmFromLogs($fresh);
+        $this->applyRouteFare($fresh, $tracked, 0, $minutes);
+        $this->push->notifyUsers(
+            [(int) $fresh->customer_id],
+            'Return trip started',
+            'Waiting '.$this->waitingLabel($minutes).' is added to the fare. No separate waiting payment.',
+            ['type' => 'trip', 'event' => 'return_started', 'bookingId' => (string) $fresh->id],
+        );
+
+        return $this->present($fresh->fresh(), $actor);
+    }
+
     /**
      * @return list<string>
      */
+    private function commissionLocksDriver(Booking $row): bool
+    {
+        $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
+        $paid = (int) ($snapshot['advancePaidPaise'] ?? 0) > 0 || ! empty($snapshot['commissionSettled']);
+        if (! $paid) {
+            return false;
+        }
+        if ((string) $row->status === 'SCHEDULED') {
+            return true;
+        }
+
+        return $row->scheduled_at !== null
+            && \Illuminate\Support\Carbon::parse($row->scheduled_at)->greaterThan(now()->addMinutes(5));
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function scheduledDriverActions(Booking $row): array
+    {
+        $actions = [];
+        if ($this->scheduleCanActivate($row)) {
+            $actions[] = 'activate';
+        }
+        if (! $this->commissionLocksDriver($row)) {
+            $actions[] = 'cancel';
+        }
+
+        return $actions;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function roundTripActions(Booking $row): array
+    {
+        if (strtoupper((string) $row->product) !== 'ROUND_WAY') {
+            return ['complete'];
+        }
+        $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
+        if (empty($snapshot['oneSideCompletedAt'])) {
+            return ['one_side_complete'];
+        }
+        if (empty($snapshot['returnStartedAt'])) {
+            return ['start_return'];
+        }
+
+        return ['complete'];
+    }
+
+    private function roundTripWaitingMinutes(Booking $row): int
+    {
+        $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
+        if (empty($snapshot['oneSideCompletedAt'])) {
+            return (int) ($row->wait_minutes ?? 0);
+        }
+        $end = $snapshot['returnStartedAt'] ?? now()->toIso8601String();
+
+        return $this->minutesBetween($snapshot['oneSideCompletedAt'], $end);
+    }
+
+    private function minutesBetween(mixed $start, mixed $end): int
+    {
+        try {
+            $from = \Illuminate\Support\Carbon::parse($start);
+            $to = \Illuminate\Support\Carbon::parse($end);
+        } catch (\Throwable) {
+            return 0;
+        }
+
+        return max(0, (int) floor(abs($from->diffInSeconds($to)) / 60));
+    }
+
+    private function waitingLabel(int $minutes): string
+    {
+        $minutes = max(0, $minutes);
+        $hours = intdiv($minutes, 60);
+        $mins = $minutes % 60;
+        if ($hours > 0 && $mins > 0) {
+            return $hours.' hour'.($hours === 1 ? '' : 's').' '.$mins.' min';
+        }
+        if ($hours > 0) {
+            return $hours.' hour'.($hours === 1 ? '' : 's');
+        }
+
+        return $mins.' min';
+    }
+
+    private function scheduleSkipsDriverWallet(Booking $row): bool
+    {
+        $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
+        return ! empty($snapshot['advanceAfterAccept']) || ! empty($snapshot['commissionSettled']);
+    }
+
     private function scheduleCanActivate(Booking $row): bool
     {
         if ((string) $row->status !== 'SCHEDULED' || ! $row->scheduled_at) {
@@ -1121,6 +1354,15 @@ class BookingService
                 'advance',
             );
         }
+        $driverUserId = $fresh->driver_id ? Driver::query()->where('id', $fresh->driver_id)->value('user_id') : null;
+        if ($driverUserId) {
+            $this->push->notifyUsers(
+                [(int) $driverUserId],
+                '10% advance paid',
+                'Customer paid the 10% for '.$fresh->public_ref.'. Activate the booking or call the customer. Commission was not taken from your wallet.',
+                ['type' => 'trip', 'event' => 'advance_paid', 'bookingId' => (string) $fresh->id],
+            );
+        }
 
         return $this->present($fresh->fresh(), $actor);
     }
@@ -1173,10 +1415,10 @@ class BookingService
                 return [];
             }
             return match ($status) {
-                'SCHEDULED' => $this->scheduleCanActivate($row) ? ['activate', 'cancel'] : ['cancel'],
-                BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED, 'DRIVER_ARRIVING' => ['arrive', 'cancel'],
+                'SCHEDULED' => $this->scheduledDriverActions($row),
+                BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED, 'DRIVER_ARRIVING' => $this->commissionLocksDriver($row) ? ['arrive'] : ['arrive', 'cancel'],
                 BookingStatus::DRIVER_ARRIVED => ['verify_otp'],
-                BookingStatus::OTP_VERIFIED, BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED' => ['complete'],
+                BookingStatus::OTP_VERIFIED, BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED' => $this->roundTripActions($row),
                 default => [],
             };
         }
@@ -1219,7 +1461,9 @@ class BookingService
         if (! $customer) {
             return null;
         }
-        $mask = $actor?->role !== 'DRIVER' || BookingStatus::isSearching((string) $row->status);
+        $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
+        $advancePending = ! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1;
+        $mask = $actor?->role !== 'DRIVER' || BookingStatus::isSearching((string) $row->status) || $advancePending;
 
         return [
             'name' => $customer->name,
@@ -1717,7 +1961,10 @@ class BookingService
         }
         $lastBilled = (float) ($snapshot['liveBilledKm'] ?? $snapshot['billedKm'] ?? $bookedKm);
         $patch = ['actual_distance_km' => round(max(0, $drivenKm), 3)];
-        if (abs($fareKm - $lastBilled) >= 0.3) {
+        if ($waitMinutes !== null || abs($fareKm - $lastBilled) >= 0.3) {
+            if ($waitMinutes !== null) {
+                $inputs['waitMinutes'] = $waitMinutes;
+            }
             $wait = $waitMinutes ?? (int) ($inputs['waitMinutes'] ?? $booking->wait_minutes ?? 0);
             $quote = $this->fares->quote([
                 'lockProduct' => true,

@@ -23,6 +23,12 @@ Artisan::command('fleet:settle-weeks', function () {
     $this->info("Posted {$count} fleet week settlement(s).");
 })->purpose('Credit fleet owners the day after each completed week');
 
+Artisan::command('bookings:remind-upcoming', function () {
+    $count = app(\App\Services\BookingService::class)->remindUpcoming();
+    $this->info("Sent {$count} upcoming ride reminder(s).");
+})->purpose('Push a reminder 3 hours before a scheduled ride');
+
 Schedule::command('bookings:expire-searching')->everyMinute();
+Schedule::command('bookings:remind-upcoming')->everyFiveMinutes();
 Schedule::command('kyc:expire-documents')->dailyAt('01:15');
 Schedule::command('fleet:settle-weeks')->dailyAt('00:20');

@@ -110,7 +110,7 @@ class FcmPushService
         $bookingAlert = ! $silent && (($data['event'] ?? '') === 'new_booking' || ($data['type'] ?? '') === 'booking_offer');
         $channel = $silent
             ? 'karnacab_silent'
-            : ($bookingAlert ? 'karnacab_booking' : 'karnacab_default');
+            : ($bookingAlert ? 'karnacab_booking_ring' : 'karnacab_default');
         $androidNotification = [
             'channel_id' => $channel,
             'notification_priority' => 'PRIORITY_HIGH',
@@ -126,13 +126,13 @@ class FcmPushService
             $androidNotification['image'] = $imageUrl;
         }
         $android = ['priority' => 'HIGH'];
-        if (! $bookingAlert) {
+        if (! $silent) {
             $android['notification'] = $androidNotification;
         }
         $message = [
             'message' => array_filter([
                 'token' => $token,
-                'notification' => $bookingAlert ? null : array_filter([
+                'notification' => $silent ? null : array_filter([
                     'title' => $title,
                     'body' => $body,
                     'image' => $imageUrl,

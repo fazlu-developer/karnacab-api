@@ -239,6 +239,14 @@ class DriverOpsService
                 $stars = $q->avg('stars');
             }
 
+            $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
+            $advancePaid = (int) ($snapshot['advancePaidPaise'] ?? 0);
+            $total = (int) ($row->final_fare_paise ?? $row->quote_paise);
+            $phone = null;
+            if ((string) $row->status === 'SCHEDULED' && $advancePaid > 0 && $row->customer_id) {
+                $phone = DB::table('users')->where('id', $row->customer_id)->value('phone');
+            }
+
             return [
                 'kind' => 'ride',
                 'id' => (string) $row->id,
@@ -249,14 +257,22 @@ class DriverOpsService
                 'dropText' => $row->drop_text,
                 'product' => $row->product,
                 'category' => $row->category,
-                'quotePaise' => (int) ($row->final_fare_paise ?? $row->quote_paise),
-                'quoteRupees' => ((int) ($row->final_fare_paise ?? $row->quote_paise)) / 100,
-                'collectRupees' => ((int) ($row->final_fare_paise ?? $row->quote_paise)) / 100,
+                'quotePaise' => $total,
+                'quoteRupees' => $total / 100,
+                'collectRupees' => $total / 100,
                 'commissionRupees' => ((int) ($row->commission_paise ?? 0)) / 100,
-                'earningRupees' => ((int) ($row->driver_earning_paise ?? max(0, (int) ($row->final_fare_paise ?? $row->quote_paise) - (int) ($row->commission_paise ?? 0)))) / 100,
+                'earningRupees' => ((int) ($row->driver_earning_paise ?? max(0, $total - (int) ($row->commission_paise ?? 0)))) / 100,
                 'scheduledAt' => optional($row->scheduled_at)?->toIso8601String(),
                 'updatedAt' => optional($row->updated_at)?->toIso8601String(),
                 'customerRating' => $stars !== null ? round((float) $stars, 1) : null,
+                'prebook' => (bool) ($snapshot['prebook'] ?? false),
+                'advancePaidPaise' => $advancePaid,
+                'balanceRupees' => max(0, $total - (int) ($snapshot['advancePaise'] ?? 0)) / 100,
+                'needsAdvance' => ! empty($snapshot['advanceAfterAccept']) && $advancePaid < 1,
+                'customerPhone' => $phone,
+                'actions' => (string) $row->status === 'SCHEDULED'
+                    ? ($advancePaid > 0 ? ['activate'] : ['activate', 'cancel'])
+                    : [],
             ];
         })->all();
         $parcels = [];
@@ -932,8 +948,11 @@ class DriverOpsService
             $presented = app(BookingService::class)->present($row, $actor);
             $presented['kind'] = 'ride';
             $presented['scheduled'] = true;
+            $allowed = $presented['allowedActions'] ?? [];
             $presented['actions'] = $row->driver_id
-                ? (in_array('activate', $presented['allowedActions'] ?? [], true) ? ['activate', 'cancel'] : ['view'])
+                ? (in_array('activate', $allowed, true)
+                    ? array_values(array_filter(['activate', in_array('cancel', $allowed, true) ? 'cancel' : null]))
+                    : (in_array('cancel', $allowed, true) ? ['cancel'] : ['view']))
                 : ['accept', 'reject'];
 
             return $presented;
