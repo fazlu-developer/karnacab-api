@@ -59,7 +59,7 @@ class DriverOpsService
             )->orderByDesc('id')->first()
             : null;
         $balance = (int) ($wallet?->balance_paise ?? 0);
-        $todayStart = now()->timezone('Asia/Kolkata')->startOfDay();
+        $todayStart = now()->timezone('Asia/Kolkata')->startOfDay()->utc();
         $todayStats = $this->periodEarnings((int) $driver->id, (int) $actor->id, $todayStart, now());
         $todayRides = (int) $todayStats['rides'];
         $todayEarnPaise = (int) ($todayStats['netPaise'] ?? $todayStats['earningsPaise'] ?? 0);
@@ -438,8 +438,8 @@ class DriverOpsService
         $wallets = app(WalletAccountService::class);
         $items = $wallets->withdrawalsFor((int) $actor->id);
         $ist = now()->timezone('Asia/Kolkata');
-        $week = $this->periodEarnings((int) $driver->id, (int) $actor->id, $ist->copy()->startOfWeek(), now());
-        $month = $this->periodEarnings((int) $driver->id, (int) $actor->id, $ist->copy()->startOfMonth(), now());
+        $week = $this->periodEarnings((int) $driver->id, (int) $actor->id, $ist->copy()->startOfWeek()->utc(), now());
+        $month = $this->periodEarnings((int) $driver->id, (int) $actor->id, $ist->copy()->startOfMonth()->utc(), now());
         $cash = [];
         if (Schema::hasTable('wallet_ledger')) {
             $cash = DB::table('wallet_ledger')
@@ -485,9 +485,17 @@ class DriverOpsService
     {
         $rides = \App\Models\Booking::query()
             ->where('driver_id', $driverId)
-            ->where('status', 'COMPLETED')
-            ->where('updated_at', '>=', $from)
-            ->where('updated_at', '<=', $to)
+            ->whereIn('status', ['COMPLETED', 'completed'])
+            ->where(function ($query) use ($from, $to) {
+                if (Schema::hasColumn('bookings', 'trip_ended_at')) {
+                    $query->whereBetween('trip_ended_at', [$from, $to])
+                        ->orWhere(function ($fallback) use ($from, $to) {
+                            $fallback->whereNull('trip_ended_at')->whereBetween('updated_at', [$from, $to]);
+                        });
+                } else {
+                    $query->whereBetween('updated_at', [$from, $to]);
+                }
+            })
             ->get();
         $gross = 0;
         $earn = 0;
