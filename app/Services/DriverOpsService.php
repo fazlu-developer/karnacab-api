@@ -197,7 +197,7 @@ class DriverOpsService
                 $parcels = DB::table('parcel_shipments')
                     ->whereNull('driver_id')
                     ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
-                    ->where('created_at', '>=', now()->subMinutes(20))
+                    ->where('created_at', '>=', now()->subHours(12))
                     ->orderByDesc('id')
                     ->limit(20)
                     ->get()
@@ -255,22 +255,23 @@ class DriverOpsService
             $earningPaise = (int) ($row->driver_earning_paise ?? max(0, $total - $commissionPaise));
             $fareDetail = TripFareDetail::fromRecord($row, $snapshot, $total, $commissionPaise, $earningPaise);
             $phone = null;
-            $needsAdvance = ! empty($snapshot['advanceAfterAccept']) && $advancePaid < 1;
+            $needsAdvance = ! empty($snapshot['advanceAfterAccept']) && $advancePaid < 1 && ! in_array(strtoupper((string) $row->product), ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true);
             $cityRide = in_array(strtoupper((string) $row->product), ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true);
             $canActivate = (string) $row->status === 'SCHEDULED'
                 && $row->scheduled_at
                 && (! $needsAdvance || $cityRide)
                 && \Illuminate\Support\Carbon::parse($row->scheduled_at)->lte(now()->addMinutes(45));
-            if ((string) $row->status === 'SCHEDULED' && ! $needsAdvance && $row->customer_id) {
+            if ((string) $row->status === 'SCHEDULED' && $row->customer_id) {
                 $phone = DB::table('users')->where('id', $row->customer_id)->value('phone');
             }
             $mode = strtoupper((string) ($row->payment_mode ?? 'CASH'));
             $actions = [];
             if ((string) $row->status === 'SCHEDULED') {
+                $actions[] = 'call';
                 if ($canActivate) {
                     $actions[] = 'activate';
                 }
-                if ($cityRide && $advancePaid < 1) {
+                if ($cityRide || $advancePaid < 1) {
                     $actions[] = 'cancel';
                 }
             }

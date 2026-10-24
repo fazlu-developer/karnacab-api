@@ -12,6 +12,9 @@ class VehicleCategory
         $category = strtoupper(trim($category));
         $aliases = [
             'CAR' => 'SEDAN',
+            'CAB' => 'SEDAN',
+            'HATCHBACK' => 'SEDAN',
+            'PREMIUM' => 'SEDAN',
             'MINI' => 'SEDAN',
             'VAN' => 'TRAVELLER',
             'TEMPO' => 'TRAVELLER',
@@ -26,7 +29,7 @@ class VehicleCategory
         return match ($category) {
             'BIKE' => ['BIKE', 'SCOOTY', 'SCOOTER'],
             'AUTO' => ['AUTO', 'E_RICKSHAW'],
-            'SEDAN' => ['SEDAN', 'MINI', 'CAR'],
+            'SEDAN' => ['SEDAN', 'MINI', 'CAR', 'CAB', 'HATCHBACK', 'PREMIUM'],
             'SUV' => ['SUV'],
             'TRAVELLER' => ['TRAVELLER', 'VAN', 'TEMPO'],
             'TRUCK' => ['TRUCK', 'PICKUP', 'LOADING'],

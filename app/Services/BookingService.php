@@ -139,15 +139,18 @@ class BookingService
         }
         $status = $driverDispatch ? BookingStatus::SEARCHING : 'CONFIRMED';
 
-        $matches = $driverDispatch ? $this->nearby->search(
-            $pickupLat,
-            $pickupLng,
-            (string) $dto['category'],
-            $radius,
-            false,
-            $districtId,
-            (string) ($dto['product'] ?? 'LOCAL_CAB'),
-        ) : [];
+        $matches = [];
+        if ($driverDispatch && ! $futureSchedule) {
+            $matches = $this->nearby->search(
+                $pickupLat,
+                $pickupLng,
+                (string) $dto['category'],
+                $radius,
+                false,
+                $districtId,
+                (string) ($dto['product'] ?? 'LOCAL_CAB'),
+            );
+        }
         // One-way and round-trip nearby searches pay the full fare after the trip.
         // A future schedule collects 10% only after a driver accepts.
         $collectAdvance = \App\Support\AdvancePayment::enabled($product) && ! $futureSchedule;
@@ -234,6 +237,7 @@ class BookingService
         ]));
 
         $this->storeStops($booking, is_array($dto['stops'] ?? null) ? $dto['stops'] : []);
+        $this->ensureParcelShipment($booking, $dto);
         if ($futureSchedule && \App\Support\AdvancePayment::enabled($product) && ! $this->isCityProduct($product)) {
             $totalPaise = (int) ($quote['totalPaise'] ?? 0);
             $quote['prebook'] = true;
@@ -390,6 +394,7 @@ class BookingService
 
         $preview = Booking::query()->find($id);
         abort_unless($preview, 404, 'Booking not found');
+        $this->assertScheduleSlotFree($driver, $preview);
         $vehicles = $driver->vehicles;
         if ($vehicles->isEmpty()) {
             $vehicles = \App\Models\Vehicle::query()->where('driver_id', $driver->id)->get();
@@ -1046,8 +1051,16 @@ class BookingService
             'needsAdvance' => ! empty($snapshot['advanceAfterAccept'])
                 && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1
                 && (string) $row->status === 'SCHEDULED'
-                && ! empty($row->driver_id),
+                && ! empty($row->driver_id)
+                && ! $this->isCityRide($row),
             'canActivate' => $this->scheduleCanActivate($row),
+            'canCancel' => in_array('cancel', $allowed, true),
+            'commissionSettled' => ! empty($snapshot['commissionSettled']) || (int) ($snapshot['advancePaidPaise'] ?? 0) > 0,
+            'hideCommissionTag' => $this->isCityRide($row),
+            'schedule' => [
+                'canCancel' => in_array('cancel', $allowed, true),
+                'canReschedule' => (string) $row->status === 'SCHEDULED' && ($this->isCityRide($row) || ! $this->commissionLocksDriver($row)),
+            ],
             'serviceType' => $fareDetail['serviceLabel'] ?? TripFareDetail::serviceLabel((string) $row->product),
             'roundTripPhase' => $isRound
                 ? ($snapshot['roundTripPhase'] ?? (empty($snapshot['oneSideCompletedAt']) ? null : 'waiting'))
@@ -1190,7 +1203,7 @@ class BookingService
             ->get();
         foreach ($rows as $booking) {
             $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
-            if (! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1) {
+            if (! $this->isCityRide($booking) && ! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1) {
                 continue;
             }
             if (! $booking->driver_id) {
@@ -1205,9 +1218,32 @@ class BookingService
                 $ids[] = (int) $driverUserId;
             }
             $dueAt = \Illuminate\Support\Carbon::parse($booking->scheduled_at);
-            $within45 = $dueAt->lte(now()->addMinutes(45));
+            $mins = now()->diffInMinutes($dueAt, false);
             $changed = false;
-            if ($within45 && empty($snapshot['reminder45m'])) {
+            if ($mins <= 10 && empty($snapshot['reminder10m'])) {
+                $this->push->notifyUsers(
+                    $ids,
+                    'Ride starts in 10 minutes',
+                    'Booking '.$booking->public_ref.' is at '.$when.'. Be at pickup now.',
+                    ['type' => 'trip', 'event' => 'ride_reminder', 'bookingId' => (string) $booking->id],
+                );
+                if ($driverUserId) {
+                    $this->push->notifyUsers(
+                        [(int) $driverUserId],
+                        'Activate this booking',
+                        'Booking '.$booking->public_ref.' starts in 10 minutes. Open the app and activate now.',
+                        [
+                            'type' => 'booking_offer',
+                            'event' => 'activate_reminder',
+                            'bookingId' => (string) $booking->id,
+                        ],
+                    );
+                }
+                $this->notifyOps($booking, '10 min reminder · '.$booking->public_ref);
+                $snapshot['reminder10m'] = now()->toIso8601String();
+                $changed = true;
+                $sent++;
+            } elseif ($mins <= 45 && empty($snapshot['reminder45m'])) {
                 $this->push->notifyUsers(
                     [(int) $booking->customer_id],
                     'Ride is almost due',
@@ -1331,11 +1367,11 @@ class BookingService
      */
     private function scheduledDriverActions(Booking $row): array
     {
-        $actions = [];
+        $actions = ['call'];
         if ($this->scheduleCanActivate($row)) {
             $actions[] = 'activate';
         }
-        if (! $this->commissionLocksDriver($row)) {
+        if ($this->isCityRide($row) || ! $this->commissionLocksDriver($row)) {
             $actions[] = 'cancel';
         }
 
@@ -1411,6 +1447,9 @@ class BookingService
 
     private function scheduleSkipsDriverWallet(Booking $row): bool
     {
+        if ($this->isCityRide($row) && $this->isScheduledTrip($row)) {
+            return true;
+        }
         $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
         return ! empty($snapshot['advanceAfterAccept']) || ! empty($snapshot['commissionSettled']);
     }
@@ -1550,6 +1589,10 @@ class BookingService
             return [];
         }
         if ($actor->role === 'CUSTOMER' && (int) $row->customer_id === (int) $actor->id && ! BookingStatus::isTerminal($status) && $status !== BookingStatus::COMPLETED) {
+            if ($this->commissionLocksDriver($row) && ! $this->isCityRide($row) && $this->isScheduledTrip($row)
+                && in_array($status, ['SCHEDULED', BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED, BookingStatus::DRIVER_ARRIVED, 'DRIVER_ARRIVING'], true)) {
+                return [];
+            }
             if (in_array($status, [
                 BookingStatus::SEARCHING,
                 BookingStatus::LEGACY_REQUESTED,
@@ -1623,9 +1666,7 @@ class BookingService
         if (! $customer) {
             return null;
         }
-        $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
-        $advancePending = ! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1;
-        $mask = $actor?->role !== 'DRIVER' || BookingStatus::isSearching((string) $row->status) || $advancePending;
+        $mask = $actor?->role !== 'DRIVER' || BookingStatus::isSearching((string) $row->status);
 
         return [
             'name' => $customer->name,
@@ -1831,25 +1872,40 @@ class BookingService
     public function offersForDriver(User $actor): array
     {
         $this->expireSearching();
-        $driver = Driver::query()->where('user_id', $actor->id)->first();
+        $driver = Driver::query()->where('user_id', $actor->id)->with('vehicles')->first();
         if (! $driver) {
             return [];
         }
         $ids = $this->offeredBookingIds((int) $driver->id);
-        if (! $ids) {
-            return [];
-        }
-
-        return Booking::query()
-            ->whereIn('id', $ids)
+        $category = strtoupper((string) ($driver->vehicles->first()?->category ?? ''));
+        $rows = Booking::query()
             ->where('status', BookingStatus::SEARCHING)
             ->whereNull('driver_id')
             ->where(function ($query) {
                 $query->whereNull('scheduled_at')->orWhere('scheduled_at', '<=', now()->addMinutes(5));
             })
             ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'SCHEDULE', 'MULTI_STOP', 'RENTAL'])
+            ->where(function ($query) use ($ids) {
+                if ($ids) {
+                    $query->whereIn('id', $ids);
+                }
+                $query->orWhere('product', 'PARCEL');
+            })
             ->orderByDesc('id')
+            ->limit(40)
             ->get()
+            ->filter(function (Booking $row) use ($ids, $category) {
+                if ($ids && in_array((int) $row->id, $ids, true)) {
+                    return true;
+                }
+                if (strtoupper((string) $row->product) !== 'PARCEL') {
+                    return false;
+                }
+
+                return $category === '' || trim((string) $row->category) === '' || \App\Support\VehicleCategory::sameFamily($category, (string) $row->category);
+            });
+
+        return $rows
             ->map(function (Booking $row) use ($actor, $driver) {
                 $presented = $this->present($row, $actor);
                 $req = Schema::hasTable('booking_driver_requests')
@@ -1861,6 +1917,7 @@ class BookingService
 
                 return $presented;
             })
+            ->values()
             ->all();
     }
 
@@ -1891,6 +1948,103 @@ class BookingService
             return $booking;
         }
         abort(403, 'Forbidden');
+    }
+
+    private function assertScheduleSlotFree(Driver $driver, Booking $incoming): void
+    {
+        if (! $incoming->scheduled_at) {
+            return;
+        }
+        $start = \Illuminate\Support\Carbon::parse($incoming->scheduled_at);
+        $duration = $this->tripDurationMinutes($incoming);
+        $end = $start->copy()->addMinutes($duration);
+        $buffer = 30;
+        $conflicts = Booking::query()
+            ->where('driver_id', $driver->id)
+            ->whereNotNull('scheduled_at')
+            ->whereNotIn('status', BookingStatus::terminal())
+            ->where('id', '!=', $incoming->id)
+            ->get();
+        foreach ($conflicts as $row) {
+            $otherStart = \Illuminate\Support\Carbon::parse($row->scheduled_at);
+            $otherEnd = $otherStart->copy()->addMinutes($this->tripDurationMinutes($row));
+            $blockedStart = $otherStart->copy()->subMinutes($buffer);
+            $blockedEnd = $otherEnd->copy()->addMinutes($buffer);
+            if ($start->lt($blockedEnd) && $end->gt($blockedStart)) {
+                abort(422, 'You have already accepted a booking at this time. Finish that trip or pick a slot at least 30 minutes after it.');
+            }
+        }
+    }
+
+    private function tripDurationMinutes(Booking $row): int
+    {
+        $km = (float) ($row->distance_km ?? 0);
+        if ($km <= 0) {
+            $km = 10;
+        }
+
+        return max(30, (int) ceil($km / 0.5));
+    }
+
+    /**
+     * @param  array<string, mixed>  $dto
+     */
+    private function ensureParcelShipment(Booking $booking, array $dto): void
+    {
+        if (strtoupper((string) $booking->product) !== 'PARCEL' || ! Schema::hasTable('parcel_shipments')) {
+            return;
+        }
+        if (Schema::hasColumn('parcel_shipments', 'booking_id')) {
+            $linked = DB::table('parcel_shipments')->where('booking_id', $booking->id)->first();
+            if ($linked) {
+                return;
+            }
+            $orphan = DB::table('parcel_shipments')
+                ->where('customer_id', $booking->customer_id)
+                ->whereNull('driver_id')
+                ->where(function ($query) {
+                    $query->whereNull('booking_id')->orWhere('booking_id', 0);
+                })
+                ->where('created_at', '>=', now()->subMinutes(15))
+                ->orderByDesc('id')
+                ->first();
+            if ($orphan) {
+                DB::table('parcel_shipments')->where('id', $orphan->id)->update([
+                    'booking_id' => $booking->id,
+                    'status' => in_array(strtolower((string) $orphan->status), ['created', 'paid'], true) ? 'paid' : $orphan->status,
+                    'updated_at' => now(),
+                ]);
+
+                return;
+            }
+        }
+        $row = [
+            'public_ref' => $booking->public_ref,
+            'customer_id' => $booking->customer_id,
+            'category' => $booking->category,
+            'pickup_text' => $booking->pickup_text,
+            'drop_text' => $booking->drop_text,
+            'pickup_lat' => $booking->pickup_lat,
+            'pickup_lng' => $booking->pickup_lng,
+            'drop_lat' => $booking->drop_lat,
+            'drop_lng' => $booking->drop_lng,
+            'distance_km' => $booking->distance_km,
+            'contact_name' => $booking->passenger_name,
+            'contact_phone' => $booking->passenger_phone,
+            'quote_paise' => $booking->quote_paise,
+            'payment_status' => 'paid',
+            'status' => 'paid',
+            'booking_id' => $booking->id,
+            'pickup_otp' => $booking->start_otp,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ];
+        $payload = array_filter(
+            $row,
+            fn ($key) => Schema::hasColumn('parcel_shipments', $key),
+            ARRAY_FILTER_USE_KEY,
+        );
+        DB::table('parcel_shipments')->insert($payload);
     }
 
     /**

@@ -37,7 +37,7 @@ class NearbyDriverService
                     });
             })
             ->where('d.online', 1)
-            ->whereIn('d.duty_status', ['online', 'ONLINE'])
+            ->whereIn('d.duty_status', ['online', 'ONLINE', 'available', 'AVAILABLE'])
             ->where(function ($q) {
                 $q->whereIn(DB::raw('LOWER(d.kyc_status)'), ['approved', 'active', 'verified', 'pending', 'under_review', 'submitted'])
                     ->orWhereNotNull('v.id');
