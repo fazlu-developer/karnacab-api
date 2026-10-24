@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
@@ -14,6 +15,7 @@ class WalletAccountService
         if (! Schema::hasTable('wallets')) {
             return;
         }
+        $this->widenAccountColumns();
         $missing = [];
         foreach (['joining_credit_limit_paise', 'joining_credit_paise', 'joining_credit_used_paise', 'frozen_paise'] as $column) {
             if (! Schema::hasColumn('wallets', $column)) {
@@ -511,24 +513,69 @@ class WalletAccountService
         if (! Schema::hasTable('wallet_ledger')) {
             return;
         }
-        DB::table('wallet_ledger')->insert($this->filter('wallet_ledger', [
-            'public_ref' => $paymentRef ?: strtoupper(substr($kind, 0, 2)).strtoupper(Str::random(10)),
-            'payment_ref' => $paymentRef,
-            'wallet_id' => $wallet->id,
-            'booking_id' => $bookingId,
-            'owner_user_id' => $userId,
-            'account' => $account,
-            'direction' => strtoupper($direction) === 'DEBIT' ? 'DEBIT' : 'CREDIT',
-            'amount_paise' => max(0, $paise),
-            'commission_paise' => $commissionPaise,
-            'gross_paise' => $grossPaise ?: $paise,
-            'balance_before_paise' => $before,
-            'balance_after_paise' => $after,
-            'kind' => $kind,
-            'status' => 'posted',
-            'note' => $note,
-            'created_at' => now(),
-        ]));
+        try {
+            DB::table('wallet_ledger')->insert($this->filter('wallet_ledger', [
+                'public_ref' => $paymentRef ?: strtoupper(substr($kind, 0, 2)).strtoupper(Str::random(10)),
+                'payment_ref' => $paymentRef,
+                'wallet_id' => $wallet->id,
+                'booking_id' => $bookingId,
+                'owner_user_id' => $userId,
+                'account' => $this->safeAccount($account),
+                'owner_type' => $this->safeAccount($account),
+                'direction' => strtoupper($direction) === 'DEBIT' ? 'DEBIT' : 'CREDIT',
+                'amount_paise' => max(0, $paise),
+                'commission_paise' => $commissionPaise,
+                'gross_paise' => $grossPaise ?: $paise,
+                'balance_before_paise' => $before,
+                'balance_after_paise' => $after,
+                'kind' => $kind,
+                'status' => 'posted',
+                'note' => $note,
+                'created_at' => now(),
+            ]));
+        } catch (\Throwable $e) {
+            Log::warning('wallet.ledger_failed', [
+                'account' => $account,
+                'kind' => $kind,
+                'bookingId' => $bookingId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function widenAccountColumns(): void
+    {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        if (Schema::hasTable('wallet_ledger') && Schema::hasColumn('wallet_ledger', 'account')) {
+            try {
+                DB::statement('ALTER TABLE wallet_ledger MODIFY COLUMN account VARCHAR(32) NULL');
+            } catch (\Throwable) {
+            }
+        }
+        if (Schema::hasColumn('wallets', 'owner_type')) {
+            try {
+                DB::statement('ALTER TABLE wallets MODIFY COLUMN owner_type VARCHAR(32) NULL');
+            } catch (\Throwable) {
+            }
+        }
+    }
+
+    private function safeAccount(string $account): string
+    {
+        $account = strtoupper(trim($account));
+        $map = [
+            'ADMIN' => 'PLATFORM',
+            'SUPER_ADMIN' => 'PLATFORM',
+            'FLEET' => 'FLEET_OWNER',
+            'DISTRICT' => 'DISTRICT_HEAD',
+        ];
+        $value = $map[$account] ?? $account;
+
+        return substr($value !== '' ? $value : 'DRIVER', 0, 32);
     }
 
     /**

@@ -484,9 +484,7 @@ class PlatformController extends Controller
 
     public function bookingsRate(Request $request, string $id)
     {
-        $this->bookings->rate($request->user(), $id, (int) $request->input('stars', 5), (string) ($request->input('comment') ?? ''));
-
-        return ['ok' => true];
+        return $this->bookings->rate($request->user(), $id, (int) $request->input('stars', 5), (string) ($request->input('comment') ?? ''));
     }
 
     public function driversMe(Request $request)

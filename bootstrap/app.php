@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Middleware\AuthenticateJwt;
+use App\Support\PublicError;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -54,9 +55,8 @@ return Application::configure(basePath: dirname(__DIR__))
             }
 
             return response()->json([
-                'message' => $e->getMessage() !== '' ? $e->getMessage() : $e::class,
+                'message' => PublicError::message($e),
                 'statusCode' => $status,
-                'error' => $e::class,
             ], $status);
         });
     })->create();

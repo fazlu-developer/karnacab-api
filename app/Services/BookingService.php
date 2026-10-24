@@ -536,17 +536,12 @@ class BookingService
         return $this->lifecycle($actor, $id, 'cancel', null, $data);
     }
 
-    public function rate(User $actor, string $id, int $stars, string $comment): void
+    public function rate(User $actor, string $id, int $stars, string $comment): array
     {
         $booking = $this->findVisible($actor, $id);
         $stars = max(1, min(5, $stars));
         if (Schema::hasTable('booking_ratings')) {
-            if (! Schema::hasColumn('booking_ratings', 'comment')) {
-                try {
-                    Schema::table('booking_ratings', fn ($table) => $table->text('comment')->nullable());
-                } catch (\Throwable) {
-                }
-            }
+            $columns = Schema::getColumnListing('booking_ratings');
             $row = [
                 'booking_id' => $booking->id,
                 'from_role' => $actor->role,
@@ -557,12 +552,12 @@ class BookingService
                 'updated_at' => now(),
             ];
             $match = ['booking_id' => $booking->id];
-            if (Schema::hasColumn('booking_ratings', 'from_role')) {
+            if (in_array('from_role', $columns, true)) {
                 $match['from_role'] = $actor->role;
             }
             DB::table('booking_ratings')->updateOrInsert(
                 $match,
-                array_filter($row, fn ($key) => Schema::hasColumn('booking_ratings', $key), ARRAY_FILTER_USE_KEY),
+                array_filter($row, fn ($key) => in_array($key, $columns, true), ARRAY_FILTER_USE_KEY),
             );
         }
         if ($booking->driver_id && Schema::hasTable('booking_ratings')) {
@@ -572,6 +567,8 @@ class BookingService
                 Driver::query()->where('id', $booking->driver_id)->update(['rating_avg' => round((float) $avg, 2)]);
             }
         }
+
+        return $this->present($booking->fresh(), $actor) + ['ok' => true];
     }
 
     public function verifyOtp(User $actor, string $id, string $otp): array
@@ -593,14 +590,27 @@ class BookingService
             ['type' => 'trip', 'event' => 'otp_verified', 'bookingId' => (string) $booking->id],
         );
         Log::info('booking.otp_verified', ['bookingId' => $booking->id]);
+        $fresh = $booking->fresh();
+        if (! $this->isScheduledTrip($fresh)) {
+            try {
+                return $this->startTrip($actor, $id);
+            } catch (\Throwable $e) {
+                Log::warning('booking.autostart_failed', ['bookingId' => $booking->id, 'error' => $e->getMessage()]);
 
-        return $this->present($booking->fresh(), $actor);
+                return $this->present($fresh, $actor);
+            }
+        }
+
+        return $this->present($fresh, $actor);
     }
 
     public function startTrip(User $actor, string $id): array
     {
         abort_unless($actor->role === 'DRIVER', 403, 'Only the assigned driver can start the trip');
         $booking = $this->assignedToDriver($actor, $id);
+        if (in_array((string) $booking->status, [BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED'], true)) {
+            return $this->present($booking, $actor);
+        }
         abort_unless((string) $booking->status === BookingStatus::OTP_VERIFIED, 422, 'Confirm the customer OTP before starting the trip.');
         abort_unless(BookingStatus::canTransition((string) $booking->status, BookingStatus::TRIP_STARTED), 422, 'Invalid booking status');
         $booking->update($this->filterColumns([
@@ -1405,6 +1415,16 @@ class BookingService
         return ! empty($snapshot['advanceAfterAccept']) || ! empty($snapshot['commissionSettled']);
     }
 
+    private function isScheduledTrip(Booking $row): bool
+    {
+        $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
+        if (! empty($snapshot['prebook']) || ! empty($snapshot['advanceAfterAccept'])) {
+            return true;
+        }
+
+        return $row->scheduled_at !== null;
+    }
+
     private function scheduleCanActivate(Booking $row): bool
     {
         if ((string) $row->status !== 'SCHEDULED' || ! $row->scheduled_at) {
@@ -1468,7 +1488,14 @@ class BookingService
             'quote_snapshot' => $snapshot,
         ]));
         $fresh = $booking->fresh();
-        $this->settleAdvanceCommission($fresh, $due);
+        try {
+            $this->settleAdvanceCommission($fresh, $due);
+        } catch (\Throwable $e) {
+            Log::warning('booking.advance_commission_failed', [
+                'bookingId' => $fresh->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
         if ($mode !== 'WALLET') {
             app(CustomerWallet::class)->recordMemo(
                 (int) $actor->id,
