@@ -1150,7 +1150,7 @@ class OperatorFleetService
             $commission = (int) round($total * FareCommissionSplit::TOTAL_PERCENT / 100);
         }
 
-        return FareCommissionSplit::split($total, $commission, $pct)['fleetPaise'];
+        return FareCommissionSplit::applyFleetShare($total, $commission, null, null, true)['fleetPaise'];
     }
 
     private function sumCompleted(object $fleet, array $window): int

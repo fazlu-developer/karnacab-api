@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\PublicMedia;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -298,17 +299,9 @@ class VehicleCatalogService
         return $out;
     }
 
-    public function publicUrl(mixed $path): string
+    public function publicUrl(mixed $path, mixed $version = null): string
     {
-        $path = trim((string) $path);
-        if ($path === '') {
-            return '';
-        }
-        if (str_starts_with($path, 'http://') || str_starts_with($path, 'https://')) {
-            return $path;
-        }
-
-        return rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnaride.in'), '/').'/'.ltrim($path, '/');
+        return PublicMedia::presentMediaUrl($path, $version) ?? '';
     }
 
     public function ensureVehicleCategoriesColumn(): void

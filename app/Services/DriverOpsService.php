@@ -48,7 +48,7 @@ class DriverOpsService
         $canGoOnline = $approved && ! $blocked && ! $fleetUnassigned;
         $online = (bool) $driver->online;
         $duty = $driver->duty_status ?: ($online ? 'online' : 'offline');
-        $canReceive = $canGoOnline && $online && in_array(strtolower((string) $duty), ['online'], true);
+        $canReceive = $canGoOnline && $online && in_array(strtolower((string) $duty), ['online', 'available'], true);
         $vehicle = $driver->vehicles->first();
         $wallet = Schema::hasTable('wallets')
             ? DB::table('wallets')->where('owner_user_id', $actor->id)->when(
@@ -74,6 +74,7 @@ class DriverOpsService
                 $dismissals = app(OfferDismissal::class);
                 $parcelCount = DB::table('parcel_shipments')
                     ->whereNull('driver_id')
+                    ->when(Schema::hasColumn('parcel_shipments', 'booking_id'), fn ($q) => $q->whereNull('booking_id'))
                     ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
                     ->where('created_at', '>=', now()->subMinutes(20))
                     ->pluck('id')
@@ -198,6 +199,7 @@ class DriverOpsService
                 $dismissals = app(OfferDismissal::class);
                 $parcels = DB::table('parcel_shipments')
                     ->whereNull('driver_id')
+                    ->when(Schema::hasColumn('parcel_shipments', 'booking_id'), fn ($q) => $q->whereNull('booking_id'))
                     ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
                     ->where('created_at', '>=', now()->subHours(12))
                     ->orderByDesc('id')
@@ -251,14 +253,15 @@ class DriverOpsService
             }
 
             $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
+            $product = app(BookingService::class)->presentedProduct($row);
             $advancePaid = (int) ($snapshot['advancePaidPaise'] ?? 0);
             $total = (int) ($row->final_fare_paise ?? $row->quote_paise);
             $commissionPaise = (int) ($row->commission_paise ?? 0);
             $earningPaise = (int) ($row->driver_earning_paise ?? max(0, $total - $commissionPaise));
             $fareDetail = TripFareDetail::fromRecord($row, $snapshot, $total, $commissionPaise, $earningPaise);
             $phone = null;
-            $needsAdvance = ! empty($snapshot['advanceAfterAccept']) && $advancePaid < 1 && ! in_array(strtoupper((string) $row->product), ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true);
-            $cityRide = in_array(strtoupper((string) $row->product), ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true);
+            $needsAdvance = ! empty($snapshot['advanceAfterAccept']) && $advancePaid < 1 && $product !== 'LOCAL_CAB';
+            $cityRide = $product === 'LOCAL_CAB';
             $canActivate = (string) $row->status === 'SCHEDULED'
                 && $row->scheduled_at
                 && (! $needsAdvance || $cityRide)
@@ -270,7 +273,7 @@ class DriverOpsService
             $actions = [];
             if ((string) $row->status === 'SCHEDULED') {
                 $actions[] = 'call';
-                if ($canActivate) {
+                if ($cityRide || $canActivate) {
                     $actions[] = 'activate';
                 }
                 if ($cityRide || $advancePaid < 1) {
@@ -286,8 +289,10 @@ class DriverOpsService
                 'lifecycle' => \App\Support\BookingStatus::lifecycle((string) $row->status),
                 'pickupText' => $row->pickup_text,
                 'dropText' => $row->drop_text,
-                'product' => $row->product,
-                'serviceType' => $fareDetail['serviceLabel'] ?? TripFareDetail::serviceLabel((string) $row->product),
+                'product' => $product,
+                'serviceType' => strtoupper((string) $row->product) === 'SCHEDULE'
+                    ? TripFareDetail::serviceLabel($product)
+                    : ($fareDetail['serviceLabel'] ?? TripFareDetail::serviceLabel($product)),
                 'category' => $row->category,
                 'quotePaise' => $total,
                 'quoteRupees' => $total / 100,
@@ -308,6 +313,57 @@ class DriverOpsService
                 'paymentType' => $mode === 'WALLET' ? 'Wallet' : ($mode === 'UPI' ? 'Online / PayU' : 'Cash'),
                 'amountType' => $mode === 'WALLET' ? 'Wallet' : ($mode === 'UPI' ? 'Online / PayU' : 'Cash'),
                 'scheduledAt' => optional($row->scheduled_at)?->toIso8601String(),
+                'cityMode' => $cityRide
+                    ? (string) ($snapshot['cityMode'] ?? ($row->scheduled_at ? 'schedule' : 'now'))
+                    : null,
+                'oneWayMode' => $product === 'ONE_WAY'
+                    ? (string) ($snapshot['oneWayMode'] ?? ($row->scheduled_at ? 'schedule' : 'now'))
+                    : null,
+                'multiStopMode' => $product === 'MULTI_STOP'
+                    ? (string) ($snapshot['multiStopMode'] ?? ($row->scheduled_at ? 'schedule' : 'now'))
+                    : null,
+                'stops' => $product === 'MULTI_STOP' ? ($snapshot['multiStops'] ?? $snapshot['stops'] ?? []) : [],
+                'stopCount' => $snapshot['stopCount'] ?? null,
+                'totalKm' => isset($snapshot['totalKm']) ? (float) $snapshot['totalKm'] : null,
+                'currentStopIndex' => isset($snapshot['currentStopIndex']) ? (int) $snapshot['currentStopIndex'] : 0,
+                'routePolyline' => $snapshot['routePolyline'] ?? null,
+                'airportMode' => $product === 'AIRPORT'
+                    ? (string) ($snapshot['airportMode'] ?? ($row->scheduled_at ? 'schedule' : 'now'))
+                    : null,
+                'airportDirection' => $snapshot['airportDirection'] ?? null,
+                'airportName' => $snapshot['airportName'] ?? null,
+                'railwayMode' => $product === 'RAILWAY'
+                    ? (string) ($snapshot['railwayMode'] ?? ($row->scheduled_at ? 'schedule' : 'now'))
+                    : null,
+                'railwayDirection' => $snapshot['railwayDirection'] ?? null,
+                'stationName' => $snapshot['stationName'] ?? null,
+                'trainNumber' => $row->train_number ?: ($snapshot['trainNo'] ?? null),
+                'flightNumber' => $row->flight_number ?: ($snapshot['flightNo'] ?? null),
+                'terminal' => $row->terminal ?: ($snapshot['terminal'] ?? null),
+                'parcelMode' => $product === 'PARCEL'
+                    ? (string) ($snapshot['parcelMode'] ?? ($row->scheduled_at ? 'schedule' : 'now'))
+                    : null,
+                'parcelType' => $snapshot['parcelType'] ?? null,
+                'receiverName' => $snapshot['receiverName'] ?? $row->passenger_name,
+                'packageNotes' => $snapshot['packageNotes'] ?? $row->instructions,
+                'pickupLat' => $row->pickup_lat !== null ? (float) $row->pickup_lat : null,
+                'pickupLng' => $row->pickup_lng !== null ? (float) $row->pickup_lng : null,
+                'dropLat' => $row->drop_lat !== null ? (float) $row->drop_lat : null,
+                'dropLng' => $row->drop_lng !== null ? (float) $row->drop_lng : null,
+                'roundTripMode' => $product === 'ROUND_WAY'
+                    ? (string) ($snapshot['roundTripMode'] ?? ($row->scheduled_at ? 'schedule' : 'now'))
+                    : null,
+                'roundTripPhase' => $snapshot['roundTripPhase'] ?? null,
+                'oneSideCompletedAt' => $snapshot['oneSideCompletedAt'] ?? $snapshot['outboundCompletedAt'] ?? null,
+                'outboundCompletedAt' => $snapshot['outboundCompletedAt'] ?? $snapshot['oneSideCompletedAt'] ?? null,
+                'returnStartedAt' => $snapshot['returnStartedAt'] ?? null,
+                'returnCompletedAt' => $snapshot['returnCompletedAt'] ?? null,
+                'waitingRate' => (int) ($snapshot['waitingRate'] ?? $snapshot['waitingPaisePerMin'] ?? 0),
+                'waitingPaisePerMin' => (int) ($snapshot['waitingPaisePerMin'] ?? $snapshot['waitingRate'] ?? 0),
+                'baseRoundTripPaise' => (int) ($snapshot['baseRoundTripPaise'] ?? 0),
+                'gstPercent' => (float) ($snapshot['gstPercent'] ?? 0),
+                'gstAppliesToFare' => ! empty($snapshot['gstAppliesToFare']),
+                'returnAt' => optional($row->return_at)?->toIso8601String(),
                 'tripStartedAt' => optional($row->trip_started_at)?->toIso8601String(),
                 'tripEndedAt' => optional($row->trip_ended_at)?->toIso8601String(),
                 'updatedAt' => optional($row->updated_at)?->toIso8601String(),
@@ -323,7 +379,13 @@ class DriverOpsService
         })->all();
         $parcels = [];
         if (Schema::hasTable('parcel_shipments')) {
-            $parcels = DB::table('parcel_shipments')->where('driver_id', $driver->id)->orderByDesc('id')->limit(40)->get()->map(fn ($row) => [
+            $parcels = DB::table('parcel_shipments')
+                ->where('driver_id', $driver->id)
+                ->when(Schema::hasColumn('parcel_shipments', 'booking_id'), fn ($q) => $q->whereNull('booking_id'))
+                ->orderByDesc('id')
+                ->limit(40)
+                ->get()
+                ->map(fn ($row) => [
                 'kind' => 'parcel',
                 'id' => (string) $row->id,
                 'status' => $row->status,
@@ -340,7 +402,26 @@ class DriverOpsService
             ])->all();
         }
 
-        return ['trips' => array_values(array_merge($rides, $parcels))];
+        $tours = [];
+        try {
+            $tours = app(\App\Services\Tour\TourBookingService::class)->driverCards($actor);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('tour.driver_trips_failed', ['error' => $e->getMessage()]);
+        }
+        $bulk = [];
+        try {
+            $bulk = app(\App\Services\Bulk\BulkBookingService::class)->driverCards($actor);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('bulk.driver_trips_failed', ['error' => $e->getMessage()]);
+        }
+        $corporate = [];
+        try {
+            $corporate = app(\App\Services\Corporate\CorporatePlanService::class)->driverCards($actor);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('corporate.driver_trips_failed', ['error' => $e->getMessage()]);
+        }
+
+        return ['trips' => array_values(array_merge($rides, $parcels, $tours, $bulk, $corporate))];
     }
 
     public function documents(User $actor): array
@@ -973,6 +1054,7 @@ class DriverOpsService
         $category = $driver->vehicles->first()?->category;
         $rows = \App\Models\Booking::query()
             ->whereNotNull('scheduled_at')
+            ->whereNotIn('product', ['LOCAL_CAB', 'CITY_RIDE', 'CITY'])
             ->whereNotIn('status', \App\Support\BookingStatus::terminal())
             ->whereNull('driver_id')
             ->whereIn('status', array_merge(\App\Support\BookingStatus::searching(), ['CONFIRMED']))
@@ -986,14 +1068,24 @@ class DriverOpsService
             ->limit(40)
             ->get();
 
-        return $rows->map(function ($row) use ($actor) {
+        return $rows->map(function ($row) use ($actor, $driver) {
             $presented = app(BookingService::class)->present($row, $actor);
             $presented['kind'] = 'ride';
             $presented['scheduled'] = true;
             $presented['actions'] = ['accept', 'reject'];
+            $blocked = app(BookingService::class)->scheduleBlockReason($driver, $row);
+            if ($blocked !== null) {
+                $shown = app(BookingService::class)->presentedProduct($row);
+                if (in_array($shown, ['ONE_WAY', 'ROUND_WAY', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'PARCEL', 'RENTAL'], true)) {
+                    $presented['acceptBlocked'] = $blocked;
+                    $presented['actions'] = ['reject'];
+                } else {
+                    return null;
+                }
+            }
 
             return $presented;
-        })->all();
+        })->filter()->values()->all();
     }
 
     private function upsertVehicle(Driver $driver, array $data): void

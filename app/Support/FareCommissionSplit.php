@@ -44,4 +44,34 @@ final class FareCommissionSplit
             'fleetPercent' => $fleetPct,
         ];
     }
+
+    /**
+     * Fleet vehicles take a share of the District Head pool. Empty custom share is 50%.
+     * Independent drivers leave the whole pool with the District Head.
+     *
+     * @return array{commissionPaise: int, platformPaise: int, districtPoolPaise: int, districtHeadPaise: int, fleetPaise: int, fleetPercent: float}
+     */
+    public static function applyFleetShare(int $farePaise, int $commissionPaise, ?float $sharePercentOfPool, ?int $fixedPaise = null, bool $isFleet = true): array
+    {
+        $base = self::split($farePaise, $commissionPaise, 0);
+        $pool = (int) $base['districtPoolPaise'];
+        if (! $isFleet || $pool < 1) {
+            return $base;
+        }
+        if ($sharePercentOfPool === null && $fixedPaise !== null && $fixedPaise > 0) {
+            $fleet = min($pool, $fixedPaise);
+            $percent = round($fleet / $pool * 100, 2);
+        } else {
+            $percent = $sharePercentOfPool === null ? 50.0 : max(0, min(100, $sharePercentOfPool));
+            $fleet = (int) round($pool * $percent / 100);
+            if ($fleet > $pool) {
+                $fleet = $pool;
+            }
+        }
+        $base['fleetPaise'] = $fleet;
+        $base['districtHeadPaise'] = $pool - $fleet;
+        $base['fleetPercent'] = (float) $percent;
+
+        return $base;
+    }
 }

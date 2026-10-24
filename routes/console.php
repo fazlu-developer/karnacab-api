@@ -28,7 +28,13 @@ Artisan::command('bookings:remind-upcoming', function () {
     $this->info("Sent {$count} upcoming ride reminder(s).");
 })->purpose('Push a reminder 3 hours before a scheduled ride');
 
+Artisan::command('corporate:remind', function () {
+    $count = app(\App\Services\Corporate\CorporatePlanService::class)->remindDue();
+    $this->info("Sent {$count} corporate reminder(s).");
+})->purpose('Remind corporate daily pickups and mark expired plans');
+
 Schedule::command('bookings:expire-searching')->everyMinute();
 Schedule::command('bookings:remind-upcoming')->everyFiveMinutes();
+Schedule::command('corporate:remind')->everyFiveMinutes();
 Schedule::command('kyc:expire-documents')->dailyAt('01:15');
 Schedule::command('fleet:settle-weeks')->dailyAt('00:20');

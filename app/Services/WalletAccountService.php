@@ -62,14 +62,12 @@ class WalletAccountService
             return;
         }
         $adds = [];
-        foreach (['user_id', 'upi_or_account', 'transfer_ref', 'reviewed_by', 'reviewed_at', 'settled_at'] as $column) {
+        foreach (['user_id', 'payout_method', 'upi_or_account', 'transfer_ref', 'reviewed_by', 'reviewed_at', 'settled_at'] as $column) {
             if (! Schema::hasColumn('wallet_withdrawals', $column)) {
                 $adds[] = $column;
             }
         }
-        if ($adds === []) {
-            return;
-        }
+        if ($adds !== []) {
         Schema::table('wallet_withdrawals', function ($table) use ($adds) {
             if (in_array('user_id', $adds, true)) {
                 $table->unsignedBigInteger('user_id')->nullable();
@@ -93,7 +91,21 @@ class WalletAccountService
                 $table->timestamp('settled_at')->nullable();
             }
         });
-        if (in_array('user_id', $adds, true) && Schema::hasColumn('wallets', 'owner_user_id')) {
+        }
+        if (DB::getDriverName() === 'mysql') {
+            $column = DB::select("SHOW COLUMNS FROM wallet_withdrawals WHERE Field = 'status'");
+            $type = strtolower((string) ($column[0]->Type ?? ''));
+            if (str_starts_with($type, 'enum') && ! str_contains($type, 'requested')) {
+                DB::statement("ALTER TABLE wallet_withdrawals MODIFY status VARCHAR(24) NOT NULL DEFAULT 'requested'");
+            }
+            if (Schema::hasColumn('wallet_withdrawals', 'ledger_id')) {
+                $ledger = DB::select("SHOW COLUMNS FROM wallet_withdrawals WHERE Field = 'ledger_id'");
+                if (strtoupper((string) ($ledger[0]->Null ?? '')) === 'NO') {
+                    DB::statement('ALTER TABLE wallet_withdrawals MODIFY ledger_id BIGINT NULL');
+                }
+            }
+        }
+        if (in_array('user_id', $adds, true) && Schema::hasColumn('wallets', 'owner_user_id') && DB::getDriverName() === 'mysql') {
             DB::statement('UPDATE wallet_withdrawals w INNER JOIN wallets wa ON wa.id = w.wallet_id SET w.user_id = wa.owner_user_id WHERE w.user_id IS NULL OR w.user_id = 0');
         }
     }

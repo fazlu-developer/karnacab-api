@@ -193,7 +193,7 @@ class TripFareDetail
             'ROUND_WAY' => 'Round trip',
             'ONE_WAY' => 'One way',
             'LOCAL_CAB' => 'City ride',
-            'RENTAL' => 'Rental',
+            'RENTAL' => 'Cab on rent',
             'AIRPORT' => 'Airport',
             'RAILWAY' => 'Railway',
             'MULTI_STOP' => 'Multi stop',

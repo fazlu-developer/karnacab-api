@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Driver;
 use App\Models\User;
+use App\Support\PublicMedia;
 use App\Support\BookingProductSchema;
 use App\Support\BulkSchema;
 use App\Support\CorporatePlanSchema;
@@ -180,8 +181,14 @@ class AppSurfaceService
         }
 
         $fromBookings = $bookings->map(fn ($row) => $this->presentInvoice($actor, $row))->all();
-        if ($fromBookings !== []) {
-            return ['invoices' => $fromBookings];
+        $tourInvoices = [];
+        try {
+            $tourInvoices = app(\App\Services\Tour\TourBookingService::class)->invoiceRows($actor);
+        } catch (\Throwable) {
+            $tourInvoices = [];
+        }
+        if ($fromBookings !== [] || $tourInvoices !== []) {
+            return ['invoices' => array_merge($fromBookings, $tourInvoices)];
         }
         if (! Schema::hasTable('invoices')) {
             return ['invoices' => []];
@@ -219,6 +226,11 @@ class AppSurfaceService
         }
         $breakdown = $snapshot['final']['breakdown'] ?? $snapshot['breakdown'] ?? [];
         $totalPaise = (int) ($row->total_paise ?? $row->final_fare_paise ?? $row->quote_paise ?? 0);
+        $productName = strtoupper((string) ($row->product ?? ''));
+        $distance = $row->actual_distance_km ?? $row->distance_km ?? null;
+        if ($productName === 'MULTI_STOP') {
+            $distance = $snapshot['totalKm'] ?? $snapshot['bookedDistanceKm'] ?? $row->distance_km ?? $distance;
+        }
         $gstPaise = (int) ($breakdown['gstPaise'] ?? $row->gst_paise ?? 0);
         $basePaise = max(0, $totalPaise - $gstPaise);
         $commissionPaise = (int) ($row->commission_paise ?? $snapshot['commissionPaise'] ?? 0);
@@ -252,7 +264,9 @@ class AppSurfaceService
             'issuedAt' => $row->issued_at ?? $row->trip_ended_at ?? $row->updated_at ?? $row->created_at,
             'pickup' => $row->pickup_text ?? $row->pickup ?? null,
             'drop' => $row->drop_text ?? $row->drop ?? null,
-            'distanceKm' => $row->actual_distance_km ?? $row->distance_km ?? null,
+            'stops' => $productName === 'MULTI_STOP' ? ($snapshot['multiStops'] ?? $snapshot['stops'] ?? []) : [],
+            'totalKm' => isset($snapshot['totalKm']) ? (float) $snapshot['totalKm'] : null,
+            'distanceKm' => $distance,
             'customerName' => $actor->role === 'DRIVER' ? ($row->passenger_name ?? 'Customer') : $actor->name,
             'customerPhone' => $actor->role === 'DRIVER' ? ($row->passenger_phone ?? null) : $actor->phone,
             'customerEmail' => $actor->role === 'DRIVER' ? null : $actor->email,
@@ -570,21 +584,15 @@ class AppSurfaceService
 
     private function absoluteAdImage(object $row): ?string
     {
-        foreach ([$row->image_url ?? null, $row->creative_url ?? null] as $raw) {
-            $value = trim((string) $raw);
-            if ($value === '') {
-                continue;
-            }
-            if (str_starts_with($value, 'http://') || str_starts_with($value, 'https://')) {
-                return $value;
-            }
-            if (str_starts_with($value, '/')) {
-                return rtrim((string) config('karnacab.api_public_url'), '/').$value;
+        $version = $row->updated_at ?? null;
+        foreach ([$row->image_url ?? null, $row->creative_url ?? null, $row->banner_key ?? null] as $raw) {
+            $url = PublicMedia::presentMediaUrl($raw, $version);
+            if ($url !== null) {
+                return $url;
             }
         }
-        $base = rtrim((string) config('karnacab.api_public_url'), '/');
 
-        return $base.'/api/v1/ads/'.$row->id.'/banner';
+        return null;
     }
 
     public function safetyCatalog(): array
@@ -799,8 +807,23 @@ class AppSurfaceService
             ARRAY_FILTER_USE_KEY,
         );
         $id = DB::table('parcel_shipments')->insertGetId($payload);
+        $row = DB::table('parcel_shipments')->where('id', $id)->first();
+        $presented = $this->presentParcel($row, $actor);
+        if ($row && $row->pickup_lat && $row->pickup_lng && $row->drop_lat && $row->drop_lng) {
+            try {
+                $presented['booking'] = $this->dispatchParcelBooking($actor, $row, $data);
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('parcel.booking_dispatch_failed', [
+                    'parcelId' => $id,
+                    'error' => $e->getMessage(),
+                ]);
+                $presented['dispatchError'] = $e->getMessage();
+            }
+        } else {
+            $presented['dispatchError'] = 'Pickup and drop coordinates are required.';
+        }
 
-        return $this->presentParcel(DB::table('parcel_shipments')->where('id', $id)->first(), $actor);
+        return $presented;
     }
 
     public function parcelOne(string $id, ?User $actor = null): array
@@ -815,54 +838,78 @@ class AppSurfaceService
     {
         $row = DB::table('parcel_shipments')->where('id', $id)->first();
         abort_unless($row, 404, 'Parcel not found');
-        $method = strtoupper((string) ($data['method'] ?? $data['paymentMethod'] ?? 'CASH'));
-        if (str_contains($method, 'WALLET')) {
-            app(CustomerWallet::class)->debit((int) $actor->id, (int) ($row->quote_paise ?? 0), 'Parcel fare', null, 'parcel');
-        }
-        DB::table('parcel_shipments')->where('id', $id)->update([
-            'payment_status' => 'paid',
-            'payment_method' => $method,
-            'updated_at' => now(),
-        ]);
-
         $out = $this->parcelOne($id, $actor);
-        try {
-            $fresh = DB::table('parcel_shipments')->where('id', $id)->first();
-            if ($fresh && $fresh->pickup_lat && $fresh->pickup_lng) {
-                $created = $this->bookings->create($actor, [
-                    'product' => 'PARCEL',
-                    'lockProduct' => true,
-                    'category' => $fresh->category ?? 'BIKE',
-                    'pickupText' => $fresh->pickup_text ?? 'Pickup',
-                    'dropText' => $fresh->drop_text ?? 'Drop',
-                    'pickupLat' => $fresh->pickup_lat,
-                    'pickupLng' => $fresh->pickup_lng,
-                    'dropLat' => $fresh->drop_lat,
-                    'dropLng' => $fresh->drop_lng,
-                    'distanceKm' => $fresh->distance_km ?? 1,
-                    'paymentMode' => $method,
-                    'scheduledAt' => $data['scheduledAt'] ?? $data['scheduled_at'] ?? null,
+        if (empty($row->booking_id) && $row->pickup_lat && $row->drop_lat) {
+            try {
+                $out['booking'] = $this->dispatchParcelBooking($actor, $row, $data);
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('parcel.booking_dispatch_failed', [
+                    'parcelId' => $id,
+                    'error' => $e->getMessage(),
                 ]);
-                $bookingId = $created['id'] ?? null;
-                if ($bookingId) {
-                    $this->ensureParcelBookingColumn();
-                    DB::table('parcel_shipments')->where('id', $id)->update(['booking_id' => $bookingId]);
-                    if (! empty($fresh->pickup_otp)) {
-                        DB::table('bookings')->where('id', $bookingId)->update(['start_otp' => $fresh->pickup_otp]);
-                    }
-                    $created['startOtp'] = $fresh->pickup_otp;
-                }
-                $out['booking'] = $created;
+                $out['dispatchError'] = $e->getMessage();
             }
-        } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::warning('parcel.booking_dispatch_failed', [
-                'parcelId' => $id,
-                'error' => $e->getMessage(),
-            ]);
-            $out['dispatchError'] = $e->getMessage();
+        } elseif (! empty($row->booking_id)) {
+            try {
+                $out['booking'] = $this->bookings->one($actor, (string) $row->booking_id);
+            } catch (\Throwable) {
+            }
         }
 
         return $out;
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function dispatchParcelBooking(User $actor, object $row, array $data): array
+    {
+        $created = $this->bookings->create($actor, [
+            'product' => 'PARCEL',
+            'lockProduct' => true,
+            'category' => $row->category ?? 'BIKE',
+            'pickupText' => $row->pickup_text ?? 'Pickup',
+            'dropText' => $row->drop_text ?? 'Drop',
+            'pickupLat' => $row->pickup_lat,
+            'pickupLng' => $row->pickup_lng,
+            'dropLat' => $row->drop_lat,
+            'dropLng' => $row->drop_lng,
+            'distanceKm' => $row->distance_km ?? 1,
+            'paymentMode' => 'UPI',
+            'quotePaise' => (int) ($row->quote_paise ?? 0),
+            'parcelType' => $row->parcel_type ?? ($data['parcelType'] ?? null),
+            'passengerName' => $row->contact_name ?? $actor->name,
+            'passengerPhone' => $row->contact_phone ?? $actor->phone,
+            'instructions' => $row->instructions ?? ($data['instructions'] ?? null),
+            'weightKg' => $row->weight_kg ?? ($data['weightKg'] ?? null),
+            'scheduledAt' => $data['scheduledAt'] ?? $data['scheduled_at'] ?? null,
+        ]);
+        $bookingId = $created['id'] ?? null;
+        if ($bookingId) {
+            $this->ensureParcelBookingColumn();
+            DB::table('parcel_shipments')->where('id', $row->id)->update([
+                'booking_id' => $bookingId,
+                'updated_at' => now(),
+            ]);
+            $otp = ['updated_at' => now()];
+            if (! empty($row->pickup_otp)) {
+                $otp['start_otp'] = $row->pickup_otp;
+            }
+            if (! empty($row->delivery_pin)) {
+                $otp['end_otp'] = $row->delivery_pin;
+            }
+            DB::table('bookings')->where('id', $bookingId)->update($otp);
+            $created = $this->bookings->one($actor, (string) $bookingId);
+        }
+        \Illuminate\Support\Facades\Log::info('parcel.dispatched', [
+            'parcelId' => $row->id,
+            'bookingId' => $bookingId,
+            'nearbyDriverCount' => $created['nearbyDriverCount'] ?? 0,
+            'driverId' => $created['driverId'] ?? null,
+        ]);
+
+        return $created;
     }
 
     public function parcelAccept(User $actor, string $id): array
@@ -1088,57 +1135,12 @@ class AppSurfaceService
 
     public function travelBook(User $actor, array $data): array
     {
-        $pkg = DB::table('travel_packages')->where('id', $data['packageId'] ?? $data['package_id'] ?? 0)->first();
-        abort_unless($pkg, 404);
-        $guests = max(1, (int) ($data['guests'] ?? 1));
-        $unit = (int) ($pkg->price_paise ?? 0);
-        $base = $unit * $guests;
-        $gst = (int) round($base * 0.05);
-        $total = $base + $gst;
-        $id = DB::table('travel_bookings')->insertGetId(array_filter([
-            'public_ref' => 'KTR'.strtoupper(Str::random(8)),
-            'customer_id' => $actor->id,
-            'package_id' => $pkg->id,
-            'travel_date' => $data['travelDate'] ?? now()->toDateString(),
-            'guests' => $guests,
-            'contact_name' => $data['contactName'] ?? $actor->name,
-            'contact_phone' => $data['contactPhone'] ?? $actor->phone,
-            'pickup_text' => $data['pickupText'] ?? null,
-            'notes' => $data['notes'] ?? null,
-            'quote_paise' => $total,
-            'payment_status' => 'unpaid',
-            'status' => 'created',
-            'created_at' => now(),
-            'updated_at' => now(),
-        ], fn ($key) => Schema::hasColumn('travel_bookings', $key), ARRAY_FILTER_USE_KEY));
-        $row = DB::table('travel_bookings')->where('id', $id)->first();
-
-        return $this->presentTravelBooking($row, $pkg);
+        return app(\App\Services\Tour\TourBookingService::class)->create($actor, $data);
     }
 
     public function travelPay(User $actor, string $id, array $data): array
     {
-        $row = DB::table('travel_bookings')->where('id', $id)->first();
-        abort_unless($row, 404);
-        $method = strtoupper((string) ($data['method'] ?? $data['paymentMethod'] ?? 'CASH'));
-        if (str_contains($method, 'WALLET')) {
-            app(CustomerWallet::class)->debit((int) $actor->id, (int) ($row->quote_paise ?? 0), 'Travel package', null, 'travel');
-        }
-        DB::table('travel_bookings')->where('id', $id)->update([
-            'payment_status' => 'paid',
-            'payment_method' => $method,
-            'status' => 'pending_review',
-            'updated_at' => now(),
-        ]);
-        $row = DB::table('travel_bookings')->where('id', $id)->first();
-        $pkg = DB::table('travel_packages')->where('id', $row->package_id)->first();
-        $rideId = $this->attachTravelRideBooking($actor, $row, $pkg);
-        if ($rideId && Schema::hasColumn('travel_bookings', 'ride_booking_id')) {
-            DB::table('travel_bookings')->where('id', $id)->update(['ride_booking_id' => $rideId, 'updated_at' => now()]);
-            $row = DB::table('travel_bookings')->where('id', $id)->first();
-        }
-
-        return $this->presentTravelBooking($row, $pkg);
+        return app(\App\Services\Tour\TourBookingService::class)->payAdvance($actor, $id, $data);
     }
 
     public function bulkCatalog(): array
@@ -1158,11 +1160,7 @@ class AppSurfaceService
                 $events = $decoded;
             }
         }
-        $advance = 30;
-        $advRow = Schema::hasTable('system_settings') ? DB::table('system_settings')->where('key', 'bulk_advance_percent')->first() : null;
-        if ($advRow?->value !== null && is_numeric($advRow->value)) {
-            $advance = (int) $advRow->value;
-        }
+        $advance = 10;
         $options = [];
         foreach ($this->bulkVehicleMeta() as $meta) {
             $unit = $this->bulkUnitQuote($meta['key'], [
@@ -1187,6 +1185,10 @@ class AppSurfaceService
     public function bulkQuote(array $data): array
     {
         BulkSchema::ensure();
+        $stops = $this->bulkStopList($data);
+        $data['stops'] = $stops;
+        $data['stopCount'] = count($stops);
+        $data['distanceKm'] = $this->bulkRouteKm($data, $stops);
         $lines = $this->bulkLinesFrom($data);
         $quoted = [];
         $base = 0;
@@ -1231,16 +1233,34 @@ class AppSurfaceService
             $options[] = array_merge($meta, $unit);
         }
         $total = $base + $allow + $gst;
-        $advance = 30;
-        $advRow = Schema::hasTable('system_settings') ? DB::table('system_settings')->where('key', 'bulk_advance_percent')->first() : null;
-        if ($advRow?->value !== null && is_numeric($advRow->value)) {
-            $advance = (int) $advRow->value;
+        $advance = 10;
+        $waitingRate = 0;
+        if ($this->bulkTripKind($data) === 'ROUND_WAY' && $quoted !== []) {
+            $waitingRate = (int) ($quoted[0]['waitingPaisePerMin'] ?? 0);
+            if ($waitingRate < 1) {
+                try {
+                    $sample = $this->fares->quote([
+                        'product' => 'ROUND_WAY',
+                        'category' => $this->bulkFareCategory((string) ($quoted[0]['category'] ?? 'SEDAN')),
+                        'roundTrip' => true,
+                        'distanceKm' => max(1, (float) ($data['distanceKm'] ?? 1)),
+                    ]);
+                    $waitingRate = (int) ($sample['waitingPaisePerMin'] ?? 0);
+                } catch (\Throwable) {
+                    $waitingRate = 0;
+                }
+            }
         }
 
         return [
             'tripKind' => $this->bulkTripKind($data),
             'vehicles' => max(1, $cabs),
             'vehicleCount' => $cabs,
+            'distanceKm' => round((float) ($data['distanceKm'] ?? 0), 2),
+            'stops' => $stops,
+            'stopCount' => count($stops),
+            'waitingPaisePerMin' => $waitingRate,
+            'advancePercent' => $advance,
             'lines' => $quoted,
             'options' => $options,
             'basePaise' => $base,
@@ -1258,57 +1278,7 @@ class AppSurfaceService
 
     public function bulkCreate(User $actor, array $data): array
     {
-        BulkSchema::ensure();
-        $quote = $this->bulkQuote($data);
-        $lines = $quote['lines'] ?? [];
-        $cabs = max(1, (int) ($quote['vehicleCount'] ?? 1));
-        $method = strtoupper((string) ($data['paymentMethod'] ?? $data['method'] ?? 'CASH'));
-        $ref = 'BLK'.random_int(1000000, 9999999);
-        $payload = [
-            'public_ref' => $ref,
-            'customer_id' => $actor->id,
-            'status' => 'pending_review',
-            'created_at' => now(),
-            'updated_at' => now(),
-        ];
-        $map = [
-            'event_key' => $data['eventKey'] ?? 'CORPORATE',
-            'category' => $data['category'] ?? ($lines[0]['category'] ?? 'SEDAN'),
-            'trip_kind' => $quote['tripKind'] ?? 'ONE_WAY',
-            'quote_paise' => $quote['totalPaise'] ?? 0,
-            'pickup_text' => $data['pickupText'] ?? null,
-            'drop_text' => $data['dropText'] ?? null,
-            'pickup_lat' => $data['pickupLat'] ?? null,
-            'pickup_lng' => $data['pickupLng'] ?? null,
-            'drop_lat' => $data['dropLat'] ?? null,
-            'drop_lng' => $data['dropLng'] ?? null,
-            'event_date' => $data['eventDate'] ?? null,
-            'event_time' => $data['eventTime'] ?? null,
-            'vehicle_count' => $cabs,
-            'passengers' => $data['passengers'] ?? null,
-            'passengers_per_cab' => $data['passengersPerCab'] ?? null,
-            'requirements' => $data['requirements'] ?? null,
-            'lines_json' => json_encode($lines),
-            'quote_snapshot' => json_encode($quote),
-            'payment_method' => $method,
-            'payment_status' => 'paid',
-            'contact_name' => $data['contactName'] ?? $actor->name,
-            'contact_phone' => $data['contactPhone'] ?? $actor->phone,
-        ];
-        foreach ($map as $col => $value) {
-            if (Schema::hasColumn('bulk_bookings', $col)) {
-                $payload[$col] = $value;
-            }
-        }
-        $id = DB::table('bulk_bookings')->insertGetId($payload);
-        $row = DB::table('bulk_bookings')->where('id', $id)->first();
-        $rideId = $this->attachBulkRideBooking($actor, $row, $quote, $data);
-        if ($rideId && Schema::hasColumn('bulk_bookings', 'ride_booking_id')) {
-            DB::table('bulk_bookings')->where('id', $id)->update(['ride_booking_id' => $rideId, 'updated_at' => now()]);
-            $row = DB::table('bulk_bookings')->where('id', $id)->first();
-        }
-
-        return $this->presentBulkBooking($row, $quote, $actor);
+        return app(\App\Services\Bulk\BulkBookingService::class)->create($actor, $data);
     }
 
     public function corporateCatalog(): array
@@ -1350,108 +1320,39 @@ class AppSurfaceService
         ];
     }
 
-    public function corporateQuote(array $data): array
+    /**
+     * One day's corporate fare from the same vehicle rates as a single cab. The plan total is this fare times the plan days.
+     *
+     * @return array{vehicle: array<string, mixed>, options: list<array<string, mixed>>, tripKind: string}
+     */
+    public function corporateDailyFare(array $data): array
     {
-        CorporatePlanSchema::ensure();
-        $category = strtoupper((string) ($data['category'] ?? 'SEDAN'));
-        $vehicle = $this->bulkUnitQuote($category, $data);
         $options = [];
         foreach (['SEDAN', 'SUV', 'TRAVELLER'] as $key) {
             $unit = $this->bulkUnitQuote($key, $data);
-            if (($unit['perCabPaise'] ?? 0) <= 0) {
+            if ((int) ($unit['perCabPaise'] ?? 0) <= 0 && (int) ($unit['gstPaise'] ?? 0) <= 0 && (int) ($unit['driverAllowPaise'] ?? 0) <= 0) {
                 continue;
             }
             $options[] = $unit;
         }
-        $plan = $this->resolveCorporatePlan($data);
-        $vehicleBase = (int) ($vehicle['perCabPaise'] ?? 0);
-        $allow = (int) ($vehicle['driverAllowPaise'] ?? 0);
-        $toll = (int) ($vehicle['tollPaise'] ?? 0);
-        $mode = strtoupper((string) ($plan['pricingMode'] ?? 'VEHICLE'));
-        $base = $vehicleBase;
-        if ($mode === 'FIXED' && (int) ($plan['pricePaise'] ?? 0) > 0) {
-            $base = (int) $plan['pricePaise'];
-        }
-        $gstPct = (float) ($plan['gstPercent'] ?? 5);
-        $gst = (int) round(($base + $allow) * ($gstPct / 100));
-        $total = $base + $allow + $gst;
+        $category = strtoupper((string) ($data['category'] ?? 'SEDAN'));
+        $vehicle = $this->bulkUnitQuote($category, $data);
 
         return [
-            'tripKind' => $this->bulkTripKind($data),
-            'category' => $category,
             'vehicle' => $vehicle,
             'options' => $options,
-            'plan' => $plan,
-            'basePaise' => $base,
-            'driverAllowPaise' => $allow,
-            'tollPaise' => $toll,
-            'gstPaise' => $gst,
-            'gstPercent' => $gstPct,
-            'totalPaise' => $total,
-            'totalRupees' => $total / 100,
-            'currency' => 'INR',
+            'tripKind' => $this->bulkTripKind($data),
         ];
+    }
+
+    public function corporateQuote(array $data): array
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->quote($data);
     }
 
     public function corporateBook(User $actor, array $data): array
     {
-        CorporatePlanSchema::ensure();
-        $quote = $this->corporateQuote($data);
-        $plan = $quote['plan'] ?? [];
-        $method = strtoupper((string) ($data['paymentMethod'] ?? 'CORPORATE'));
-        $ref = 'CORP'.random_int(1000000, 9999999);
-        $accountId = null;
-        if (Schema::hasTable('corporate_accounts') && Schema::hasColumn('corporate_accounts', 'owner_user_id')) {
-            $accountId = DB::table('corporate_accounts')->where('owner_user_id', $actor->id)->value('id');
-        }
-        $payload = [
-            'public_ref' => $ref,
-            'customer_id' => $actor->id,
-            'status' => 'pending_review',
-            'created_at' => now(),
-            'updated_at' => now(),
-        ];
-        $map = [
-            'corporate_account_id' => $accountId,
-            'plan_id' => $plan['id'] ?? null,
-            'plan_key' => $plan['key'] ?? null,
-            'category' => $data['category'] ?? 'SEDAN',
-            'trip_kind' => $quote['tripKind'] ?? 'ONE_WAY',
-            'purpose' => $data['purpose'] ?? null,
-            'service_key' => $data['serviceKey'] ?? null,
-            'quote_paise' => $quote['totalPaise'] ?? 0,
-            'pickup_text' => $data['pickupText'] ?? null,
-            'drop_text' => $data['dropText'] ?? null,
-            'pickup_lat' => $data['pickupLat'] ?? null,
-            'pickup_lng' => $data['pickupLng'] ?? null,
-            'drop_lat' => $data['dropLat'] ?? null,
-            'drop_lng' => $data['dropLng'] ?? null,
-            'travel_date' => $data['travelDate'] ?? $data['eventDate'] ?? null,
-            'pickup_time' => $data['pickupTime'] ?? $data['eventTime'] ?? null,
-            'passengers' => $data['passengers'] ?? 1,
-            'passengers_json' => is_array($data['passengerNames'] ?? null) ? json_encode($data['passengerNames']) : ($data['passengerNames'] ?? null),
-            'requirements' => $data['requirements'] ?? null,
-            'quote_snapshot' => json_encode($quote),
-            'payment_method' => $method,
-            'payment_status' => 'paid',
-            'send_invoice' => ! empty($data['sendInvoice']),
-            'contact_name' => $data['contactName'] ?? $actor->name,
-            'contact_phone' => $data['contactPhone'] ?? $actor->phone,
-        ];
-        foreach ($map as $col => $value) {
-            if (Schema::hasColumn('corporate_travel_bookings', $col)) {
-                $payload[$col] = $value;
-            }
-        }
-        $id = DB::table('corporate_travel_bookings')->insertGetId($payload);
-        $row = DB::table('corporate_travel_bookings')->where('id', $id)->first();
-        $rideId = $this->attachCorporateRideBooking($actor, $row, $quote, $data, $accountId);
-        if ($rideId && Schema::hasColumn('corporate_travel_bookings', 'ride_booking_id')) {
-            DB::table('corporate_travel_bookings')->where('id', $id)->update(['ride_booking_id' => $rideId, 'updated_at' => now()]);
-            $row = DB::table('corporate_travel_bookings')->where('id', $id)->first();
-        }
-
-        return $this->presentCorporateBooking($row, $quote, $actor);
+        return app(\App\Services\Corporate\CorporatePlanService::class)->create($actor, $data);
     }
 
     /**
@@ -1486,6 +1387,7 @@ class AppSurfaceService
             'pricePaise' => (int) ($row->price_paise ?? 0),
             'priceRupees' => ((int) ($row->price_paise ?? 0)) / 100,
             'priceLabel' => $row->price_label,
+            'durationDays' => (int) ($row->duration_days ?? 0),
             'gstPercent' => (float) ($row->gst_percent ?? 5),
             'highlights' => $highlights,
             'sortOrder' => (int) ($row->sort_order ?? 0),
@@ -1694,6 +1596,81 @@ class AppSurfaceService
         ];
     }
 
+    /**
+     * @return list<array{text: string, lat: float, lng: float}>
+     */
+    private function bulkStopList(array $data): array
+    {
+        $raw = $data['stops'] ?? [];
+        if (is_string($raw)) {
+            $raw = json_decode($raw, true) ?: [];
+        }
+        $stops = [];
+        if (is_array($raw)) {
+            foreach ($raw as $row) {
+                if (! is_array($row)) {
+                    continue;
+                }
+                $lat = $row['lat'] ?? $row['latitude'] ?? null;
+                $lng = $row['lng'] ?? $row['longitude'] ?? null;
+                if ($lat === null || $lng === null || $lat === '' || $lng === '') {
+                    continue;
+                }
+                $stops[] = [
+                    'text' => (string) ($row['text'] ?? $row['address'] ?? 'Stop'),
+                    'lat' => (float) $lat,
+                    'lng' => (float) $lng,
+                ];
+            }
+        }
+        if (isset($data['dropLat'], $data['dropLng']) && $data['dropLat'] !== '' && $data['dropLng'] !== '') {
+            $drop = [
+                'text' => (string) ($data['dropText'] ?? 'Drop'),
+                'lat' => (float) $data['dropLat'],
+                'lng' => (float) $data['dropLng'],
+            ];
+            $last = $stops === [] ? null : $stops[count($stops) - 1];
+            $same = $last && abs($last['lat'] - $drop['lat']) < 0.0002 && abs($last['lng'] - $drop['lng']) < 0.0002;
+            if (! $same) {
+                $stops[] = $drop;
+            }
+        }
+
+        return $stops;
+    }
+
+    /**
+     * @param  list<array{text: string, lat: float, lng: float}>  $stops
+     */
+    private function bulkRouteKm(array $data, array $stops): float
+    {
+        $kind = $this->bulkTripKind($data);
+        $pLat = isset($data['pickupLat']) ? (float) $data['pickupLat'] : null;
+        $pLng = isset($data['pickupLng']) ? (float) $data['pickupLng'] : null;
+        if ($kind !== 'MULTI_STOP') {
+            $dLat = isset($data['dropLat']) ? (float) $data['dropLat'] : ($stops[0]['lat'] ?? null);
+            $dLng = isset($data['dropLng']) ? (float) $data['dropLng'] : ($stops[0]['lng'] ?? null);
+            if ($pLat && $pLng && $dLat && $dLng) {
+                return Geo::haversineKm($pLat, $pLng, (float) $dLat, (float) $dLng);
+            }
+
+            return 0;
+        }
+        $points = [];
+        if ($pLat && $pLng) {
+            $points[] = [$pLat, $pLng];
+        }
+        foreach ($stops as $stop) {
+            $points[] = [$stop['lat'], $stop['lng']];
+        }
+        $km = 0.0;
+        for ($i = 1; $i < count($points); $i++) {
+            $km += Geo::haversineKm($points[$i - 1][0], $points[$i - 1][1], $points[$i][0], $points[$i][1]);
+        }
+
+        return $km;
+    }
+
     private function bulkTripKind(array $data): string
     {
         $raw = strtoupper((string) ($data['tripKind'] ?? $data['product'] ?? 'ONE_WAY'));
@@ -1781,12 +1758,19 @@ class AppSurfaceService
             'category' => $fareCat,
             'roundTrip' => $product === 'ROUND_WAY',
         ];
-        $pLat = isset($data['pickupLat']) ? (float) $data['pickupLat'] : null;
-        $pLng = isset($data['pickupLng']) ? (float) $data['pickupLng'] : null;
-        $dLat = isset($data['dropLat']) ? (float) $data['dropLat'] : null;
-        $dLng = isset($data['dropLng']) ? (float) $data['dropLng'] : null;
-        if ($pLat && $pLng && $dLat && $dLng) {
-            $fareInput['distanceKm'] = max(1, Geo::haversineKm($pLat, $pLng, $dLat, $dLng));
+        if ($product === 'MULTI_STOP') {
+            $fareInput['stopCount'] = max(0, (int) ($data['stopCount'] ?? 0));
+        }
+        if (isset($data['distanceKm']) && (float) $data['distanceKm'] > 0) {
+            $fareInput['distanceKm'] = max(1, (float) $data['distanceKm']);
+        } else {
+            $pLat = isset($data['pickupLat']) ? (float) $data['pickupLat'] : null;
+            $pLng = isset($data['pickupLng']) ? (float) $data['pickupLng'] : null;
+            $dLat = isset($data['dropLat']) ? (float) $data['dropLat'] : null;
+            $dLng = isset($data['dropLng']) ? (float) $data['dropLng'] : null;
+            if ($pLat && $pLng && $dLat && $dLng) {
+                $fareInput['distanceKm'] = max(1, Geo::haversineKm($pLat, $pLng, $dLat, $dLng));
+            }
         }
         try {
             $quote = $this->fares->quote($fareInput);
@@ -1816,6 +1800,7 @@ class AppSurfaceService
             'tollPaise' => 0,
             'gstPaise' => $gst,
             'billedKm' => $quote['billedKm'] ?? null,
+            'waitingPaisePerMin' => (int) ($quote['waitingPaisePerMin'] ?? 0),
             'source' => 'fare_rules',
         ]);
     }
@@ -1873,98 +1858,6 @@ class AppSurfaceService
         return 0;
     }
 
-    /**
-     * @param  array<string, mixed>  $quote
-     * @param  array<string, mixed>  $data
-     */
-    private function presentBulkBooking(object $row, array $quote, User $actor): array
-    {
-        $lines = $quote['lines'] ?? $this->decodeList($row->lines_json ?? null);
-        $total = (int) ($row->quote_paise ?? $quote['totalPaise'] ?? 0);
-
-        return [
-            'id' => (string) $row->id,
-            'ok' => true,
-            'publicRef' => $row->public_ref,
-            'status' => $row->status,
-            'statusLabel' => $this->reviewStatusLabel((string) $row->status),
-            'eventKey' => $row->event_key ?? null,
-            'tripKind' => $row->trip_kind ?? ($quote['tripKind'] ?? 'ONE_WAY'),
-            'category' => $row->category ?? null,
-            'vehicleCount' => (int) ($row->vehicle_count ?? $quote['vehicleCount'] ?? 0),
-            'passengers' => $row->passengers ?? null,
-            'pickupText' => $row->pickup_text ?? null,
-            'dropText' => $row->drop_text ?? null,
-            'eventDate' => $row->event_date ?? null,
-            'eventTime' => $row->event_time ?? null,
-            'requirements' => $row->requirements ?? null,
-            'paymentMethod' => $row->payment_method ?? null,
-            'paymentStatus' => $row->payment_status ?? null,
-            'rideBookingId' => $row->ride_booking_id ?? null,
-            'contactName' => $row->contact_name ?? $actor->name,
-            'contactPhone' => $row->contact_phone ?? $actor->phone,
-            'lines' => $lines,
-            'quote' => $quote,
-            'fare' => [
-                'basePaise' => (int) ($quote['basePaise'] ?? 0),
-                'driverAllowPaise' => (int) ($quote['driverAllowPaise'] ?? 0),
-                'tollPaise' => (int) ($quote['tollPaise'] ?? 0),
-                'gstPaise' => (int) ($quote['gstPaise'] ?? 0),
-                'totalPaise' => $total,
-                'totalRupees' => $total / 100,
-                'currency' => 'INR',
-            ],
-        ];
-    }
-
-    /**
-     * @param  array<string, mixed>  $quote
-     * @param  array<string, mixed>  $data
-     */
-    private function attachBulkRideBooking(User $actor, object $bulk, array $quote, array $data): ?int
-    {
-        if (! Schema::hasTable('bookings')) {
-            return null;
-        }
-        BookingProductSchema::ensure();
-        $existing = $bulk->ride_booking_id ?? null;
-        if ($existing) {
-            return (int) $existing;
-        }
-        $date = $bulk->event_date ?? $data['eventDate'] ?? null;
-        $time = (string) ($bulk->event_time ?? $data['eventTime'] ?? '08:00');
-        $parts = preg_split('/[:.]/', $time) ?: [];
-        $hour = (int) ($parts[0] ?? 8);
-        $minute = (int) ($parts[1] ?? 0);
-        $start = $date ? \Carbon\Carbon::parse((string) $date)->setTime($hour, $minute) : now()->addDay();
-        $lines = $quote['lines'] ?? [];
-        $summary = collect($lines)->map(fn ($line) => ($line['count'] ?? 1).'x '.($line['category'] ?? ''))->implode(', ');
-        $payload = array_filter([
-            'public_ref' => $bulk->public_ref,
-            'customer_id' => $actor->id,
-            'product' => 'BULK',
-            'category' => strtoupper((string) ($bulk->category ?? $data['category'] ?? 'SEDAN')),
-            'status' => 'PENDING_REVIEW',
-            'pickup_text' => $bulk->pickup_text ?? ($data['pickupText'] ?? 'Pickup'),
-            'drop_text' => $bulk->drop_text ?? ($data['dropText'] ?? 'Drop'),
-            'pickup_lat' => $bulk->pickup_lat ?? ($data['pickupLat'] ?? 25.8748),
-            'pickup_lng' => $bulk->pickup_lng ?? ($data['pickupLng'] ?? 86.5961),
-            'drop_lat' => $bulk->drop_lat ?? ($data['dropLat'] ?? 25.5941),
-            'drop_lng' => $bulk->drop_lng ?? ($data['dropLng'] ?? 85.1376),
-            'quote_paise' => (int) ($bulk->quote_paise ?? $quote['totalPaise'] ?? 0),
-            'scheduled_at' => $start,
-            'passenger_name' => $bulk->contact_name ?? $actor->name,
-            'passenger_phone' => $bulk->contact_phone ?? $actor->phone,
-            'instructions' => trim(($data['requirements'] ?? '')."\nBulk fleet: ".$summary),
-            'start_otp' => (string) random_int(1000, 9999),
-            'end_otp' => (string) random_int(1000, 9999),
-            'payment_mode' => $bulk->payment_method ?? 'CASH',
-            'created_at' => now(),
-            'updated_at' => now(),
-        ], fn ($key) => Schema::hasColumn('bookings', $key), ARRAY_FILTER_USE_KEY);
-
-        return (int) DB::table('bookings')->insertGetId($payload);
-    }
 
     /**
      * @return list<array{id: string, question: string, answer: string, audience: string}>
@@ -2201,7 +2094,7 @@ class AppSurfaceService
             $highlights = preg_split('/\r\n|\n/', (string) $row->highlights) ?: [];
         }
         $vehicle = strtoupper((string) ($row->vehicle_category ?? 'SEDAN'));
-        $image = $row->image_url ?? ($gallery[0] ?? null);
+        $image = PublicMedia::presentMediaUrl($row->image_url ?? ($gallery[0] ?? null), $row->updated_at ?? null);
         $nights = (int) ($row->nights ?? 0);
         $days = $nights > 0 ? $nights + 1 : (int) round(((int) ($row->duration_hours ?? 24)) / 24);
 

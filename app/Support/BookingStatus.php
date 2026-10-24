@@ -10,6 +10,7 @@ final class BookingStatus
     public const DRIVER_ARRIVED = 'DRIVER_ARRIVED';
     public const OTP_VERIFIED = 'OTP_VERIFIED';
     public const TRIP_STARTED = 'TRIP_STARTED';
+    public const RENTAL_IN_USE = 'RENTAL_IN_USE';
     public const COMPLETED = 'COMPLETED';
     public const CUSTOMER_CANCELLED = 'CUSTOMER_CANCELLED';
     public const DRIVER_CANCELLED = 'DRIVER_CANCELLED';
@@ -42,7 +43,7 @@ final class BookingStatus
      */
     public static function inTrip(): array
     {
-        return [self::DRIVER_ARRIVED, self::OTP_VERIFIED, self::TRIP_STARTED, self::LEGACY_STARTED, 'ONGOING'];
+        return [self::DRIVER_ARRIVED, self::OTP_VERIFIED, self::TRIP_STARTED, self::RENTAL_IN_USE, self::LEGACY_STARTED, 'ONGOING'];
     }
 
     /**
@@ -86,8 +87,9 @@ final class BookingStatus
             'DRIVER_SEARCHING' => [self::DRIVER_ACCEPTED, self::CUSTOMER_CANCELLED, self::EXPIRED],
             self::DRIVER_ACCEPTED => [self::DRIVER_ARRIVED, self::CUSTOMER_CANCELLED, self::DRIVER_CANCELLED],
             self::LEGACY_ASSIGNED => [self::DRIVER_ARRIVED, self::CUSTOMER_CANCELLED, self::DRIVER_CANCELLED, self::LEGACY_STARTED],
-            self::DRIVER_ARRIVED => [self::OTP_VERIFIED, self::TRIP_STARTED, self::CUSTOMER_CANCELLED, self::DRIVER_CANCELLED],
-            self::OTP_VERIFIED => [self::TRIP_STARTED, self::CUSTOMER_CANCELLED, self::DRIVER_CANCELLED],
+            self::DRIVER_ARRIVED => [self::OTP_VERIFIED, self::TRIP_STARTED, self::RENTAL_IN_USE, self::CUSTOMER_CANCELLED, self::DRIVER_CANCELLED],
+            self::OTP_VERIFIED => [self::TRIP_STARTED, self::RENTAL_IN_USE, self::CUSTOMER_CANCELLED, self::DRIVER_CANCELLED],
+            self::RENTAL_IN_USE => [self::COMPLETED, self::CUSTOMER_CANCELLED],
             self::TRIP_STARTED => [self::COMPLETED, self::CUSTOMER_CANCELLED, self::DRIVER_CANCELLED],
             self::LEGACY_STARTED => [self::COMPLETED, self::CUSTOMER_CANCELLED, self::DRIVER_CANCELLED],
         ];
@@ -106,6 +108,7 @@ final class BookingStatus
             self::DRIVER_ACCEPTED, self::LEGACY_ASSIGNED, 'DRIVER_ASSIGNED', 'DRIVER_ARRIVING' => 'driver_assigned',
             self::DRIVER_ARRIVED => 'driver_arrived',
             self::OTP_VERIFIED => 'otp_verified',
+            self::RENTAL_IN_USE => 'rental_in_use',
             self::TRIP_STARTED, self::LEGACY_STARTED, 'ONGOING' => 'started',
             self::COMPLETED => 'completed',
             self::CUSTOMER_CANCELLED, self::DRIVER_CANCELLED, self::LEGACY_CANCELLED => 'cancelled',

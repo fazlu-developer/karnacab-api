@@ -11,6 +11,8 @@ use App\Services\CmsCatalogService;
 use App\Services\DriverOpsService;
 use App\Services\FareService;
 use App\Services\LeadIntakeService;
+use App\Services\TerritoryContactService;
+use App\Support\PublicMedia;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -56,6 +58,11 @@ class PlatformController extends Controller
         return $this->cms->site();
     }
 
+    public function territoryContacts(Request $request)
+    {
+        return app(TerritoryContactService::class)->forUser($request->user());
+    }
+
     public function appControl()
     {
         $raw = DB::table('system_settings')->where('key', 'cms_site')->value('value');
@@ -63,17 +70,11 @@ class PlatformController extends Controller
         if (! is_array($site)) {
             $site = [];
         }
-        $admin = rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnaride.in'), '/');
-        $url = function (?string $value) use ($admin): string {
+        $image = fn (?string $value): string => PublicMedia::presentMediaUrl($value) ?? '';
+        $link = function (?string $value): string {
             $value = trim((string) $value);
-            if ($value === '') {
-                return '';
-            }
-            if (str_starts_with($value, 'http://') || str_starts_with($value, 'https://')) {
-                return $value;
-            }
 
-            return $admin.'/'.ltrim($value, '/');
+            return str_starts_with($value, 'http://') || str_starts_with($value, 'https://') ? $value : '';
         };
         $flag = fn (string $key): bool => filter_var($site[$key] ?? false, FILTER_VALIDATE_BOOLEAN);
 
@@ -82,15 +83,17 @@ class PlatformController extends Controller
                 'maintenance' => $flag('customerMaintenance'),
                 'forceUpdate' => $flag('customerForceUpdate'),
                 'version' => (string) ($site['customerAppVersion'] ?? ''),
-                'playStoreUrl' => $url($site['customerPlayStoreUrl'] ?? $site['playStoreUrl'] ?? '') ?: 'https://play.google.com/store/apps/details?id=com.karnacabride',
-                'logoUrl' => $url($site['customerAppLogoUrl'] ?? $site['logoUrl'] ?? ''),
+                'playStoreUrl' => $link($site['customerPlayStoreUrl'] ?? $site['playStoreUrl'] ?? '') ?: 'https://play.google.com/store/apps/details?id=com.karnacabride',
+                'logoUrl' => $image($site['customerAppLogoUrl'] ?? $site['logoUrl'] ?? ''),
+                'updateImageUrl' => $image($site['customerUpdateImageUrl'] ?? ''),
             ],
             'driver' => [
                 'maintenance' => $flag('driverMaintenance'),
                 'forceUpdate' => $flag('driverForceUpdate'),
                 'version' => (string) ($site['driverAppVersion'] ?? ''),
-                'playStoreUrl' => $url($site['driverPlayStoreUrl'] ?? '') ?: 'https://play.google.com/store/apps/details?id=com.karnacabpartner',
-                'logoUrl' => $url($site['driverAppLogoUrl'] ?? ''),
+                'playStoreUrl' => $link($site['driverPlayStoreUrl'] ?? '') ?: 'https://play.google.com/store/apps/details?id=com.karnacabpartner',
+                'logoUrl' => $image($site['driverAppLogoUrl'] ?? ''),
+                'updateImageUrl' => $image($site['driverUpdateImageUrl'] ?? ''),
             ],
             'highAlert' => [
                 'enabled' => $flag('highAlertEnabled'),
@@ -428,6 +431,25 @@ class PlatformController extends Controller
         $data = $request->validate(['otp' => 'required|string']);
 
         return $this->bookings->verifyOtp($request->user(), $id, $data['otp']);
+    }
+
+    public function bookingsRentalLocation(Request $request, string $id)
+    {
+        $data = $request->validate([
+            'lat' => 'required|numeric',
+            'lng' => 'required|numeric',
+        ]);
+
+        return $this->bookings->rentalLocation($request->user(), $id, (float) $data['lat'], (float) $data['lng']);
+    }
+
+    public function bookingsRentalReturn(Request $request, string $id)
+    {
+        $data = $request->validate([
+            'otp' => 'required|string|max:8',
+        ]);
+
+        return $this->bookings->lifecycle($request->user(), $id, 'return', $data['otp'], $request->all());
     }
 
     public function bookingsStart(Request $request, string $id)
@@ -955,6 +977,60 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
         return $this->surface->travelPay($request->user(), $id, $request->all());
     }
 
+    public function travelList(Request $request)
+    {
+        $actor = $request->user();
+        $tours = $actor->role === 'DRIVER'
+            ? app(\App\Services\Tour\TourBookingService::class)->driverCards($actor)
+            : app(\App\Services\Tour\TourBookingService::class)->customerCards($actor);
+
+        return ['bookings' => $tours];
+    }
+
+    public function travelOne(Request $request, string $id)
+    {
+        return app(\App\Services\Tour\TourBookingService::class)->show($request->user(), $id);
+    }
+
+    public function travelCancel(Request $request, string $id)
+    {
+        return app(\App\Services\Tour\TourBookingService::class)->cancel($request->user(), $id);
+    }
+
+    public function travelApprove(Request $request, string $id)
+    {
+        abort_unless(in_array($request->user()->role, ['ADMIN', 'SUPER_ADMIN'], true), 403);
+
+        return app(\App\Services\Tour\TourBookingService::class)->approve((int) preg_replace('/\D/', '', $id));
+    }
+
+    public function travelReject(Request $request, string $id)
+    {
+        abort_unless(in_array($request->user()->role, ['ADMIN', 'SUPER_ADMIN'], true), 403);
+
+        return app(\App\Services\Tour\TourBookingService::class)->reject((int) preg_replace('/\D/', '', $id), (string) $request->input('reason', ''));
+    }
+
+    public function travelAssign(Request $request, string $id)
+    {
+        abort_unless(in_array($request->user()->role, ['ADMIN', 'SUPER_ADMIN'], true), 403);
+        $data = $request->validate(['driverId' => 'required|integer|min:1']);
+
+        return app(\App\Services\Tour\TourBookingService::class)->assign((int) preg_replace('/\D/', '', $id), (int) $data['driverId']);
+    }
+
+    public function travelStart(Request $request, string $id)
+    {
+        $data = $request->validate(['otp' => 'required|string|max:8']);
+
+        return app(\App\Services\Tour\TourBookingService::class)->start($request->user(), $id, $data['otp']);
+    }
+
+    public function travelComplete(Request $request, string $id)
+    {
+        return app(\App\Services\Tour\TourBookingService::class)->complete($request->user(), $id, $request->all());
+    }
+
     public function bulkCatalog()
     {
         return $this->surface->bulkCatalog();
@@ -970,6 +1046,98 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
         return $this->surface->bulkCreate($request->user(), $request->all());
     }
 
+    public function bulkList(Request $request)
+    {
+        return app(\App\Services\Bulk\BulkBookingService::class)->customerCards($request->user());
+    }
+
+    public function bulkOne(Request $request, string $id)
+    {
+        return app(\App\Services\Bulk\BulkBookingService::class)->show($request->user(), $id);
+    }
+
+    public function bulkTrack(Request $request, string $id)
+    {
+        return app(\App\Services\Bulk\BulkBookingService::class)->track($request->user(), $id);
+    }
+
+    public function bulkPay(Request $request, string $id)
+    {
+        return app(\App\Services\Bulk\BulkBookingService::class)->payAdvance($request->user(), $id, $request->all());
+    }
+
+    public function bulkCancel(Request $request, string $id)
+    {
+        return app(\App\Services\Bulk\BulkBookingService::class)->cancel($request->user(), $id);
+    }
+
+    public function bulkConfirm(Request $request, string $id)
+    {
+        abort_unless(in_array($request->user()->role, ['ADMIN', 'SUPER_ADMIN'], true), 403);
+
+        return app(\App\Services\Bulk\BulkBookingService::class)->confirm((int) preg_replace('/\D/', '', $id));
+    }
+
+    public function bulkReject(Request $request, string $id)
+    {
+        abort_unless(in_array($request->user()->role, ['ADMIN', 'SUPER_ADMIN'], true), 403);
+
+        return app(\App\Services\Bulk\BulkBookingService::class)->reject((int) preg_replace('/\D/', '', $id), (string) $request->input('reason', ''));
+    }
+
+    public function bulkAssign(Request $request, string $id)
+    {
+        abort_unless(in_array($request->user()->role, ['ADMIN', 'SUPER_ADMIN'], true), 403);
+        $data = $request->validate([
+            'driverIds' => 'required|array|min:2',
+            'driverIds.*' => 'integer|min:1',
+        ]);
+
+        return app(\App\Services\Bulk\BulkBookingService::class)->assign((int) preg_replace('/\D/', '', $id), $data['driverIds']);
+    }
+
+    public function bulkActivate(Request $request, string $cabId)
+    {
+        $data = $request->validate(['otp' => 'required|string|max:8']);
+
+        return app(\App\Services\Bulk\BulkBookingService::class)->activate($request->user(), $cabId, $data['otp']);
+    }
+
+    public function bulkLocation(Request $request, string $cabId)
+    {
+        $data = $request->validate([
+            'lat' => 'required|numeric',
+            'lng' => 'required|numeric',
+        ]);
+
+        return app(\App\Services\Bulk\BulkBookingService::class)->location($request->user(), $cabId, (float) $data['lat'], (float) $data['lng']);
+    }
+
+    public function bulkDepart(Request $request, string $cabId)
+    {
+        return app(\App\Services\Bulk\BulkBookingService::class)->depart($request->user(), $cabId);
+    }
+
+    public function bulkOutbound(Request $request, string $cabId)
+    {
+        return app(\App\Services\Bulk\BulkBookingService::class)->completeOutbound($request->user(), $cabId);
+    }
+
+    public function bulkReturn(Request $request, string $cabId)
+    {
+        return app(\App\Services\Bulk\BulkBookingService::class)->startReturn($request->user(), $cabId);
+    }
+
+    public function bulkStop(Request $request, string $cabId)
+    {
+        return app(\App\Services\Bulk\BulkBookingService::class)->completeStop($request->user(), $cabId, $request->all());
+    }
+
+    public function bulkCompleteCab(Request $request, string $cabId)
+    {
+        return app(\App\Services\Bulk\BulkBookingService::class)->completeCab($request->user(), $cabId, $request->all());
+    }
+
     public function corporateCatalog()
     {
         return $this->surface->corporateCatalog();
@@ -983,6 +1151,123 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
     public function corporateBook(Request $request)
     {
         return $this->surface->corporateBook($request->user(), $request->all());
+    }
+
+    public function corporateList(Request $request)
+    {
+        $actor = $request->user();
+
+        return ['bookings' => app(\App\Services\Corporate\CorporatePlanService::class)->customerCards($actor)];
+    }
+
+    public function corporateOne(Request $request, string $id)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->show($request->user(), $id);
+    }
+
+    public function corporateTrack(Request $request, string $id)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->track($request->user(), $id);
+    }
+
+    public function corporatePay10(Request $request, string $id)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->pay10($request->user(), $id, $request->all());
+    }
+
+    public function corporatePay90(Request $request, string $id)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->pay90($request->user(), $id, $request->all());
+    }
+
+    public function corporateApprove(Request $request, string $id)
+    {
+        abort_unless(in_array($request->user()->role, ['ADMIN', 'SUPER_ADMIN'], true), 403);
+
+        return app(\App\Services\Corporate\CorporatePlanService::class)->approve((int) preg_replace('/\D/', '', $id));
+    }
+
+    public function corporateReject(Request $request, string $id)
+    {
+        abort_unless(in_array($request->user()->role, ['ADMIN', 'SUPER_ADMIN'], true), 403);
+
+        return app(\App\Services\Corporate\CorporatePlanService::class)->reject((int) preg_replace('/\D/', '', $id), (string) $request->input('reason', ''));
+    }
+
+    public function corporateAssign(Request $request, string $id)
+    {
+        abort_unless(in_array($request->user()->role, ['ADMIN', 'SUPER_ADMIN'], true), 403);
+        $data = $request->validate(['driverId' => 'required|integer|min:1']);
+
+        return app(\App\Services\Corporate\CorporatePlanService::class)->assign((int) preg_replace('/\D/', '', $id), (int) $data['driverId']);
+    }
+
+    public function corporateRenew(Request $request, string $id)
+    {
+        abort_unless(in_array($request->user()->role, ['ADMIN', 'SUPER_ADMIN'], true), 403);
+
+        return app(\App\Services\Corporate\CorporatePlanService::class)->renew((int) preg_replace('/\D/', '', $id), $request->all());
+    }
+
+    public function corporateRenewRequest(Request $request, string $id)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->requestRenew($request->user(), $id);
+    }
+
+    public function corporateTimetable(Request $request, string $id)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->updateTimetable($request->user(), $id, $request->all());
+    }
+
+    public function corporateShares(Request $request, string $id)
+    {
+        abort_unless(in_array($request->user()->role, ['ADMIN', 'SUPER_ADMIN'], true), 403);
+
+        return app(\App\Services\Corporate\CorporatePlanService::class)->setShares((int) preg_replace('/\D/', '', $id), $request->all());
+    }
+
+    public function corporateActivate(Request $request, string $tripId)
+    {
+        $data = $request->validate(['otp' => 'required|string|max:8']);
+
+        return app(\App\Services\Corporate\CorporatePlanService::class)->activate($request->user(), $tripId, $data['otp']);
+    }
+
+    public function corporateLocation(Request $request, string $tripId)
+    {
+        $data = $request->validate(['lat' => 'required|numeric', 'lng' => 'required|numeric']);
+
+        return app(\App\Services\Corporate\CorporatePlanService::class)->location($request->user(), $tripId, (float) $data['lat'], (float) $data['lng']);
+    }
+
+    public function corporateDepart(Request $request, string $tripId)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->depart($request->user(), $tripId);
+    }
+
+    public function corporateOutbound(Request $request, string $tripId)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->completeOutbound($request->user(), $tripId);
+    }
+
+    public function corporateReturn(Request $request, string $tripId)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->startReturn($request->user(), $tripId);
+    }
+
+    public function corporateStop(Request $request, string $tripId)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->completeStop($request->user(), $tripId);
+    }
+
+    public function corporateCompleteDay(Request $request, string $tripId)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->completeDay($request->user(), $tripId);
+    }
+
+    public function corporateSkip(Request $request, string $tripId)
+    {
+        return app(\App\Services\Corporate\CorporatePlanService::class)->skip($request->user(), $tripId, (string) $request->input('reason', ''));
     }
 
     public function session(Request $request)

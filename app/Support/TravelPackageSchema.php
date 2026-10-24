@@ -47,17 +47,6 @@ final class TravelPackageSchema
                 Schema::table('travel_packages', $define);
             }
         }
-        if (Schema::hasTable('travel_bookings')) {
-            foreach ([
-                'pickup_text' => fn (Blueprint $t) => $t->string('pickup_text', 180)->nullable(),
-                'driver_id' => fn (Blueprint $t) => $t->unsignedBigInteger('driver_id')->nullable(),
-                'vehicle_id' => fn (Blueprint $t) => $t->unsignedBigInteger('vehicle_id')->nullable(),
-                'ride_booking_id' => fn (Blueprint $t) => $t->unsignedBigInteger('ride_booking_id')->nullable(),
-            ] as $name => $define) {
-                if (! Schema::hasColumn('travel_bookings', $name)) {
-                    Schema::table('travel_bookings', $define);
-                }
-            }
-        }
+        TourBookingSchema::ensure();
     }
 }

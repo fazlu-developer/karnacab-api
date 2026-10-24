@@ -23,6 +23,7 @@ final class CorporatePlanSchema
                 $table->string('price_label', 80)->nullable();
                 $table->decimal('gst_percent', 5, 2)->default(5);
                 $table->text('highlights')->nullable();
+                $table->unsignedInteger('duration_days')->nullable();
                 $table->unsignedInteger('sort_order')->default(0);
                 $table->string('status', 24)->default('PUBLISHED');
                 $table->timestamps();
@@ -36,6 +37,7 @@ final class CorporatePlanSchema
             'price_label' => fn (Blueprint $t) => $t->string('price_label', 80)->nullable(),
             'gst_percent' => fn (Blueprint $t) => $t->decimal('gst_percent', 5, 2)->default(5),
             'highlights' => fn (Blueprint $t) => $t->text('highlights')->nullable(),
+            'duration_days' => fn (Blueprint $t) => $t->unsignedInteger('duration_days')->nullable(),
             'sort_order' => fn (Blueprint $t) => $t->unsignedInteger('sort_order')->default(0),
             'status' => fn (Blueprint $t) => $t->string('status', 24)->default('PUBLISHED'),
         ] as $name => $define) {
@@ -79,10 +81,67 @@ final class CorporatePlanSchema
             'ride_booking_id' => fn (Blueprint $t) => $t->unsignedBigInteger('ride_booking_id')->nullable(),
             'contact_name' => fn (Blueprint $t) => $t->string('contact_name', 120)->nullable(),
             'contact_phone' => fn (Blueprint $t) => $t->string('contact_phone', 20)->nullable(),
+            'starts_on' => fn (Blueprint $t) => $t->date('starts_on')->nullable(),
+            'ends_on' => fn (Blueprint $t) => $t->date('ends_on')->nullable(),
+            'duration_days' => fn (Blueprint $t) => $t->unsignedInteger('duration_days')->nullable(),
+            'pay10_paise' => fn (Blueprint $t) => $t->unsignedBigInteger('pay10_paise')->default(0),
+            'pay90_paise' => fn (Blueprint $t) => $t->unsignedBigInteger('pay90_paise')->default(0),
+            'paid_paise' => fn (Blueprint $t) => $t->unsignedBigInteger('paid_paise')->default(0),
+            'driver_id' => fn (Blueprint $t) => $t->unsignedBigInteger('driver_id')->nullable(),
+            'driver_user_id' => fn (Blueprint $t) => $t->unsignedBigInteger('driver_user_id')->nullable(),
+            'vehicle_id' => fn (Blueprint $t) => $t->unsignedBigInteger('vehicle_id')->nullable(),
+            'fleet_owner_id' => fn (Blueprint $t) => $t->unsignedBigInteger('fleet_owner_id')->nullable(),
+            'fleet_owner_user_id' => fn (Blueprint $t) => $t->unsignedBigInteger('fleet_owner_user_id')->nullable(),
+            'driver_name' => fn (Blueprint $t) => $t->string('driver_name', 120)->nullable(),
+            'driver_phone' => fn (Blueprint $t) => $t->string('driver_phone', 20)->nullable(),
+            'plate' => fn (Blueprint $t) => $t->string('plate', 20)->nullable(),
+            'state_id' => fn (Blueprint $t) => $t->unsignedBigInteger('state_id')->nullable(),
+            'district_id' => fn (Blueprint $t) => $t->unsignedBigInteger('district_id')->nullable(),
+            'district_head_user_id' => fn (Blueprint $t) => $t->unsignedBigInteger('district_head_user_id')->nullable(),
+            'start_otp' => fn (Blueprint $t) => $t->string('start_otp', 8)->nullable(),
+            'driver_share_paise' => fn (Blueprint $t) => $t->unsignedBigInteger('driver_share_paise')->default(0),
+            'commission_paise' => fn (Blueprint $t) => $t->unsignedBigInteger('commission_paise')->default(0),
+            'commission_percent' => fn (Blueprint $t) => $t->decimal('commission_percent', 5, 2)->nullable(),
+            'district_head_paise' => fn (Blueprint $t) => $t->unsignedBigInteger('district_head_paise')->nullable(),
+            'fleet_owner_paise' => fn (Blueprint $t) => $t->unsignedBigInteger('fleet_owner_paise')->nullable(),
+            'shares_posted_at' => fn (Blueprint $t) => $t->timestamp('shares_posted_at')->nullable(),
+            'invoice_no' => fn (Blueprint $t) => $t->string('invoice_no', 24)->nullable(),
+            'approved_at' => fn (Blueprint $t) => $t->timestamp('approved_at')->nullable(),
+            'paid_full_at' => fn (Blueprint $t) => $t->timestamp('paid_full_at')->nullable(),
+            'assigned_at' => fn (Blueprint $t) => $t->timestamp('assigned_at')->nullable(),
+            'reject_reason' => fn (Blueprint $t) => $t->string('reject_reason', 240)->nullable(),
+            'renewed_from_id' => fn (Blueprint $t) => $t->unsignedBigInteger('renewed_from_id')->nullable(),
+            'stops_json' => fn (Blueprint $t) => $t->text('stops_json')->nullable(),
+            'distance_km' => fn (Blueprint $t) => $t->decimal('distance_km', 8, 2)->nullable(),
+            'comped' => fn (Blueprint $t) => $t->boolean('comped')->default(false),
+            'renew_requested_at' => fn (Blueprint $t) => $t->timestamp('renew_requested_at')->nullable(),
+            'expiry_notified_at' => fn (Blueprint $t) => $t->timestamp('expiry_notified_at')->nullable(),
         ] as $name => $define) {
             if (! $schema->hasColumn('corporate_travel_bookings', $name)) {
                 $schema->table('corporate_travel_bookings', $define);
             }
+        }
+        if (! $schema->hasTable('corporate_daily_trips')) {
+            $schema->create('corporate_daily_trips', function (Blueprint $table) {
+                $table->id();
+                $table->unsignedBigInteger('corporate_booking_id')->index();
+                $table->date('trip_date')->index();
+                $table->string('pickup_time', 8)->nullable();
+                $table->string('status', 24)->default('scheduled');
+                $table->string('phase', 24)->default('idle');
+                $table->unsignedBigInteger('driver_id')->nullable();
+                $table->unsignedInteger('stop_index')->default(0);
+                $table->decimal('lat', 10, 7)->nullable();
+                $table->decimal('lng', 10, 7)->nullable();
+                $table->timestamp('activated_at')->nullable();
+                $table->timestamp('departed_at')->nullable();
+                $table->timestamp('wait_started_at')->nullable();
+                $table->timestamp('return_started_at')->nullable();
+                $table->timestamp('completed_at')->nullable();
+                $table->string('skip_reason', 180)->nullable();
+                $table->timestamp('reminded_at')->nullable();
+                $table->timestamps();
+            });
         }
         if ($db->table('corporate_plans')->count() === 0) {
             $now = now();
@@ -144,6 +203,39 @@ final class CorporatePlanSchema
                     'updated_at' => $now,
                 ],
             ]);
+        }
+        $now = now();
+        foreach ([
+            ['DAY_7', '7 Day Corporate', 'Same driver, every day for 7 days', 7, 5],
+            ['DAY_15', '15 Day Corporate', 'Same driver, every day for 15 days', 15, 6],
+            ['DAY_30', '30 Day Corporate', 'Same driver, every day for 30 days', 30, 7],
+        ] as [$key, $title, $subtitle, $days, $sort]) {
+            $existing = $db->table('corporate_plans')->where('plan_key', $key)->first();
+            $row = [
+                'plan_key' => $key,
+                'title' => $title,
+                'subtitle' => $subtitle,
+                'pricing_mode' => 'VEHICLE',
+                'price_paise' => 0,
+                'price_label' => $days.' days',
+                'gst_percent' => 5,
+                'duration_days' => $days,
+                'highlights' => json_encode(['One car every day', 'Pay 10% then 90% to KarnaRide', 'Assigned driver, live tracking']),
+                'sort_order' => $sort,
+                'status' => 'PUBLISHED',
+                'updated_at' => $now,
+            ];
+            if ($existing) {
+                if ((int) ($existing->duration_days ?? 0) < 1) {
+                    $db->table('corporate_plans')->where('id', $existing->id)->update([
+                        'duration_days' => $days,
+                        'updated_at' => $now,
+                    ]);
+                }
+            } else {
+                $row['created_at'] = $now;
+                $db->table('corporate_plans')->insert($row);
+            }
         }
     }
 }

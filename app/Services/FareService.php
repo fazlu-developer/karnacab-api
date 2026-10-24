@@ -91,6 +91,8 @@ class FareService
             'hours' => $rule->rental_hours ?? $hours,
             'source' => 'server',
             'waitingPaisePerMin' => (int) ($rule->waiting_paise_per_min ?? 0),
+            'gstPercent' => $gstPct,
+            'gstAppliesToFare' => (bool) $rule->apply_gst_to_base,
             'breakdown' => [
                 'basePaise' => $basePaise,
                 'distancePaise' => $distancePaise,
@@ -166,7 +168,7 @@ class FareService
             ],
             'transfer' => [
                 'airport' => ['placeTypes' => ['airport'], 'requiresFlightNumber' => true],
-                'railway' => ['placeTypes' => ['train_station'], 'requiresTrainNumber' => true],
+                'railway' => ['placeTypes' => ['train_station'], 'requiresTrainNumber' => false],
                 'multiStop' => ['minStops' => 1, 'maxStops' => 3],
             ],
             'lifecycle' => collect(['REQUESTED', 'ASSIGNED', 'ARRIVED', 'STARTED', 'COMPLETED', 'CANCELLED'])
@@ -181,7 +183,10 @@ class FareService
     public static function cityOrOutstation(string $product, float $distanceKm): string
     {
         $product = strtoupper($product);
-        if (! in_array($product, ['LOCAL_CAB', 'ONE_WAY', 'OUTSTATION'], true) || $distanceKm <= 0) {
+        if (in_array($product, ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true)) {
+            return 'LOCAL_CAB';
+        }
+        if (! in_array($product, ['ONE_WAY', 'OUTSTATION'], true) || $distanceKm <= 0) {
             return $product === 'OUTSTATION' ? 'ONE_WAY' : $product;
         }
 
@@ -269,8 +274,18 @@ class FareService
         if (! $needsPath || $oLat === null || $oLng === null || $dLat === null || $dLng === null) {
             return $input;
         }
+        if ($product === 'MULTI_STOP' && $stops !== []) {
+            $last = $stops[array_key_last($stops)];
+            if (abs($last['lat'] - $dLat) < 0.00005 && abs($last['lng'] - $dLng) < 0.00005) {
+                array_pop($stops);
+            }
+        }
         $route = $this->directions($oLat, $oLng, $dLat, $dLng, $stops);
         $input['distanceKm'] = (float) ($route['distanceKm'] ?? $input['distanceKm'] ?? 1);
+        $shownKm = (float) ($input['clientDistanceKm'] ?? 0);
+        if ($product === 'MULTI_STOP' && $shownKm > 0) {
+            $input['distanceKm'] = $shownKm;
+        }
         if (! empty($route['durationMinutes'])) {
             $input['durationMinutes'] = $route['durationMinutes'];
         }

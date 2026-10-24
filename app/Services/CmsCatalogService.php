@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\CatalogService;
 use App\Models\CmsPage;
+use App\Support\PublicMedia;
 use App\Support\ServiceMaintenance;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -151,7 +152,7 @@ class CmsCatalogService
                 'durationLabel' => $row->duration_label ?? null,
                 'pricePaise' => $row->price_paise ?? null,
                 'priceRupees' => ((int) ($row->price_paise ?? 0)) / 100,
-                'imageUrl' => $row->image_url ?? null,
+                'imageUrl' => PublicMedia::presentMediaUrl($row->image_url ?? null, $row->updated_at ?? null) ?? '',
                 'popular' => (bool) ($row->popular ?? false),
             ])->all(),
             'rideTypes' => collect(config('karnacab.ride_types'))->map(fn ($row) => ['key' => $row['key'], 'title' => $row['label']])->all(),
@@ -327,7 +328,7 @@ class CmsCatalogService
             'group' => $row->service_group,
             'categoryKey' => $categoryKey,
             'iconKey' => $row->icon_key ?? null,
-            'imageUrl' => $this->publicUpload($row->getAttributes()['image_url'] ?? null),
+            'imageUrl' => $this->publicUpload($row->getAttributes()['image_url'] ?? null, $row->updated_at ?? null),
             'badge' => $row->badge ?? null,
             'key' => $categoryKey !== '' ? $categoryKey : strtoupper(str_replace('-', '_', $slug)),
             'homeMode' => $this->homeMode($slug, $categoryKey),
@@ -343,20 +344,23 @@ class CmsCatalogService
         $raw = DB::table('system_settings')->where('key', 'cms_home_offers')->value('value');
         $rows = json_decode((string) $raw, true);
 
-        return is_array($rows) ? array_values($rows) : [];
+        if (! is_array($rows)) {
+            return [];
+        }
+
+        return array_values(array_map(function ($row) {
+            if (! is_array($row)) {
+                return $row;
+            }
+            $row['imageUrl'] = PublicMedia::presentMediaUrl($row['imageUrl'] ?? null) ?? '';
+
+            return $row;
+        }, $rows));
     }
 
-    private function publicUpload(mixed $value): string
+    private function publicUpload(mixed $value, mixed $version = null): string
     {
-        $value = trim((string) $value);
-        if ($value === '' || (! str_starts_with($value, '/uploads/') && ! str_starts_with($value, 'http'))) {
-            return '';
-        }
-        if (str_starts_with($value, 'http://') || str_starts_with($value, 'https://')) {
-            return $value;
-        }
-
-        return rtrim((string) env('ADMIN_PUBLIC_URL', 'https://admin.karnaride.in'), '/').'/'.ltrim($value, '/');
+        return PublicMedia::presentMediaUrl($value, $version) ?? '';
     }
 
     private function homeMode(string $slug, string $categoryKey = ''): string

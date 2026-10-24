@@ -28,9 +28,38 @@ class PayUService
         return $this->start($actor, $rupees, 'booking_advance', 'KarnaRide booking advance');
     }
 
-    private function start(User $actor, float $rupees, string $purpose, string $productinfo): array
+    public function startTourAdvance(User $actor, float $rupees, int $tourId): array
     {
-        abort_unless($rupees <= 50000, 422, 'Maximum payment is ₹50,000');
+        abort_unless($rupees >= 1, 422, 'Advance amount is missing.');
+
+        return $this->start($actor, $rupees, 'tour_advance', 'KarnaRide tour 30% advance', (string) $tourId);
+    }
+
+    public function startBulkAdvance(User $actor, float $rupees, int $bulkId): array
+    {
+        abort_unless($rupees >= 1, 422, 'Advance amount is missing.');
+
+        return $this->start($actor, $rupees, 'bulk_advance', 'KarnaRide bulk 10% advance', (string) $bulkId);
+    }
+
+    public function startCorporatePayment(User $actor, float $rupees, int $planId, string $stage): array
+    {
+        abort_unless($rupees >= 1, 422, 'Corporate payment amount is missing.');
+        $ninety = $stage === '90';
+
+        return $this->start(
+            $actor,
+            $rupees,
+            $ninety ? 'corporate_pay90' : 'corporate_pay10',
+            $ninety ? 'KarnaRide corporate plan 90%' : 'KarnaRide corporate plan 10%',
+            (string) $planId,
+            500000,
+        );
+    }
+
+    private function start(User $actor, float $rupees, string $purpose, string $productinfo, ?string $reference = null, float $max = 50000): array
+    {
+        abort_unless($rupees <= $max, 422, 'Maximum payment is ₹'.number_format($max, 0));
         abort_unless($this->key() !== '' && $this->salt() !== '', 422, 'PayU is not configured');
         $this->ensureTables();
         $txnid = 'KC'.strtoupper(Str::random(14));
@@ -46,6 +75,7 @@ class PayUService
             'status' => 'initiated',
             'gateway' => 'payu',
             'purpose' => $purpose,
+            'reference' => $reference,
             'created_at' => now(),
             'updated_at' => now(),
         ];
@@ -167,9 +197,19 @@ HTML;
         $intent = DB::table('payment_intents')->where('txnid', $txnid)->where('user_id', $actor->id)->first();
         abort_unless($intent, 404, 'Unknown payment');
         if (($intent->status ?? '') === 'captured') {
+            $this->settleTourAdvance($intent);
+            $this->settleBulkAdvance($intent);
+            $this->settleCorporatePlan($intent);
+
             return $this->presentResult($intent, already: true);
         }
-        if ($this->purpose($intent) !== 'booking_advance') {
+        if ($this->purpose($intent) === 'tour_advance') {
+            $this->settleTourAdvance($intent);
+        } elseif ($this->purpose($intent) === 'bulk_advance') {
+            $this->settleBulkAdvance($intent);
+        } elseif (str_starts_with($this->purpose($intent), 'corporate_pay')) {
+            $this->settleCorporatePlan($intent);
+        } elseif ($this->purpose($intent) !== 'booking_advance') {
             $this->creditWallet((int) $intent->user_id, (int) $intent->amount_paise, $txnid);
         }
         DB::table('payment_intents')->where('id', $intent->id)->update($this->filter('payment_intents', [
@@ -198,7 +238,13 @@ HTML;
             abort(422, 'Invalid PayU hash');
         }
         if (in_array($status, ['success', 'captured'], true)) {
-            if ($this->purpose($intent) !== 'booking_advance') {
+            if ($this->purpose($intent) === 'tour_advance') {
+                $this->settleTourAdvance($intent);
+            } elseif ($this->purpose($intent) === 'bulk_advance') {
+                $this->settleBulkAdvance($intent);
+            } elseif (str_starts_with($this->purpose($intent), 'corporate_pay')) {
+                $this->settleCorporatePlan($intent);
+            } elseif ($this->purpose($intent) !== 'booking_advance') {
                 $this->creditWallet((int) $intent->user_id, (int) $intent->amount_paise, $txnid);
             }
             DB::table('payment_intents')->where('id', $intent->id)->update($this->filter('payment_intents', [
@@ -292,6 +338,47 @@ HTML;
         }
     }
 
+    private function settleTourAdvance(object $intent): void
+    {
+        if ($this->purpose($intent) !== 'tour_advance') {
+            return;
+        }
+        app(\App\Services\Tour\TourBookingService::class)->settlePayu(
+            (int) $intent->user_id,
+            (string) ($intent->reference ?? ''),
+            (string) $intent->txnid,
+            (int) $intent->amount_paise,
+        );
+    }
+
+    private function settleBulkAdvance(object $intent): void
+    {
+        if ($this->purpose($intent) !== 'bulk_advance') {
+            return;
+        }
+        app(\App\Services\Bulk\BulkBookingService::class)->settlePayu(
+            (int) $intent->user_id,
+            (string) ($intent->reference ?? ''),
+            (string) $intent->txnid,
+            (int) $intent->amount_paise,
+        );
+    }
+
+    private function settleCorporatePlan(object $intent): void
+    {
+        $purpose = $this->purpose($intent);
+        if (! str_starts_with($purpose, 'corporate_pay')) {
+            return;
+        }
+        app(\App\Services\Corporate\CorporatePlanService::class)->settlePayu(
+            (int) $intent->user_id,
+            (string) ($intent->reference ?? ''),
+            (string) $intent->txnid,
+            (int) $intent->amount_paise,
+            $purpose === 'corporate_pay90' ? '90' : '10',
+        );
+    }
+
     private function purpose(object $intent): string
     {
         return (string) ($intent->purpose ?? 'topup');
@@ -299,9 +386,14 @@ HTML;
 
     private function productInfo(object $intent): string
     {
-        return $this->purpose($intent) === 'booking_advance'
-            ? 'KarnaRide booking advance'
-            : 'KarnaRide wallet top-up';
+        return match ($this->purpose($intent)) {
+            'booking_advance' => 'KarnaRide booking advance',
+            'tour_advance' => 'KarnaRide tour 30% advance',
+            'bulk_advance' => 'KarnaRide bulk 10% advance',
+            'corporate_pay10' => 'KarnaRide corporate plan 10%',
+            'corporate_pay90' => 'KarnaRide corporate plan 90%',
+            default => 'KarnaRide wallet top-up',
+        };
     }
 
     private function requestHash(string $txnid, string $amount, string $productinfo, string $firstname, string $email): string
@@ -391,6 +483,11 @@ HTML;
         if (Schema::hasTable('payment_intents') && ! Schema::hasColumn('payment_intents', 'purpose')) {
             Schema::table('payment_intents', function ($table) {
                 $table->string('purpose', 32)->default('topup');
+            });
+        }
+        if (Schema::hasTable('payment_intents') && ! Schema::hasColumn('payment_intents', 'reference')) {
+            Schema::table('payment_intents', function ($table) {
+                $table->string('reference', 40)->nullable();
             });
         }
         if (! Schema::hasTable('wallets')) {
