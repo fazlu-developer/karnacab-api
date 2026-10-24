@@ -1,0 +1,106 @@
+<?php
+
+namespace App\Support;
+
+use App\Models\User;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+
+final class TerritoryContacts
+{
+    /**
+     * @return array{
+     *     state: ?array{id:int,name:string},
+     *     district: ?array{id:int,name:string},
+     *     stateHead: ?array{name:string,phone:?string},
+     *     districtHead: ?array{name:string,phone:?string}
+     * }
+     */
+    public static function forUser(User $user): array
+    {
+        $stateId = (int) ($user->state_id ?? 0);
+        $districtId = (int) ($user->district_id ?? 0);
+
+        if (Schema::hasTable('fleet_owners') && $user->role === 'FLEET_OWNER') {
+            $fleet = DB::table('fleet_owners')->where('user_id', $user->id)->orderBy('id')->first();
+            if ($fleet) {
+                $stateId = (int) ($fleet->state_id ?? $stateId);
+                $districtId = (int) ($fleet->district_id ?? $districtId);
+            }
+        }
+
+        if ($stateId < 1 || $districtId < 1) {
+            $area = ServiceArea::resolve(
+                $user->last_lat !== null ? (float) $user->last_lat : null,
+                $user->last_lng !== null ? (float) $user->last_lng : null,
+                null,
+                $user->last_address,
+            );
+            if ($stateId < 1) {
+                $stateId = (int) ($area['stateId'] ?? 0);
+            }
+            if ($districtId < 1) {
+                $districtId = (int) ($area['districtId'] ?? 0);
+            }
+        }
+
+        if ($districtId > 0 && $stateId < 1 && Schema::hasTable('districts')) {
+            $stateId = (int) (DB::table('districts')->where('id', $districtId)->value('state_id') ?? 0);
+        }
+
+        $state = null;
+        if ($stateId > 0 && Schema::hasTable('states')) {
+            $row = DB::table('states')->where('id', $stateId)->first(['id', 'name']);
+            if ($row) {
+                $state = ['id' => (int) $row->id, 'name' => (string) $row->name];
+            }
+        }
+
+        $district = null;
+        if ($districtId > 0 && Schema::hasTable('districts')) {
+            $row = DB::table('districts')->where('id', $districtId)->first(['id', 'name']);
+            if ($row) {
+                $district = ['id' => (int) $row->id, 'name' => (string) $row->name];
+            }
+        }
+
+        return [
+            'state' => $state,
+            'district' => $district,
+            'stateHead' => self::operator('STATE_HEAD', 'state_id', $stateId),
+            'districtHead' => self::operator('DISTRICT_HEAD', 'district_id', $districtId),
+        ];
+    }
+
+    /**
+     * @return array{name:string,phone:?string}|null
+     */
+    private static function operator(string $role, string $column, int $id): ?array
+    {
+        if ($id < 1 || ! Schema::hasTable('users')) {
+            return null;
+        }
+        $row = DB::table('users')
+            ->where('role', $role)
+            ->where($column, $id)
+            ->where('status', 'ACTIVE')
+            ->orderBy('id')
+            ->first(['name', 'phone']);
+        if (! $row && $role === 'DISTRICT_HEAD') {
+            $row = DB::table('users')
+                ->where('role', 'FRANCHISE')
+                ->where($column, $id)
+                ->where('status', 'ACTIVE')
+                ->orderBy('id')
+                ->first(['name', 'phone']);
+        }
+        if (! $row) {
+            return null;
+        }
+
+        return [
+            'name' => (string) $row->name,
+            'phone' => $row->phone ? (string) $row->phone : null,
+        ];
+    }
+}

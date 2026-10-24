@@ -6,6 +6,7 @@ use App\Mail\EventNoticeMail;
 use App\Models\Driver;
 use App\Models\User;
 use App\Models\Vehicle;
+use App\Support\TerritoryContacts;
 use App\Support\TripFareDetail;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -178,6 +179,7 @@ class DriverOpsService
             'activeJob' => $activeRide
                 ? array_merge(app(\App\Services\BookingService::class)->present($activeRide, $actor), ['kind' => 'ride'])
                 : ($activeParcel ? ['kind' => 'parcel', 'id' => (string) $activeParcel->id, 'status' => $activeParcel->status] : null),
+            'territory' => TerritoryContacts::forUser($actor),
         ];
     }
 

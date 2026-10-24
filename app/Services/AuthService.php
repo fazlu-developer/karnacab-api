@@ -9,6 +9,7 @@ use App\Support\FleetOnboarding;
 use App\Support\JwtToken;
 use App\Support\Permissions;
 use App\Support\ServiceArea;
+use App\Support\TerritoryContacts;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -471,6 +472,7 @@ class AuthService
                         ? 'Please contact admin to assign a vehicle before you can go online.'
                         : $area['message'])),
             'needVehicle' => $next === 'NEED_VEHICLE',
+            'territory' => TerritoryContacts::forUser($user),
             ...($user->role === 'DRIVER' ? app(DriverOpsService::class)->welcomeBonusPayload($user->driver) : []),
         ];
     }
