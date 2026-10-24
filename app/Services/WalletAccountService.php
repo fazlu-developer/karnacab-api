@@ -15,6 +15,9 @@ class WalletAccountService
         if (! Schema::hasTable('wallets')) {
             return;
         }
+        if (DB::transactionLevel() > 0) {
+            return;
+        }
         $this->widenAccountColumns();
         $missing = [];
         foreach (['joining_credit_limit_paise', 'joining_credit_paise', 'joining_credit_used_paise', 'frozen_paise'] as $column) {
@@ -184,6 +187,8 @@ class WalletAccountService
             return false;
         }
 
+        $this->ensureSchema();
+
         return (bool) DB::transaction(function () use ($userId, $ownerType, $paise, $kind, $note) {
             $wallet = $this->ensureWallet($userId, $ownerType);
             if (! $wallet) {
@@ -232,6 +237,7 @@ class WalletAccountService
         if ($offerPaise < 1 || ! Schema::hasTable('wallet_ledger')) {
             return;
         }
+        $this->ensureSchema();
         DB::transaction(function () use ($userId, $ownerType, $offerPaise) {
             $wallet = $this->ensureWallet($userId, $ownerType);
             if (! $wallet) {
@@ -546,7 +552,7 @@ class WalletAccountService
     private function widenAccountColumns(): void
     {
         static $done = false;
-        if ($done) {
+        if ($done || DB::transactionLevel() > 0) {
             return;
         }
         $done = true;
@@ -559,6 +565,12 @@ class WalletAccountService
         if (Schema::hasColumn('wallets', 'owner_type')) {
             try {
                 DB::statement('ALTER TABLE wallets MODIFY COLUMN owner_type VARCHAR(32) NULL');
+            } catch (\Throwable) {
+            }
+        }
+        if (Schema::hasColumn('wallets', 'updated_at')) {
+            try {
+                DB::statement('ALTER TABLE wallets MODIFY COLUMN updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)');
             } catch (\Throwable) {
             }
         }

@@ -33,6 +33,7 @@ class PublicError
             || str_contains($lower, 'connection: mysql')
             || str_contains($lower, 'unknown column')
             || str_contains($lower, 'integrity constraint')
+            || str_contains($lower, 'no active transaction')
             || str_contains($lower, 'stack trace')
             || str_contains($message, 'Illuminate\\')
             || str_contains($message, 'PDOException');

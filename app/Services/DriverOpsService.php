@@ -27,12 +27,20 @@ class DriverOpsService
         $blocked = in_array($kyc, ['rejected', 'suspended', 'left_fleet'], true);
         $approved = in_array($kyc, ['verified', 'approved', 'active'], true);
         if ($approved) {
-            $this->grantWelcomeBonus($driver);
-            $driver->refresh();
-            $offer = app(TerritoryBonusService::class)->forUser($actor, 'joining');
-            $offerPaise = ((int) ($offer['amountRupees'] ?? 0)) * 100;
-            if ($offerPaise > 0) {
-                app(WalletAccountService::class)->reconcileJoiningBonus((int) $actor->id, 'DRIVER', $offerPaise);
+            try {
+                app(WalletAccountService::class)->ensureSchema();
+                $this->grantWelcomeBonus($driver);
+                $driver->refresh();
+                $offer = app(TerritoryBonusService::class)->forUser($actor, 'joining');
+                $offerPaise = ((int) ($offer['amountRupees'] ?? 0)) * 100;
+                if ($offerPaise > 0) {
+                    app(WalletAccountService::class)->reconcileJoiningBonus((int) $actor->id, 'DRIVER', $offerPaise);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('driver.welcome_bonus_skipped', [
+                    'driverId' => $driver->id,
+                    'error' => $e->getMessage(),
+                ]);
             }
         }
         $fleetUnassigned = (bool) $driver->fleet_owner_id && $driver->vehicles->isEmpty();
