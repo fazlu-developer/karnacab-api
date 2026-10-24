@@ -14,6 +14,9 @@ return new class extends Migration
         if (Schema::hasTable('wallets') && Schema::hasColumn('wallets', 'owner_type')) {
             DB::statement('ALTER TABLE wallets MODIFY COLUMN owner_type VARCHAR(32) NULL');
         }
+        if (Schema::hasTable('wallets') && Schema::hasColumn('wallets', 'updated_at')) {
+            DB::statement('ALTER TABLE wallets MODIFY COLUMN updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)');
+        }
     }
 
     public function down(): void
