@@ -201,10 +201,10 @@ class BookingService
             $quote['airportName'] = trim((string) ($dto['airportName'] ?? ''));
             $quote['terminal'] = trim((string) ($dto['terminal'] ?? ''));
             $quote['flightNo'] = trim((string) ($dto['flightNumber'] ?? $dto['flightNo'] ?? ''));
-            $quote['prebook'] = true;
-            $quote['advanceAfterAccept'] = true;
-            $quote['advancePercent'] = 10;
-            $quote['advancePaise'] = (int) round($airportPaise * 0.10);
+            $quote['prebook'] = $airportFuture;
+            $quote['advanceAfterAccept'] = $airportFuture;
+            $quote['advancePercent'] = $airportFuture ? 10 : 0;
+            $quote['advancePaise'] = $airportFuture ? (int) round($airportPaise * 0.10) : 0;
             $quote['commissionSettled'] = false;
         }
         if ($product === 'RAILWAY') {
@@ -231,10 +231,10 @@ class BookingService
             $quote['stationName'] = trim((string) ($dto['stationName'] ?? ''));
             $quote['trainNo'] = trim((string) ($dto['trainNumber'] ?? $dto['trainNo'] ?? ''));
             $quote['trainName'] = trim((string) ($dto['trainName'] ?? ''));
-            $quote['prebook'] = true;
-            $quote['advanceAfterAccept'] = true;
-            $quote['advancePercent'] = 10;
-            $quote['advancePaise'] = (int) round($railwayPaise * 0.10);
+            $quote['prebook'] = $railwayFuture;
+            $quote['advanceAfterAccept'] = $railwayFuture;
+            $quote['advancePercent'] = $railwayFuture ? 10 : 0;
+            $quote['advancePaise'] = $railwayFuture ? (int) round($railwayPaise * 0.10) : 0;
             $quote['commissionSettled'] = false;
         }
         if ($product === 'ROUND_WAY') {
@@ -255,10 +255,10 @@ class BookingService
             $quote['waitingPaisePerMin'] = (int) ($quote['waitingPaisePerMin'] ?? 0);
             $quote['waitingMinutes'] = 0;
             $quote['waitingChargePaise'] = 0;
-            $quote['prebook'] = true;
-            $quote['advanceAfterAccept'] = true;
-            $quote['advancePercent'] = 10;
-            $quote['advancePaise'] = (int) round($roundPaise * 0.10);
+            $quote['prebook'] = $roundFuture;
+            $quote['advanceAfterAccept'] = $roundFuture;
+            $quote['advancePercent'] = $roundFuture ? 10 : 0;
+            $quote['advancePaise'] = $roundFuture ? (int) round($roundPaise * 0.10) : 0;
             $quote['commissionSettled'] = false;
         }
         if ($product === 'PARCEL') {
@@ -2903,6 +2903,9 @@ class BookingService
         if (! $this->isRoundTrip($row) || ! $row->driver_id) {
             return false;
         }
+        if ($this->roundTripMode($row) !== 'schedule') {
+            return false;
+        }
         $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
         if (empty($snapshot['advanceAfterAccept'])) {
             return false;
@@ -2980,6 +2983,9 @@ class BookingService
         if (! $this->isAirport($row) || ! $row->driver_id) {
             return false;
         }
+        if ($this->airportMode($row) !== 'schedule') {
+            return false;
+        }
         $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
         if (empty($snapshot['advanceAfterAccept'])) {
             return false;
@@ -3015,6 +3021,9 @@ class BookingService
     private function railwayNeedsAdvance(Booking $row): bool
     {
         if (! $this->isRailway($row) || ! $row->driver_id) {
+            return false;
+        }
+        if ($this->railwayMode($row) !== 'schedule') {
             return false;
         }
         $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
