@@ -1578,8 +1578,13 @@ class AppSurfaceService
         $balance = (int) ($row->balance_paise ?? 0);
         $ledger = [];
         if ($row && Schema::hasTable('wallet_ledger')) {
-            $q = DB::table('wallet_ledger')->where('wallet_id', $row->id);
-            $ledger = $q->orderByDesc('id')->limit(80)->get()->map(fn ($item) => [
+            $q = DB::table('wallet_ledger')->where(function ($inner) use ($row, $actor) {
+                $inner->where('wallet_id', $row->id);
+                if (Schema::hasColumn('wallet_ledger', 'owner_user_id')) {
+                    $inner->orWhere('owner_user_id', $actor->id);
+                }
+            });
+            $ledger = $q->orderByDesc('id')->limit(500)->get()->map(fn ($item) => [
                 'id' => (string) $item->id,
                 'transactionId' => $item->public_ref ?? ('WL'.$item->id),
                 'kind' => $item->kind ?? 'entry',
@@ -1991,9 +1996,11 @@ class AppSurfaceService
             'id' => (string) $row->id,
             'title' => $row->title,
             'subtitle' => $row->subtitle,
+            'label' => $row->title,
+            'kind' => $row->kind ?? null,
             'address' => $row->address,
-            'lat' => (float) $row->lat,
-            'lng' => (float) $row->lng,
+            'lat' => $row->lat === null ? null : (float) $row->lat,
+            'lng' => $row->lng === null ? null : (float) $row->lng,
         ];
     }
 

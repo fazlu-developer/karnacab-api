@@ -400,7 +400,7 @@ class BookingService
                 $pickupLat,
                 $pickupLng,
                 (string) $dto['category'],
-                $citySearch ? $this->cityOfferRadiusKm(null) : $radius,
+                $radius,
                 false,
                 $districtId,
                 (string) ($dto['product'] ?? 'LOCAL_CAB'),
@@ -1300,7 +1300,7 @@ class BookingService
             $bookedWait = (int) (($bookedSnapshot['fareInputs']['waitMinutes'] ?? 0));
             $wait = max($wait, $bookedWait);
         }
-        if (! $rentalReturn && ! $this->isParcel($booking) && ! $this->isMultiStop($booking)) {
+        if (! $rentalReturn) {
             $this->applyRouteFare($booking, $trackedKm, 0, $wait);
             $booking->refresh();
         }
@@ -1310,9 +1310,8 @@ class BookingService
         $snapshotBeforeFare = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
         $bookedKm = (float) ($snapshotBeforeFare['bookedDistanceKm'] ?? $snapshotBeforeFare['totalKm'] ?? $booking->distance_km ?? 0);
         $actualKm = $trackedKm > 0.05 ? $trackedKm : max($bookedKm, (float) ($booking->actual_distance_km ?: 0));
-        if ($this->isMultiStop($booking) && $bookedKm > 0) {
-            $actualKm = $bookedKm;
-            $totalPaise = (int) ($booking->quote_paise ?: $totalPaise);
+        if ($this->isMultiStop($booking) && $trackedKm > $bookedKm + 0.2) {
+            $actualKm = $trackedKm;
         }
         $advancePaid = (int) ($snapshotBeforeFare['advancePaidPaise'] ?? $snapshot['advancePaidPaise'] ?? 0);
         $commissionSettled = (bool) ($snapshotBeforeFare['commissionSettled'] ?? $snapshot['commissionSettled'] ?? false)
@@ -3032,32 +3031,6 @@ class BookingService
     }
 
     /**
-     * City search starts nearby and opens out to 30 km across the 10 minute window.
-     */
-    private function cityOfferRadiusKm(mixed $createdAt = null): float
-    {
-        $elapsed = 0;
-        if ($createdAt instanceof \Illuminate\Support\Carbon) {
-            $elapsed = max(0, now()->getTimestamp() - $createdAt->getTimestamp());
-        } elseif (is_string($createdAt) && $createdAt !== '') {
-            try {
-                $elapsed = max(0, now()->getTimestamp() - \Illuminate\Support\Carbon::parse($createdAt)->getTimestamp());
-            } catch (\Throwable) {
-                $elapsed = 0;
-            }
-        }
-        $cap = min(30.0, max(3.0, $this->settings->radiusKm()));
-        if ($elapsed < 120) {
-            return min(5.0, $cap);
-        }
-        if ($elapsed < 300) {
-            return min(15.0, $cap);
-        }
-
-        return $cap;
-    }
-
-    /**
      * A stored SCHEDULE row is shown as the service it actually is.
      */
     public function presentedProduct(object $row): string
@@ -3998,9 +3971,7 @@ class BookingService
                 continue;
             }
             $km = Geo::haversineKm($lat, $lng, (float) $booking->pickup_lat, (float) $booking->pickup_lng);
-            $offerRadius = $this->isCityProduct((string) $booking->product)
-                ? $this->cityOfferRadiusKm($booking->created_at)
-                : $radius;
+            $offerRadius = $radius;
             if ($km > $offerRadius) {
                 continue;
             }
@@ -4602,11 +4573,17 @@ class BookingService
         if ($product === 'ROUND_WAY') {
             $oneWayKm = (float) ($snapshot['oneWayKm'] ?? 0);
             if ($oneWayKm <= 0) {
-                $oneWayKm = $bookedKm;
+                $billed = (float) ($snapshot['billedKm'] ?? 0);
+                $oneWayKm = ($billed > $bookedKm + 0.2) ? $bookedKm : ($billed > 0 ? $billed / 2 : $bookedKm);
             }
-            $roundKm = max($oneWayKm * 2, (float) ($snapshot['billedKm'] ?? 0));
-            $covered = max($roundKm, $projected);
-            $fareKm = max($oneWayKm, $covered / 2);
+            $roundBooked = max($oneWayKm * 2, (float) ($snapshot['billedKm'] ?? 0));
+            if ($drivenKm > $roundBooked + 0.2) {
+                $fareKm = $drivenKm / 2;
+            } elseif ($drivenKm > $oneWayKm + 0.2) {
+                $fareKm = $drivenKm;
+            } else {
+                $fareKm = $oneWayKm;
+            }
             $roundTrip = true;
         } else {
             $fareKm = max($bookedKm, $projected);
