@@ -278,10 +278,10 @@ class BookingService
             }
             $parcelPaise = (int) ($quote['totalPaise'] ?? 0);
             $quote['parcelMode'] = $parcelFuture ? 'schedule' : 'now';
-            $quote['prebook'] = true;
-            $quote['advanceAfterAccept'] = true;
-            $quote['advancePercent'] = 10;
-            $quote['advancePaise'] = (int) round($parcelPaise * 0.10);
+            $quote['prebook'] = $parcelFuture;
+            $quote['advanceAfterAccept'] = false;
+            $quote['advancePercent'] = 0;
+            $quote['advancePaise'] = 0;
             $quote['commissionSettled'] = false;
             $quote['parcelType'] = $dto['parcelType'] ?? null;
             $quote['receiverName'] = $dto['passengerName'] ?? $dto['contactName'] ?? null;
@@ -2812,23 +2812,7 @@ class BookingService
 
     private function parcelNeedsAdvance(Booking $row): bool
     {
-        if (! $this->isParcel($row) || ! $row->driver_id) {
-            return false;
-        }
-        $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
-        if (empty($snapshot['advanceAfterAccept'])) {
-            return false;
-        }
-        if ((int) ($snapshot['advancePaidPaise'] ?? 0) > 0 || ! empty($snapshot['commissionSettled'])) {
-            return false;
-        }
-
-        return in_array((string) $row->status, [
-            'SCHEDULED',
-            BookingStatus::DRIVER_ACCEPTED,
-            BookingStatus::LEGACY_ASSIGNED,
-            'DRIVER_ARRIVING',
-        ], true);
+        return false;
     }
 
     private function parcelPickupOtpVisible(Booking $row): bool

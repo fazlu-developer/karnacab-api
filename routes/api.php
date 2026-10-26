@@ -21,6 +21,7 @@ Route::get('/v1/places/autocomplete', [PlatformController::class, 'placesAutocom
 Route::get('/v1/places/details', [PlatformController::class, 'placesDetails']);
 Route::get('/v1/places/reverse', [PlatformController::class, 'placesReverse']);
 Route::get('/v1/places/directions', [PlatformController::class, 'placesDirections']);
+Route::get('/v1/places/popular-routes', [PlatformController::class, 'popularRoutes']);
 Route::get('/v1/kyc/catalog', [PlatformController::class, 'kycCatalog']);
 Route::get('/v1/travel/catalog', [PlatformController::class, 'travelCatalog']);
 Route::get('/v1/travel/packages', [PlatformController::class, 'travelPackages']);

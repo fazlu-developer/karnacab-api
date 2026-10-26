@@ -879,6 +879,11 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
         return $this->surface->adsServe($request->query('placement'));
     }
 
+    public function popularRoutes(Request $request)
+    {
+        return $this->surface->popularRoutes($request->query('service'));
+    }
+
     public function adBanner(string $id)
     {
         return $this->surface->adBannerFile($id);

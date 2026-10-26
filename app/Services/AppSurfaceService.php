@@ -504,6 +504,38 @@ class AppSurfaceService
         return $this->experienceOverview($actor);
     }
 
+    public function popularRoutes(?string $service = null): array
+    {
+        if (! Schema::hasTable('popular_routes')) {
+            return ['routes' => []];
+        }
+        $q = DB::table('popular_routes')->where('active', true);
+        if ($service) {
+            $q->where(function ($inner) use ($service) {
+                $inner->where('service', $service)->orWhere('service', 'all');
+            });
+        }
+        $rows = $q->orderBy('sort')->orderBy('id')->limit(20)->get();
+
+        return [
+            'routes' => $rows->map(fn ($row) => [
+                'id' => (string) $row->id,
+                'title' => $row->title,
+                'fromTitle' => $row->from_title,
+                'fromAddress' => $row->from_address ?: $row->from_title,
+                'fromLat' => (float) $row->from_lat,
+                'fromLng' => (float) $row->from_lng,
+                'toTitle' => $row->to_title,
+                'toAddress' => $row->to_address ?: $row->to_title,
+                'toLat' => (float) $row->to_lat,
+                'toLng' => (float) $row->to_lng,
+                'distanceKm' => (int) $row->distance_km,
+                'fromFare' => (int) $row->from_fare,
+                'service' => $row->service,
+            ])->all(),
+        ];
+    }
+
     public function adsServe(?string $placement = null): array
     {
         if (! Schema::hasTable('ad_campaigns')) {
@@ -522,7 +554,11 @@ class AppSurfaceService
         }
         if (Schema::hasColumn('ad_campaigns', 'placement') && $placement) {
             $q->where(function ($inner) use ($placement) {
-                $inner->whereNull('placement')->orWhere('placement', $placement)->orWhere('placement', 'home');
+                if (in_array($placement, ['home', 'driver'], true)) {
+                    $inner->whereNull('placement')->orWhere('placement', $placement)->orWhere('placement', 'home');
+                } else {
+                    $inner->where('placement', $placement);
+                }
             });
         }
         $rows = $q->orderByDesc('id')->limit(20)->get();
