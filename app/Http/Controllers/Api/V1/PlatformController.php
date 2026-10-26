@@ -166,6 +166,13 @@ class PlatformController extends Controller
     {
         $payload = $this->fares->withResolvedTripDistance($request->all());
         \App\Support\ServiceArea::assertTrip($payload);
+        $quotedProduct = strtoupper((string) ($payload['product'] ?? 'LOCAL_CAB'));
+        if (in_array($quotedProduct, ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true) && (float) ($payload['distanceKm'] ?? 0) > 30) {
+            abort(422, 'City ride is only for trips within 30 km. Book a one way ride for longer trips.');
+        }
+        if (in_array($quotedProduct, ['ONE_WAY', 'OUTSTATION'], true) && (float) ($payload['distanceKm'] ?? 0) <= 30) {
+            abort(422, 'One way is for trips longer than 30 km. Book a city ride for shorter trips.');
+        }
         $requested = strtoupper((string) ($payload['category'] ?? 'BIKE'));
         $options = [];
         $product = strtoupper((string) ($payload['product'] ?? 'LOCAL_CAB'));

@@ -32,16 +32,18 @@ class TripFareDetail
             : (is_array($snapshot['breakdown'] ?? null) ? $snapshot['breakdown'] : []);
         $product = strtoupper((string) ($row->product ?? $quote['product'] ?? ''));
         $isRound = $product === 'ROUND_WAY';
-        $waitMinutes = self::waitingMinutes($row, $snapshot);
-        $waitRate = (int) ($snapshot['waitingPaisePerMin'] ?? $quote['waitingPaisePerMin'] ?? 0);
-        $waitingPaise = (int) ($breakdown['waitingPaise'] ?? 0);
-        if ($waitingPaise < 1 && $waitMinutes > 0 && $waitRate > 0) {
+        $cityRide = in_array($product, ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true);
+        $waitMinutes = $cityRide ? 0 : self::waitingMinutes($row, $snapshot);
+        $waitRate = $cityRide ? 0 : (int) ($snapshot['waitingPaisePerMin'] ?? $quote['waitingPaisePerMin'] ?? 0);
+        $waitingPaise = $cityRide ? 0 : (int) ($breakdown['waitingPaise'] ?? 0);
+        if (! $cityRide && $waitingPaise < 1 && $waitMinutes > 0 && $waitRate > 0) {
             $waitingPaise = $waitMinutes * $waitRate;
         }
+        $couponPaise = (int) ($snapshot['coupon']['discountPaise'] ?? 0);
         $allowPaise = (int) ($breakdown['driverAllowPaise'] ?? 0);
         $nightStayPaise = (int) ($breakdown['nightStayPaise'] ?? 0);
         $gstPaise = (int) ($breakdown['gstPaise'] ?? 0);
-        $rideChargePaise = max(0, $totalPaise - $waitingPaise - $allowPaise - $nightStayPaise);
+        $rideChargePaise = max(0, $totalPaise - $waitingPaise - $allowPaise - $nightStayPaise + $couponPaise);
         $roundFarePaise = max(0, $totalPaise - $waitingPaise);
         $bookedKm = (float) ($snapshot['bookedDistanceKm'] ?? $row->distance_km ?? 0);
         $billedKm = (float) ($quote['billedKm'] ?? $snapshot['liveBilledKm'] ?? $snapshot['billedKm'] ?? $row->distance_km ?? 0);
@@ -80,7 +82,7 @@ class TripFareDetail
             $shownKm = $drivenKm >= 0.5 ? $drivenKm : ($billedKm > 0 ? $billedKm : $bookedKm);
             $lines[] = self::line('distance', 'Distance', text: self::kmText($shownKm));
             $lines[] = self::line('rideCharge', 'Ride charges', rupees: $rideChargePaise / 100);
-            if ($waitMinutes > 0 || $waitingPaise > 0 || $product === 'LOCAL_CAB') {
+            if ($waitMinutes > 0 || $waitingPaise > 0) {
                 $lines[] = self::line('waiting', $waitMinutes > 0 ? 'Waiting charge ('.$waitLabel.')' : 'Waiting charge', rupees: $waitingPaise / 100);
             }
             if ($allowPaise > 0) {
@@ -92,6 +94,10 @@ class TripFareDetail
         }
         if ($gstPaise > 0) {
             $lines[] = self::line('gst', 'GST (included)', rupees: $gstPaise / 100);
+        }
+        if ($couponPaise > 0) {
+            $code = trim((string) ($snapshot['coupon']['code'] ?? ''));
+            $lines[] = self::line('discount', $code !== '' ? 'Coupon '.$code : 'Coupon', rupees: -($couponPaise / 100));
         }
         $lines[] = self::line('total', 'Total fare', rupees: $totalPaise / 100);
         if ($advancePaid > 0 && $advancePaid < $totalPaise) {

@@ -338,6 +338,7 @@ class DriverOpsService
                 'railwayDirection' => $snapshot['railwayDirection'] ?? null,
                 'stationName' => $snapshot['stationName'] ?? null,
                 'trainNumber' => $row->train_number ?: ($snapshot['trainNo'] ?? null),
+                'trainName' => trim((string) ($snapshot['trainName'] ?? '')) !== '' ? $snapshot['trainName'] : null,
                 'flightNumber' => $row->flight_number ?: ($snapshot['flightNo'] ?? null),
                 'terminal' => $row->terminal ?: ($snapshot['terminal'] ?? null),
                 'parcelMode' => $product === 'PARCEL'

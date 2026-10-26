@@ -64,6 +64,9 @@ class BookingService
         $distanceKm = (float) ($resolved['distanceKm'] ?? $dto['distanceKm'] ?? Geo::haversineKm($pickupLat, $pickupLng, $dropLat, $dropLng));
         $dto['distanceKm'] = $distanceKm;
         $requestedProduct = strtoupper((string) ($dto['product'] ?? 'LOCAL_CAB'));
+        if ($this->isCityProduct($requestedProduct) && $distanceKm > 30) {
+            abort(422, 'City ride is only for trips within 30 km. Book a one way ride for longer trips.');
+        }
         if (in_array($requestedProduct, ['ONE_WAY', 'AIRPORT', 'RAILWAY', 'MULTI_STOP'], true)) {
             $dto['product'] = $requestedProduct;
             $dto['lockProduct'] = true;
@@ -155,6 +158,9 @@ class BookingService
             $quote['advancePaise'] = 0;
         }
         if ($product === 'ONE_WAY') {
+            if ($distanceKm <= 30) {
+                abort(422, 'One way is for trips longer than 30 km. Book a city ride for shorter trips.');
+            }
             $oneWayFuture = $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(15));
             if ($scheduledAt !== null && ! $oneWayFuture) {
                 abort(422, 'Choose a pickup time at least 15 minutes from now.');
@@ -165,10 +171,10 @@ class BookingService
             }
             $oneWayPaise = (int) ($quote['totalPaise'] ?? 0);
             $quote['oneWayMode'] = $oneWayFuture ? 'schedule' : 'now';
-            $quote['prebook'] = true;
-            $quote['advanceAfterAccept'] = true;
-            $quote['advancePercent'] = 10;
-            $quote['advancePaise'] = (int) round($oneWayPaise * 0.10);
+            $quote['prebook'] = $oneWayFuture;
+            $quote['advanceAfterAccept'] = $oneWayFuture;
+            $quote['advancePercent'] = $oneWayFuture ? 10 : 0;
+            $quote['advancePaise'] = $oneWayFuture ? (int) round($oneWayPaise * 0.10) : 0;
             $quote['commissionSettled'] = false;
         }
         if ($product === 'AIRPORT') {
@@ -224,6 +230,7 @@ class BookingService
             $quote['railwayDirection'] = $direction;
             $quote['stationName'] = trim((string) ($dto['stationName'] ?? ''));
             $quote['trainNo'] = trim((string) ($dto['trainNumber'] ?? $dto['trainNo'] ?? ''));
+            $quote['trainName'] = trim((string) ($dto['trainName'] ?? ''));
             $quote['prebook'] = true;
             $quote['advanceAfterAccept'] = true;
             $quote['advancePercent'] = 10;
@@ -373,7 +380,8 @@ class BookingService
         $advanceProducts = array_keys(\App\Support\AdvancePayment::PRODUCTS);
         $futureSchedule = $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(5)) && in_array($product, $advanceProducts, true);
         $driverDispatch = self::driverCanAccept($product);
-        if ($futureSchedule) {
+        $citySearch = $this->isCityProduct($product);
+        if ($futureSchedule && ! $citySearch) {
             $timeout = max($timeout, $scheduledAt->getTimestamp() - now()->getTimestamp());
         }
         $status = $driverDispatch ? BookingStatus::SEARCHING : 'CONFIRMED';
@@ -392,7 +400,7 @@ class BookingService
                 $pickupLat,
                 $pickupLng,
                 (string) $dto['category'],
-                $radius,
+                $citySearch ? $this->cityOfferRadiusKm(null) : $radius,
                 false,
                 $districtId,
                 (string) ($dto['product'] ?? 'LOCAL_CAB'),
@@ -446,7 +454,7 @@ class BookingService
             'product' => $dto['product'],
             'category' => $dto['category'],
             'status' => $status,
-            'search_expires_at' => $futureSchedule ? $scheduledAt : ($driverDispatch ? now()->addSeconds($timeout) : null),
+            'search_expires_at' => ($futureSchedule && ! $citySearch) ? $scheduledAt : ($driverDispatch ? now()->addSeconds($timeout) : null),
             'pickup_text' => $dto['pickupText'] ?? $dto['pickup'] ?? 'Pickup',
             'drop_text' => $dto['dropText'] ?? $dto['drop'] ?? 'Drop',
             'pickup_lat' => $pickupLat,
@@ -1282,6 +1290,8 @@ class BookingService
         } elseif ($roundComplete) {
             abort_unless(! empty($bookedSnapshot['returnStartedAt']), 422, 'Complete the first side, then start the return, before ending the round trip.');
             $wait = (int) ($bookedSnapshot['waitingMinutes'] ?? 0);
+        } elseif ($this->isCityRide($booking)) {
+            $wait = 0;
         } else {
             $wait = 0;
             if ($booking->arrived_at && $startedAt) {
@@ -1628,6 +1638,7 @@ class BookingService
             'railwayDirection' => $this->isRailway($row) ? ($snapshot['railwayDirection'] ?? null) : null,
             'stationName' => $this->isRailway($row) && trim((string) ($snapshot['stationName'] ?? '')) !== '' ? $snapshot['stationName'] : null,
             'trainNumber' => $row->train_number ?: ($snapshot['trainNo'] ?? null),
+            'trainName' => $this->isRailway($row) && trim((string) ($snapshot['trainName'] ?? '')) !== '' ? $snapshot['trainName'] : null,
             'flightNumber' => $row->flight_number ?: ($snapshot['flightNo'] ?? null),
             'terminal' => $row->terminal ?: ($snapshot['terminal'] ?? null),
             'roundTripMode' => $isRound ? $this->roundTripMode($row) : null,
@@ -2929,6 +2940,9 @@ class BookingService
         if (! $this->isOneWay($row) || ! $row->driver_id) {
             return false;
         }
+        if ($this->oneWayMode($row) !== 'schedule') {
+            return false;
+        }
         $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
         if (empty($snapshot['advanceAfterAccept'])) {
             return false;
@@ -3022,6 +3036,32 @@ class BookingService
     private function isCityProduct(string $product): bool
     {
         return in_array(strtoupper($product), ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true);
+    }
+
+    /**
+     * City search starts nearby and opens out to 30 km across the 10 minute window.
+     */
+    private function cityOfferRadiusKm(mixed $createdAt = null): float
+    {
+        $elapsed = 0;
+        if ($createdAt instanceof \Illuminate\Support\Carbon) {
+            $elapsed = max(0, now()->getTimestamp() - $createdAt->getTimestamp());
+        } elseif (is_string($createdAt) && $createdAt !== '') {
+            try {
+                $elapsed = max(0, now()->getTimestamp() - \Illuminate\Support\Carbon::parse($createdAt)->getTimestamp());
+            } catch (\Throwable) {
+                $elapsed = 0;
+            }
+        }
+        $cap = min(30.0, max(3.0, $this->settings->radiusKm()));
+        if ($elapsed < 120) {
+            return min(5.0, $cap);
+        }
+        if ($elapsed < 300) {
+            return min(15.0, $cap);
+        }
+
+        return $cap;
     }
 
     /**
@@ -3962,7 +4002,10 @@ class BookingService
                 continue;
             }
             $km = Geo::haversineKm($lat, $lng, (float) $booking->pickup_lat, (float) $booking->pickup_lng);
-            if ($km > $radius) {
+            $offerRadius = $this->isCityProduct((string) $booking->product)
+                ? $this->cityOfferRadiusKm($booking->created_at)
+                : $radius;
+            if ($km > $offerRadius) {
                 continue;
             }
             $alreadyOffered = Schema::hasTable('booking_driver_requests')
@@ -4571,6 +4614,9 @@ class BookingService
             $roundTrip = true;
         } else {
             $fareKm = max($bookedKm, $projected);
+        }
+        if (in_array($product, ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true)) {
+            $waitMinutes = 0;
         }
         $lastBilled = (float) ($snapshot['liveBilledKm'] ?? $snapshot['billedKm'] ?? $bookedKm);
         $patch = ['actual_distance_km' => round(max(0, $drivenKm), 3)];

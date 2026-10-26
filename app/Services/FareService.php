@@ -61,7 +61,9 @@ class FareService
         $basePaise = (int) round(min($minKm, $includedKm) * $rule->per_km_paise);
         $distancePaise = $packagePaise - $basePaise;
         $extraPaise = (int) round($extraKm * $rule->extra_km_paise);
-        $waitingPaise = ((int) ($input['waitMinutes'] ?? 0)) * $rule->waiting_paise_per_min;
+        $cityRide = in_array($product, ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true);
+        $waitMinutes = $cityRide ? 0 : (int) ($input['waitMinutes'] ?? 0);
+        $waitingPaise = $waitMinutes * (int) $rule->waiting_paise_per_min;
         $extraHours = $product === 'RENTAL' ? max(0, (int) ($input['extraHours'] ?? 0)) : 0;
         $rentalExtraPaise = $extraHours * ($rule->extra_hour_paise ?? 15000);
         $stopCount = in_array($product, ['MULTI_STOP', 'RENTAL'], true) ? max(0, (int) ($input['stopCount'] ?? 0)) : 0;
@@ -90,7 +92,7 @@ class FareService
             'extraKm' => $extraKm,
             'hours' => $rule->rental_hours ?? $hours,
             'source' => 'server',
-            'waitingPaisePerMin' => (int) ($rule->waiting_paise_per_min ?? 0),
+            'waitingPaisePerMin' => $cityRide ? 0 : (int) ($rule->waiting_paise_per_min ?? 0),
             'gstPercent' => $gstPct,
             'gstAppliesToFare' => (bool) $rule->apply_gst_to_base,
             'breakdown' => [
@@ -114,7 +116,7 @@ class FareService
                 $oneWayKm,
                 $distanceKm,
                 $waitingPaise,
-                (int) ($input['waitMinutes'] ?? 0),
+                $waitMinutes,
                 $driverAllowPaise,
                 $nightStayPaise,
                 $gstPaise,
@@ -178,13 +180,13 @@ class FareService
     }
 
     /**
-     * City ride is 30 km or less. A longer trip is an outstation one-way ride.
+     * City ride stays inside 30 km. A longer trip is an outstation one-way ride.
      */
     public static function cityOrOutstation(string $product, float $distanceKm): string
     {
         $product = strtoupper($product);
         if (in_array($product, ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true)) {
-            return 'LOCAL_CAB';
+            return $distanceKm > 30 ? 'ONE_WAY' : 'LOCAL_CAB';
         }
         if (! in_array($product, ['ONE_WAY', 'OUTSTATION'], true) || $distanceKm <= 0) {
             return $product === 'OUTSTATION' ? 'ONE_WAY' : $product;
