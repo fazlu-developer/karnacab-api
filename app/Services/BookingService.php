@@ -365,10 +365,10 @@ class BookingService
             $quote['billedKm'] = $distanceKm;
             $quote['stopCount'] = count($multiStops);
             $quote['routePolyline'] = $route['polyline'] ?? ($resolved['polyline'] ?? null);
-            $quote['prebook'] = true;
-            $quote['advanceAfterAccept'] = true;
-            $quote['advancePercent'] = 10;
-            $quote['advancePaise'] = (int) round($multiPaise * 0.10);
+            $quote['prebook'] = $multiFuture;
+            $quote['advanceAfterAccept'] = $multiFuture;
+            $quote['advancePercent'] = $multiFuture ? 10 : 0;
+            $quote['advancePaise'] = $multiFuture ? (int) round($multiPaise * 0.10) : 0;
             $quote['commissionSettled'] = false;
             $quote['roundTrip'] = false;
             $quote['waitMinutes'] = 0;
@@ -3192,6 +3192,9 @@ class BookingService
     private function multiStopNeedsAdvance(Booking $row): bool
     {
         if (! $this->isMultiStop($row) || ! $row->driver_id) {
+            return false;
+        }
+        if ($this->multiStopMode($row) !== 'schedule') {
             return false;
         }
         $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
