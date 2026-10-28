@@ -15,16 +15,22 @@ final class TourMoney
     /**
      * @return array{totalPaise: int, advancePaise: int, platformCommissionPaise: int, driverAdvancePaise: int, balancePaise: int}
      */
-    public static function split(int $totalPaise): array
+    public static function split(int $totalPaise, ?int $advancePercent = null): array
     {
         $total = max(0, $totalPaise);
+        $advancePct = $advancePercent ?? 30;
+        $advancePct = max(0, min(100, $advancePct));
         $platform = intdiv($total * 10, 100);
-        $driver = intdiv($total * 20, 100);
-        $advance = $platform + $driver;
+        $advance = intdiv($total * $advancePct, 100);
+        if ($advance < $platform) {
+            $platform = $advance;
+        }
+        $driver = max(0, $advance - $platform);
 
         return [
             'totalPaise' => $total,
             'advancePaise' => $advance,
+            'advancePercent' => $advancePct,
             'platformCommissionPaise' => $platform,
             'driverAdvancePaise' => $driver,
             'balancePaise' => $total - $advance,

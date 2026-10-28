@@ -67,9 +67,12 @@ class BookingService
         if ($this->isCityProduct($requestedProduct) && $distanceKm > 30) {
             abort(422, 'City ride is only for trips within 30 km. Book a one way ride for longer trips.');
         }
-        if (in_array($requestedProduct, ['ONE_WAY', 'AIRPORT', 'RAILWAY', 'MULTI_STOP'], true)) {
+        if (in_array($requestedProduct, ['ONE_WAY', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'AMBULANCE'], true)) {
             $dto['product'] = $requestedProduct;
             $dto['lockProduct'] = true;
+            if ($requestedProduct === 'AMBULANCE') {
+                $dto['category'] = 'AMBULANCE';
+            }
         } else {
             $dto['product'] = FareService::cityOrOutstation($requestedProduct, $distanceKm);
         }
@@ -377,6 +380,28 @@ class BookingService
             $dto['waitMinutes'] = 0;
             $dto['roundTrip'] = false;
         }
+        if ($product === 'AMBULANCE') {
+            $photo = trim((string) ($dto['patientPhotoUrl'] ?? $dto['patient_photo_url'] ?? ''));
+            abort_if($photo === '', 422, 'Upload a patient photo.');
+            $quote = [
+                'product' => 'AMBULANCE',
+                'category' => 'AMBULANCE',
+                'totalPaise' => 0,
+                'totalRupees' => 0,
+                'commissionPaise' => 0,
+                'driverEarningPaise' => 0,
+                'advancePaise' => 0,
+                'advancePercent' => 0,
+                'advanceAfterAccept' => false,
+                'prebook' => false,
+                'commissionSettled' => true,
+                'source' => 'ambulance',
+                'billedKm' => $distanceKm,
+                'isEmergency' => true,
+                'patientPhotoUrl' => $photo,
+            ];
+            $dto['paymentMode'] = 'CASH';
+        }
         $advanceProducts = array_keys(\App\Support\AdvancePayment::PRODUCTS);
         $futureSchedule = $scheduledAt !== null && $scheduledAt->greaterThan(now()->addMinutes(5)) && in_array($product, $advanceProducts, true);
         $driverDispatch = self::driverCanAccept($product);
@@ -384,7 +409,9 @@ class BookingService
         if ($futureSchedule && ! $citySearch) {
             $timeout = max($timeout, $scheduledAt->getTimestamp() - now()->getTimestamp());
         }
-        $status = $driverDispatch ? BookingStatus::SEARCHING : 'CONFIRMED';
+        $status = $product === 'AMBULANCE'
+            ? BookingStatus::LEGACY_REQUESTED
+            : ($driverDispatch ? BookingStatus::SEARCHING : 'CONFIRMED');
 
         $matches = [];
         $notifyCitySchedule = $this->isCityProduct($product) && $futureSchedule;
@@ -488,6 +515,8 @@ class BookingService
             'passenger_phone' => $dto['passengerPhone'] ?? $actor->phone,
             'booked_for_other' => (bool) ($dto['bookForOther'] ?? $dto['bookedForOther'] ?? false),
             'instructions' => $dto['instructions'] ?? null,
+            'patient_photo_url' => $product === 'AMBULANCE' ? ($quote['patientPhotoUrl'] ?? null) : ($dto['patientPhotoUrl'] ?? null),
+            'is_emergency' => $product === 'AMBULANCE' ? 1 : 0,
             'start_otp' => (string) random_int(1000, 9999),
             'end_otp' => (string) random_int(1000, 9999),
             'payment_mode' => $mode,
@@ -751,13 +780,17 @@ class BookingService
 
         $preview = Booking::query()->find($id);
         abort_unless($preview, 404, 'Booking not found');
+        abort_unless(self::driverCanAccept((string) $preview->product), 422, 'KarnaRide admin assigns this ambulance.');
         $this->assertScheduleSlotFree($driver, $preview);
         $vehicles = $driver->vehicles;
         if ($vehicles->isEmpty()) {
             $vehicles = \App\Models\Vehicle::query()->where('driver_id', $driver->id)->get();
         }
         $wanted = strtoupper((string) $preview->category);
-        $vehicle = $vehicles->first(fn ($row) => \App\Support\VehicleCategory::sameFamily((string) $row->category, $wanted));
+        $parcelJob = strtoupper((string) $preview->product) === 'PARCEL';
+        $vehicle = $vehicles->first(fn ($row) => $parcelJob
+            ? \App\Support\VehicleCategory::parcelCompatible((string) $row->category, $wanted)
+            : \App\Support\VehicleCategory::sameFamily((string) $row->category, $wanted));
         abort_unless($vehicle, 422, 'This booking needs a matching '.$wanted.' vehicle.');
         $wallet = Schema::hasTable('wallets')
             ? DB::table('wallets')->where('owner_user_id', $actor->id)->where(function ($q) {
@@ -781,7 +814,10 @@ class BookingService
             $booking = Booking::query()->where('id', $id)->lockForUpdate()->first();
             abort_unless($booking, 404, 'Booking not found');
             abort_unless(BookingStatus::isSearching((string) $booking->status) && ! $booking->driver_id, 409, 'Booking has already been accepted by another driver.');
-            abort_unless(\App\Support\VehicleCategory::sameFamily((string) $vehicle->category, (string) $booking->category), 422, 'Vehicle category does not match this booking.');
+            $categoryOk = strtoupper((string) $booking->product) === 'PARCEL'
+                ? \App\Support\VehicleCategory::parcelCompatible((string) $vehicle->category, (string) $booking->category)
+                : \App\Support\VehicleCategory::sameFamily((string) $vehicle->category, (string) $booking->category);
+            abort_unless($categoryOk, 422, 'Vehicle category does not match this booking.');
             $future = $booking->scheduled_at && \Illuminate\Support\Carbon::parse($booking->scheduled_at)->greaterThan(now()->addMinutes(5));
 
             $updated = Booking::query()
@@ -1465,7 +1501,7 @@ class BookingService
     public function expireSearching(?int $exceptId = null): int
     {
         $timeout = $this->settings->requestTimeoutSeconds();
-        $q = Booking::query()->whereIn('status', BookingStatus::searching());
+        $q = Booking::query()->whereIn('status', BookingStatus::searching())->where('product', '!=', 'AMBULANCE');
         if ($exceptId) {
             $q->where('id', '!=', $exceptId);
         }
@@ -1509,7 +1545,12 @@ class BookingService
     {
         $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
         $total = (int) ($row->final_fare_paise ?? $snapshot['totalPaise'] ?? $row->quote_paise);
-        $commissionPaise = (int) ($row->commission_paise ?? $snapshot['commissionPaise'] ?? round($total * 0.1));
+        if ($this->isAmbulance($row)) {
+            $total = 0;
+        }
+        $commissionPaise = $this->isAmbulance($row)
+            ? 0
+            : (int) ($row->commission_paise ?? $snapshot['commissionPaise'] ?? round($total * 0.1));
         $storedEarn = isset($row->driver_earning_paise) ? (int) $row->driver_earning_paise : null;
         $earningPaise = ($storedEarn !== null && $storedEarn > 0)
             ? $storedEarn
@@ -1609,6 +1650,9 @@ class BookingService
             'customerReview' => $this->customerReview($row),
             'lifecycle' => $lifecycle,
             'lifecycleLabel' => $lifecycleLabel,
+            'patientPhotoUrl' => $snapshot['patientPhotoUrl'] ?? ($row->patient_photo_url ?? null),
+            'isEmergency' => $this->isAmbulance($row) || (bool) ($row->is_emergency ?? false),
+            'ambulancePhase' => $this->isAmbulance($row) ? $this->ambulancePhase($row) : null,
             'pickupText' => $row->pickup_text,
             'dropText' => $row->drop_text,
             'pickupLat' => $row->pickup_lat !== null ? (float) $row->pickup_lat : null,
@@ -2788,6 +2832,27 @@ class BookingService
         return $this->presentedProduct($row) === 'RAILWAY';
     }
 
+    private function isAmbulance(object $row): bool
+    {
+        return $this->presentedProduct($row) === 'AMBULANCE';
+    }
+
+    private function ambulancePhase(object $row): string
+    {
+        $status = strtoupper((string) $row->status);
+        if (in_array($status, [BookingStatus::COMPLETED], true)) {
+            return 'complete';
+        }
+        if (in_array($status, [BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED'], true)) {
+            return 'hospital';
+        }
+        if (in_array($status, [BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED, 'DRIVER_ARRIVING', BookingStatus::DRIVER_ARRIVED, BookingStatus::OTP_VERIFIED], true)) {
+            return 'assigned';
+        }
+
+        return 'waiting';
+    }
+
     private function isParcel(object $row): bool
     {
         return $this->presentedProduct($row) === 'PARCEL';
@@ -3119,6 +3184,7 @@ class BookingService
             'AIRPORT' => 'AIRPORT',
             'RAILWAY', 'RAIL' => 'RAILWAY',
             'PARCEL' => 'PARCEL',
+            'AMBULANCE' => 'AMBULANCE',
             'RENTAL' => 'RENTAL',
             'MULTI_STOP', 'MULTISTOP', 'MULTI' => 'MULTI_STOP',
             'LOCAL_CAB', 'CITY', 'CITY_RIDE', 'RIDE' => 'LOCAL_CAB',
@@ -3964,7 +4030,11 @@ class BookingService
             ->get();
         $pushes = [];
         foreach ($rows as $booking) {
-            if (! \App\Support\VehicleCategory::sameFamily($category, (string) $booking->category)) {
+            $bookingProduct = strtoupper((string) $booking->product);
+            $familyOk = $bookingProduct === 'PARCEL'
+                ? \App\Support\VehicleCategory::parcelCompatible($category, (string) $booking->category)
+                : \App\Support\VehicleCategory::sameFamily($category, (string) $booking->category);
+            if (! $familyOk) {
                 continue;
             }
             if ($this->scheduleConflicts($driver, $booking)) {
@@ -4042,7 +4112,7 @@ class BookingService
                 if (! $visible && $this->isParcel($row)) {
                     $reason = null;
                     $km = null;
-                    if ($category === '' || ! \App\Support\VehicleCategory::sameFamily($category, (string) $row->category)) {
+                    if ($category === '' || ! \App\Support\VehicleCategory::parcelCompatible($category, (string) $row->category)) {
                         $reason = 'vehicle_family';
                     } elseif ($driverLat === null || $row->pickup_lat === null) {
                         $reason = 'driver_location_missing';

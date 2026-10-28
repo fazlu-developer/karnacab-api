@@ -3,6 +3,7 @@
 namespace App\Support;
 
 use App\Models\User;
+use App\Support\PublicMedia;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -12,8 +13,8 @@ final class TerritoryContacts
      * @return array{
      *     state: ?array{id:int,name:string},
      *     district: ?array{id:int,name:string},
-     *     stateHead: ?array{name:string,phone:?string},
-     *     districtHead: ?array{name:string,phone:?string}
+     *     stateHead: ?array{name:string,phone:?string,email:?string,photoUrl:?string,role:string},
+     *     districtHead: ?array{name:string,phone:?string,email:?string,photoUrl:?string,role:string}
      * }
      */
     public static function forUser(User $user): array
@@ -73,34 +74,47 @@ final class TerritoryContacts
     }
 
     /**
-     * @return array{name:string,phone:?string}|null
+     * @return array{name:string,phone:?string,email:?string,photoUrl:?string,role:string}|null
      */
     private static function operator(string $role, string $column, int $id): ?array
     {
         if ($id < 1 || ! Schema::hasTable('users')) {
             return null;
         }
+        $cols = ['name', 'phone'];
+        if (Schema::hasColumn('users', 'email')) {
+            $cols[] = 'email';
+        }
+        if (Schema::hasColumn('users', 'avatar_url')) {
+            $cols[] = 'avatar_url';
+        } elseif (Schema::hasColumn('users', 'photo_url')) {
+            $cols[] = 'photo_url';
+        }
         $row = DB::table('users')
             ->where('role', $role)
             ->where($column, $id)
             ->where('status', 'ACTIVE')
             ->orderBy('id')
-            ->first(['name', 'phone']);
+            ->first($cols);
         if (! $row && $role === 'DISTRICT_HEAD') {
             $row = DB::table('users')
                 ->where('role', 'FRANCHISE')
                 ->where($column, $id)
                 ->where('status', 'ACTIVE')
                 ->orderBy('id')
-                ->first(['name', 'phone']);
+                ->first($cols);
         }
         if (! $row) {
             return null;
         }
+        $photo = $row->avatar_url ?? $row->photo_url ?? null;
 
         return [
             'name' => (string) $row->name,
             'phone' => $row->phone ? (string) $row->phone : null,
+            'email' => isset($row->email) && $row->email ? (string) $row->email : null,
+            'photoUrl' => $photo ? (PublicMedia::storagePath((string) $photo) ?? (string) $photo) : null,
+            'role' => $role,
         ];
     }
 }

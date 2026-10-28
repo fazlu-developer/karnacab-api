@@ -98,6 +98,7 @@ Route::middleware('jwt')->group(function () {
     Route::delete('/v1/places/recent', [PlatformController::class, 'placesClearRecent']);
     Route::delete('/v1/places/{id}', [PlatformController::class, 'placesDelete']);
 
+    Route::post('/v1/ambulance/photo', [PlatformController::class, 'ambulancePhoto']);
     Route::post('/v1/bookings', [PlatformController::class, 'bookingsCreate']);
     Route::get('/v1/bookings', [PlatformController::class, 'bookingsList']);
     Route::get('/v1/bookings/{id}/live', [PlatformController::class, 'bookingsLive']);

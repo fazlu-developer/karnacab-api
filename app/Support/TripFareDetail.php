@@ -204,6 +204,7 @@ class TripFareDetail
             'RAILWAY' => 'Railway',
             'MULTI_STOP' => 'Multi stop',
             'PARCEL' => 'Parcel',
+            'AMBULANCE' => 'Ambulance',
             'SCHEDULE' => 'Scheduled ride',
             default => trim(str_replace('_', ' ', $product)) ?: 'Ride',
         };

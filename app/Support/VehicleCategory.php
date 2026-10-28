@@ -46,4 +46,33 @@ class VehicleCategory
     {
         return in_array(strtoupper(trim($right)), self::family($left), true);
     }
+
+    /**
+     * Parcel goods vehicles share one family so a pickup request reaches a van or truck.
+     *
+     * @return list<string>
+     */
+    public static function parcelSearchFamily(string $category): array
+    {
+        $goods = ['TRUCK', 'PICKUP', 'LOADING', 'VAN', 'TRAVELLER', 'TEMPO'];
+        $family = self::family($category);
+        $hit = false;
+        foreach ($family as $item) {
+            if (in_array(strtoupper($item), $goods, true)) {
+                $hit = true;
+                break;
+            }
+        }
+        if (! $hit) {
+            return $family;
+        }
+
+        return array_values(array_unique([...$family, ...$goods]));
+    }
+
+    public static function parcelCompatible(string $driverCategory, string $bookingCategory): bool
+    {
+        return self::sameFamily($driverCategory, $bookingCategory)
+            || in_array(strtoupper(trim($bookingCategory)), self::parcelSearchFamily($driverCategory), true);
+    }
 }

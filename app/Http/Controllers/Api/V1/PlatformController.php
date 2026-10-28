@@ -393,6 +393,30 @@ class PlatformController extends Controller
         return $this->bookings->create($request->user(), $request->all());
     }
 
+    public function ambulancePhoto(Request $request)
+    {
+        abort_unless(in_array($request->user()?->role, ['CUSTOMER', 'CORPORATE', 'ADMIN', 'SUPER_ADMIN'], true), 403);
+        $data = $request->validate([
+            'fileBase64' => ['required', 'string'],
+            'mime' => ['nullable', 'string', 'max:40'],
+        ]);
+        $raw = (string) $data['fileBase64'];
+        if (str_contains($raw, ',')) {
+            $raw = explode(',', $raw, 2)[1];
+        }
+        $binary = base64_decode($raw, true) ?: null;
+        abort_unless($binary, 422, 'Upload a patient photo.');
+        abort_unless(strlen($binary) < 6 * 1024 * 1024, 422, 'Photo must be under 6 MB.');
+        $mime = strtolower((string) ($data['mime'] ?? 'image/jpeg'));
+        $ext = str_contains($mime, 'png') ? 'png' : (str_contains($mime, 'webp') ? 'webp' : 'jpg');
+        $path = 'ambulance/'.now()->format('Ymd').'/'.\Illuminate\Support\Str::uuid().'.'.$ext;
+        app(\App\Services\KycDocumentService::class)->writePublicFile($path, $binary);
+
+        return [
+            'patientPhotoUrl' => app(\App\Services\KycDocumentService::class)->previewUrl($path),
+        ];
+    }
+
     public function bookingsList(Request $request)
     {
         return response()->json($this->bookings->list($request->user()));
@@ -583,11 +607,13 @@ class PlatformController extends Controller
             'lat' => 'required|numeric',
             'lng' => 'required|numeric',
             'category' => 'nullable|string',
+            'product' => 'nullable|string',
         ]);
         $category = strtoupper((string) ($data['category'] ?? 'BIKE'));
+        $product = strtoupper((string) ($data['product'] ?? ''));
         $settings = app(\App\Services\RideSettingsService::class)->present();
         $markers = app(\App\Services\NearbyDriverService::class)
-            ->publicMarkers((float) $data['lat'], (float) $data['lng'], $category)
+            ->publicMarkers((float) $data['lat'], (float) $data['lng'], $category, $product === 'PARCEL' ? 'PARCEL' : null)
             ->all();
 
         return [

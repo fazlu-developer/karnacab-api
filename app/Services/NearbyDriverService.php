@@ -47,8 +47,10 @@ class NearbyDriverService
                 $q->whereNull('u.location_updated_at')
                     ->orWhere('u.location_updated_at', '>=', $staleAfter);
             })
-            ->where(function ($q) use ($category) {
-                $family = \App\Support\VehicleCategory::family((string) $category);
+            ->where(function ($q) use ($category, $product) {
+                $family = strtoupper((string) $product) === 'PARCEL'
+                    ? \App\Support\VehicleCategory::parcelSearchFamily((string) $category)
+                    : \App\Support\VehicleCategory::family((string) $category);
                 $q->whereIn('v.category', $family);
                 foreach ($family as $item) {
                     $q->orWhereRaw('UPPER(v.category) = ?', [$item]);
@@ -177,7 +179,7 @@ class NearbyDriverService
                 $reason = 'kyc_'.$kyc;
             } elseif (! $row->vehicle_id) {
                 $reason = 'no_vehicle';
-            } elseif ($vehicle === '' || ! \App\Support\VehicleCategory::sameFamily($wanted, $vehicle)) {
+            } elseif ($vehicle === '' || ! \App\Support\VehicleCategory::parcelCompatible($wanted, $vehicle)) {
                 $reason = 'vehicle_'.$vehicle;
             } elseif ($row->location_updated_at && \Illuminate\Support\Carbon::parse($row->location_updated_at)->lt($staleAfter)) {
                 $reason = 'stale_location';
@@ -200,11 +202,11 @@ class NearbyDriverService
         return $dropped;
     }
 
-    public function publicMarkers(float $lat, float $lng, string $category): Collection
+    public function publicMarkers(float $lat, float $lng, string $category, ?string $product = null): Collection
     {
         $radius = $this->settings->radiusKm();
 
-        return collect($this->search($lat, $lng, $category, $radius))
+        return collect($this->search($lat, $lng, $category, $radius, false, null, $product))
             ->map(fn (array $row) => [
                 'driverId' => $row['driverId'],
                 'lat' => $row['lat'],
