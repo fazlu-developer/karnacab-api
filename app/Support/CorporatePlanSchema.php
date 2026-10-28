@@ -71,6 +71,7 @@ final class CorporatePlanSchema
             'drop_lng' => fn (Blueprint $t) => $t->decimal('drop_lng', 10, 7)->nullable(),
             'travel_date' => fn (Blueprint $t) => $t->date('travel_date')->nullable(),
             'pickup_time' => fn (Blueprint $t) => $t->string('pickup_time', 8)->nullable(),
+            'return_time' => fn (Blueprint $t) => $t->string('return_time', 8)->nullable(),
             'passengers' => fn (Blueprint $t) => $t->unsignedInteger('passengers')->nullable(),
             'passengers_json' => fn (Blueprint $t) => $t->text('passengers_json')->nullable(),
             'requirements' => fn (Blueprint $t) => $t->text('requirements')->nullable(),
@@ -139,9 +140,19 @@ final class CorporatePlanSchema
                 $table->timestamp('return_started_at')->nullable();
                 $table->timestamp('completed_at')->nullable();
                 $table->string('skip_reason', 180)->nullable();
+                $table->string('return_time', 8)->nullable();
                 $table->timestamp('reminded_at')->nullable();
+                $table->timestamp('return_reminded_at')->nullable();
                 $table->timestamps();
             });
+        }
+        foreach ([
+            'return_time' => fn (Blueprint $t) => $t->string('return_time', 8)->nullable(),
+            'return_reminded_at' => fn (Blueprint $t) => $t->timestamp('return_reminded_at')->nullable(),
+        ] as $name => $define) {
+            if ($schema->hasTable('corporate_daily_trips') && ! $schema->hasColumn('corporate_daily_trips', $name)) {
+                $schema->table('corporate_daily_trips', $define);
+            }
         }
         if ($db->table('corporate_plans')->count() === 0) {
             $now = now();

@@ -88,6 +88,12 @@ class CorporatePlanService
         $days = (int) $quote['days'];
         $end = $start->copy()->addDays($days - 1);
         $time = $this->clock($data['pickupTime'] ?? $data['eventTime'] ?? '09:00');
+        $return = null;
+        if ($kind === 'ROUND_WAY') {
+            abort_if(empty($data['returnTime']), 422, 'Choose the daily drop time for a round trip.');
+            $return = $this->clock($data['returnTime']);
+            abort_if($this->minutes($return) <= $this->minutes($time), 422, 'Drop time must be after the pickup time.');
+        }
         $territory = $this->territory($actor, $data);
         $total = (int) $quote['totalPaise'];
         $km = is_numeric($quote['vehicle']['billedKm'] ?? null) ? (float) $quote['vehicle']['billedKm'] : null;
@@ -96,7 +102,7 @@ class CorporatePlanService
         if (Schema::hasTable('corporate_accounts') && Schema::hasColumn('corporate_accounts', 'owner_user_id')) {
             $accountId = DB::table('corporate_accounts')->where('owner_user_id', $actor->id)->value('id');
         }
-        $id = DB::transaction(function () use ($actor, $data, $quote, $kind, $stops, $start, $end, $days, $time, $territory, $total, $ref, $pickup, $accountId, $km) {
+        $id = DB::transaction(function () use ($actor, $data, $quote, $kind, $stops, $start, $end, $days, $time, $return, $territory, $total, $ref, $pickup, $accountId, $km) {
             $id = DB::table('corporate_travel_bookings')->insertGetId($this->only('corporate_travel_bookings', [
                 'public_ref' => $ref,
                 'customer_id' => $actor->id,
@@ -125,6 +131,7 @@ class CorporatePlanService
                 'ends_on' => $end->toDateString(),
                 'duration_days' => $days,
                 'pickup_time' => $time,
+                'return_time' => $return,
                 'passengers' => max(1, (int) ($data['passengers'] ?? 1)),
                 'requirements' => $data['requirements'] ?? null,
                 'quote_snapshot' => json_encode($quote),
@@ -313,8 +320,11 @@ class CorporatePlanService
             $this->postShares($fresh);
         });
         $fresh = $this->row($id);
-        $this->push([(int) $fresh->customer_id], 'Corporate driver assigned', $fresh->driver_name.' will pick you up daily at '.$fresh->pickup_time.' on '.$fresh->public_ref.'.', 'corporate_assigned');
-        $this->push([(int) $fresh->driver_user_id], 'Corporate plan assigned', 'Daily pickup at '.$fresh->pickup_time.' for '.$fresh->public_ref.'. The plan is prepaid. Do not collect the plan fare.', 'corporate_assigned');
+        $times = $this->kindOf($fresh) === 'ROUND_WAY' && ! empty($fresh->return_time)
+            ? 'Pickup '.$fresh->pickup_time.' and drop '.$fresh->return_time
+            : 'Pickup '.$fresh->pickup_time;
+        $this->push([(int) $fresh->customer_id], 'Corporate driver assigned', $fresh->driver_name.' will run '.$fresh->public_ref.' daily. '.$times.'.', 'corporate_assigned');
+        $this->push([(int) $fresh->driver_user_id], 'Corporate plan assigned', $times.' every day for '.$fresh->public_ref.'. Same-day alerts arrive before each pickup'.($this->kindOf($fresh) === 'ROUND_WAY' ? ' and drop' : '').'. The plan is prepaid.', 'corporate_assigned');
 
         return $this->present($fresh);
     }
@@ -360,6 +370,15 @@ class CorporatePlanService
         $row = $this->row($this->numericId($id));
         abort_if(in_array((string) $row->status, ['REJECTED', 'CANCELLED', 'COMPLETED'], true), 422, 'This plan can no longer be rescheduled.');
         $time = isset($data['pickupTime']) ? $this->clock($data['pickupTime']) : substr((string) $row->pickup_time, 0, 5);
+        $return = $this->kindOf($row) === 'ROUND_WAY'
+            ? (isset($data['returnTime']) ? $this->clock($data['returnTime']) : substr((string) ($row->return_time ?? ''), 0, 5))
+            : null;
+        if ($return === '') {
+            $return = null;
+        }
+        if ($return !== null) {
+            abort_if($this->minutes($return) <= $this->minutes($time), 422, 'Drop time must be after the pickup time.');
+        }
         $start = isset($data['startsOn']) ? Carbon::parse((string) $data['startsOn'])->startOfDay() : Carbon::parse((string) ($row->starts_on ?: $row->travel_date))->startOfDay();
         $end = isset($data['endsOn']) ? Carbon::parse((string) $data['endsOn'])->startOfDay() : Carbon::parse((string) ($row->ends_on ?: $row->starts_on))->startOfDay();
         abort_if($end->lt($start), 422, 'The plan end date is before the start date.');
@@ -372,6 +391,7 @@ class CorporatePlanService
         }
         DB::table('corporate_travel_bookings')->where('id', $row->id)->update($this->only('corporate_travel_bookings', [
             'pickup_time' => $time,
+            'return_time' => $return,
             'starts_on' => $start->toDateString(),
             'ends_on' => $end->toDateString(),
             'travel_date' => $start->toDateString(),
@@ -380,7 +400,10 @@ class CorporatePlanService
         ]));
         $fresh = $this->row((int) $row->id);
         $this->syncTrips($fresh);
-        $this->push([(int) $fresh->customer_id, (int) ($fresh->driver_user_id ?? 0)], 'Corporate timetable updated', $fresh->public_ref.' now picks up at '.$fresh->pickup_time.' from '.$fresh->starts_on.' to '.$fresh->ends_on.'.', 'corporate_timetable');
+        $times = $this->kindOf($fresh) === 'ROUND_WAY' && ! empty($fresh->return_time)
+            ? 'pickup '.$fresh->pickup_time.' and drop '.$fresh->return_time
+            : 'pickup '.$fresh->pickup_time;
+        $this->push([(int) $fresh->customer_id, (int) ($fresh->driver_user_id ?? 0)], 'Corporate timetable updated', $fresh->public_ref.' now runs daily '.$times.' from '.$fresh->starts_on.' to '.$fresh->ends_on.'.', 'corporate_timetable');
 
         return $this->present($fresh);
     }
@@ -415,6 +438,7 @@ class CorporatePlanService
             'pickupText' => $row->pickup_text,
             'dropText' => $row->drop_text,
             'pickupTime' => substr((string) $row->pickup_time, 0, 5),
+            'returnTime' => $row->return_time ? substr((string) $row->return_time, 0, 5) : null,
             'travelDate' => $start->toDateString(),
             'passengers' => $row->passengers,
             'stops' => $this->stops($row),
@@ -631,19 +655,28 @@ class CorporatePlanService
         $today = Carbon::now('Asia/Kolkata')->toDateString();
         $nowMinutes = ((int) Carbon::now('Asia/Kolkata')->format('H')) * 60 + (int) Carbon::now('Asia/Kolkata')->format('i');
         $sent = 0;
-        $trips = DB::table('corporate_daily_trips')->where('trip_date', $today)->where('status', 'scheduled')->whereNull('reminded_at')->limit(200)->get();
+        $trips = DB::table('corporate_daily_trips')->where('trip_date', $today)->whereNotIn('status', ['completed', 'skipped'])->limit(200)->get();
         foreach ($trips as $trip) {
             $plan = DB::table('corporate_travel_bookings')->where('id', $trip->corporate_booking_id)->first();
-            if (! $plan || ! in_array((string) $plan->status, ['ASSIGNED', 'LIVE'], true)) {
+            if (! $plan || ! in_array((string) $plan->status, ['ASSIGNED', 'LIVE'], true) || ! $plan->driver_user_id) {
                 continue;
             }
-            $at = $this->minutes(substr((string) $trip->pickup_time, 0, 5));
-            if ($at - $nowMinutes > 60 || $at - $nowMinutes < 0) {
-                continue;
+            $pickupAt = $this->minutes(substr((string) $trip->pickup_time, 0, 5));
+            $untilPickup = $pickupAt - $nowMinutes;
+            if ($trip->reminded_at === null && $untilPickup <= 60 && $untilPickup >= -20 && (string) $trip->phase === 'idle') {
+                DB::table('corporate_daily_trips')->where('id', $trip->id)->update(['reminded_at' => now(), 'updated_at' => now()]);
+                $this->push([(int) $plan->driver_user_id, (int) $plan->customer_id], 'Corporate pickup today', 'Pick up at '.substr((string) $trip->pickup_time, 0, 5).' · '.$plan->pickup_text.' · '.$plan->public_ref.'.', 'corporate_pickup_alert');
+                $sent++;
             }
-            DB::table('corporate_daily_trips')->where('id', $trip->id)->update(['reminded_at' => now(), 'updated_at' => now()]);
-            $this->push([(int) $plan->customer_id, (int) ($plan->driver_user_id ?? 0)], 'Corporate pickup soon', 'Pickup at '.$trip->pickup_time.' for '.$plan->public_ref.'.', 'corporate_reminder');
-            $sent++;
+            $returnClock = substr((string) ($trip->return_time ?: $plan->return_time ?: ''), 0, 5);
+            if ($this->kindOf($plan) === 'ROUND_WAY' && $returnClock !== '' && $trip->return_reminded_at === null && (string) $trip->phase !== 'completed') {
+                $untilDrop = $this->minutes($returnClock) - $nowMinutes;
+                if ($untilDrop <= 60 && $untilDrop >= -20) {
+                    DB::table('corporate_daily_trips')->where('id', $trip->id)->update(['return_reminded_at' => now(), 'updated_at' => now()]);
+                    $this->push([(int) $plan->driver_user_id, (int) $plan->customer_id], 'Corporate drop today', 'Drop at '.$returnClock.' · '.($plan->drop_text ?: 'Drop').' · '.$plan->public_ref.'.', 'corporate_drop_alert');
+                    $sent++;
+                }
+            }
         }
         $soon = Carbon::now('Asia/Kolkata')->addDays(3)->toDateString();
         $expiring = DB::table('corporate_travel_bookings')
@@ -912,6 +945,7 @@ class CorporatePlanService
             if ((string) $trip->status === 'scheduled' && (string) $trip->phase === 'idle') {
                 DB::table('corporate_daily_trips')->where('id', $trip->id)->update([
                     'pickup_time' => substr((string) $plan->pickup_time, 0, 5),
+                    'return_time' => $plan->return_time ? substr((string) $plan->return_time, 0, 5) : null,
                     'driver_id' => $plan->driver_id,
                     'updated_at' => now(),
                 ]);
@@ -925,6 +959,7 @@ class CorporatePlanService
                 'corporate_booking_id' => $plan->id,
                 'trip_date' => $date,
                 'pickup_time' => substr((string) $plan->pickup_time, 0, 5),
+                'return_time' => $plan->return_time ? substr((string) $plan->return_time, 0, 5) : null,
                 'status' => 'scheduled',
                 'phase' => 'idle',
                 'driver_id' => $plan->driver_id,
@@ -1030,6 +1065,7 @@ class CorporatePlanService
             'expired' => $expired,
             'expiringSoon' => ! $expired && $daysLeft <= 3 && in_array($status, ['ASSIGNED', 'LIVE', 'PAID_100', 'APPROVED_10'], true),
             'pickupTime' => substr((string) $row->pickup_time, 0, 5),
+            'returnTime' => $row->return_time ? substr((string) $row->return_time, 0, 5) : null,
             'scheduledAt' => ($todayTrip ? $todayTrip->trip_date : $row->starts_on).'T'.substr((string) $row->pickup_time, 0, 5).':00+05:30',
             'needsPlanPay10' => $status === 'APPROVED',
             'needsPlanPay90' => $status === 'APPROVED_10',
@@ -1136,6 +1172,8 @@ class CorporatePlanService
             'stopIndex' => (int) $trip->stop_index,
             'eventDate' => (string) $trip->trip_date,
             'eventTime' => substr((string) $trip->pickup_time, 0, 5),
+            'returnTime' => ($trip->return_time ?? $plan->return_time) ? substr((string) ($trip->return_time ?: $plan->return_time), 0, 5) : null,
+            'dayAlerts' => $this->dayAlerts($trip, $plan),
             'scheduledAt' => $trip->trip_date.'T'.substr((string) $trip->pickup_time, 0, 5).':00+05:30',
             'customerPhone' => $plan->contact_phone,
             'customerName' => $plan->contact_name,
@@ -1173,6 +1211,38 @@ class CorporatePlanService
         }
 
         return ['label' => (string) ($plan->drop_text ?: 'Drop'), 'lat' => $plan->drop_lat !== null ? (float) $plan->drop_lat : null, 'lng' => $plan->drop_lng !== null ? (float) $plan->drop_lng : null];
+    }
+
+    /**
+     * Same-day alerts. A round trip has a pickup alert and a drop alert.
+     *
+     * @return list<array{kind: string, title: string, time: string, place: string}>
+     */
+    private function dayAlerts(object $trip, object $plan): array
+    {
+        if ((string) $trip->trip_date !== Carbon::now('Asia/Kolkata')->toDateString()) {
+            return [];
+        }
+        if (in_array((string) $trip->status, ['completed', 'skipped'], true)) {
+            return [];
+        }
+        $alerts = [[
+            'kind' => 'pickup',
+            'title' => 'Pickup today',
+            'time' => substr((string) $trip->pickup_time, 0, 5),
+            'place' => (string) $plan->pickup_text,
+        ]];
+        $drop = substr((string) ($trip->return_time ?: $plan->return_time ?: ''), 0, 5);
+        if ($this->kindOf($plan) === 'ROUND_WAY' && $drop !== '') {
+            $alerts[] = [
+                'kind' => 'drop',
+                'title' => 'Drop today',
+                'time' => $drop,
+                'place' => (string) ($plan->drop_text ?: 'Drop'),
+            ];
+        }
+
+        return $alerts;
     }
 
     private function driverFocusTrip(object $plan): ?object
