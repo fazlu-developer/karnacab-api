@@ -210,7 +210,7 @@ class DriverOpsService
                             return false;
                         }
                         $vehicleCat = strtoupper((string) ($driver?->vehicles?->first()?->category ?? ''));
-                        if ($vehicleCat !== '' && ! \App\Support\VehicleCategory::sameFamily($vehicleCat, (string) ($row->category ?? ''))) {
+                        if ($vehicleCat !== '' && ! \App\Support\VehicleCategory::parcelCompatible($vehicleCat, (string) ($row->category ?? ''))) {
                             return false;
                         }
                         if ($driver && Schema::hasColumn('parcel_shipments', 'pickup_lat') && $row->pickup_lat && $lat !== null) {

@@ -49,7 +49,7 @@ class NearbyDriverService
             })
             ->where(function ($q) use ($category, $product) {
                 $family = strtoupper((string) $product) === 'PARCEL'
-                    ? \App\Support\VehicleCategory::parcelSearchFamily((string) $category)
+                    ? \App\Support\VehicleCategory::parcelOfferFamily((string) $category)
                     : \App\Support\VehicleCategory::family((string) $category);
                 $q->whereIn('v.category', $family);
                 foreach ($family as $item) {
@@ -179,7 +179,7 @@ class NearbyDriverService
                 $reason = 'kyc_'.$kyc;
             } elseif (! $row->vehicle_id) {
                 $reason = 'no_vehicle';
-            } elseif ($vehicle === '' || ! \App\Support\VehicleCategory::parcelCompatible($wanted, $vehicle)) {
+            } elseif ($vehicle === '' || ! \App\Support\VehicleCategory::parcelCompatible($vehicle, $wanted)) {
                 $reason = 'vehicle_'.$vehicle;
             } elseif ($row->location_updated_at && \Illuminate\Support\Carbon::parse($row->location_updated_at)->lt($staleAfter)) {
                 $reason = 'stale_location';

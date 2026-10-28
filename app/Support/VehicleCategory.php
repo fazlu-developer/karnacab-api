@@ -70,9 +70,29 @@ class VehicleCategory
         return array_values(array_unique([...$family, ...$goods]));
     }
 
+    /**
+     * Vehicles that may take this parcel. A car parcel reaches sedan, mini, and SUV drivers.
+     *
+     * @return list<string>
+     */
+    public static function parcelOfferFamily(string $bookingCategory): array
+    {
+        $cars = ['SEDAN', 'MINI', 'SUV', 'CAR', 'CAB', 'HATCHBACK', 'PREMIUM'];
+        $upper = strtoupper(trim($bookingCategory));
+        $canonical = self::canonical($bookingCategory);
+        if (in_array($canonical, ['SEDAN', 'SUV'], true) || in_array($upper, $cars, true)) {
+            return array_values(array_unique([...self::family('SEDAN'), ...self::family('SUV')]));
+        }
+
+        return self::parcelSearchFamily($bookingCategory);
+    }
+
     public static function parcelCompatible(string $driverCategory, string $bookingCategory): bool
     {
-        return self::sameFamily($driverCategory, $bookingCategory)
-            || in_array(strtoupper(trim($bookingCategory)), self::parcelSearchFamily($driverCategory), true);
+        $driver = strtoupper(trim($driverCategory));
+        $offered = self::parcelOfferFamily($bookingCategory);
+
+        return in_array($driver, $offered, true)
+            || in_array(self::canonical($driverCategory), $offered, true);
     }
 }
