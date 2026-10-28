@@ -62,6 +62,10 @@ class VehicleCatalogService
         $assigned = $this->assignedKeysForProduct($product);
         $all = $this->rideTypes();
         if ($assigned === []) {
+            if (in_array($product, ['BULK', 'CORPORATE', 'TRAVEL'], true)) {
+                return array_values(array_filter($all, fn ($row) => in_array($row['key'], ['SEDAN', 'SUV', 'TRAVELLER', 'TEMPO'], true)));
+            }
+
             return $all;
         }
         $want = array_fill_keys($assigned, true);

@@ -1196,7 +1196,7 @@ class AppSurfaceService
                 $events = $decoded;
             }
         }
-        $advance = 10;
+        $advance = \App\Support\AdvancePayment::percent('BULK');
         $options = [];
         foreach ($this->bulkVehicleMeta() as $meta) {
             $unit = $this->bulkUnitQuote($meta['key'], [
@@ -1211,7 +1211,7 @@ class AppSurfaceService
 
         return [
             'events' => $events,
-            'vehicles' => array_column($options, 'key') ?: ['SEDAN', 'SUV', 'TRAVELLER'],
+            'vehicles' => array_column($options, 'key') ?: array_column($this->bulkVehicleMeta(), 'key'),
             'options' => $options,
             'advancePercent' => $advance,
             'tracking' => ['Request', 'Quotation', 'Accepted', 'Advance', 'Assignment', 'Trip', 'Final Invoice'],
@@ -1269,7 +1269,7 @@ class AppSurfaceService
             $options[] = array_merge($meta, $unit);
         }
         $total = $base + $allow + $gst;
-        $advance = 10;
+        $advance = \App\Support\AdvancePayment::percent('BULK');
         $waitingRate = 0;
         if ($this->bulkTripKind($data) === 'ROUND_WAY' && $quoted !== []) {
             $waitingRate = (int) ($quoted[0]['waitingPaisePerMin'] ?? 0);
@@ -1629,12 +1629,24 @@ class AppSurfaceService
      */
     private function bulkVehicleMeta(): array
     {
-        return [
+        $fallback = [
             ['key' => 'SEDAN', 'label' => 'Sedan', 'seats' => 4, 'blurb' => 'AC, Comfortable', 'tag' => 'Best for small groups'],
             ['key' => 'SUV', 'label' => 'SUV', 'seats' => 6, 'blurb' => 'AC, Spacious', 'tag' => 'Best for family & team'],
             ['key' => 'TRAVELLER', 'label' => 'Traveller (12 Seater)', 'seats' => 12, 'blurb' => 'AC, Push Back Seats', 'tag' => 'Best for large groups'],
             ['key' => 'TEMPO', 'label' => 'Tempo Traveller (17 Seater)', 'seats' => 17, 'blurb' => 'AC, Comfortable', 'tag' => 'Best for big groups'],
         ];
+        $assigned = app(\App\Services\VehicleCatalogService::class)->typesForProduct('BULK');
+        if ($assigned === []) {
+            return $fallback;
+        }
+
+        return array_map(fn ($row) => [
+            'key' => $row['key'],
+            'label' => $row['label'],
+            'seats' => $row['seats'] ?? 4,
+            'blurb' => $row['blurb'] ?? '',
+            'tag' => $row['blurb'] ?? '',
+        ], $assigned);
     }
 
     /**

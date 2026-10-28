@@ -37,7 +37,7 @@ class CorporatePlanService
             $daily = intdiv($total, $days);
         }
         abort_if($total < 1, 422, 'No fare is published for this corporate plan.');
-        $pay10 = (int) round($total * 0.10);
+        $pay10 = \App\Support\AdvancePayment::paise($total, 'CORPORATE');
         $pay90 = $total - $pay10;
         $percent = $this->commissionPercent();
         $commission = (int) round($total * $percent / 100);
@@ -230,7 +230,7 @@ class CorporatePlanService
             'updated_at' => now(),
         ]));
         $fresh = $this->row($id);
-        $this->push([(int) $fresh->customer_id], 'Corporate plan approved', 'Pay 10% of '.$fresh->public_ref.' to continue. The plan is not live until you pay.', 'corporate_approved');
+        $this->push([(int) $fresh->customer_id], 'Corporate plan approved', 'Pay '.\App\Support\AdvancePayment::percent('CORPORATE').'% of '.$fresh->public_ref.' to continue. The plan is not live until you pay.', 'corporate_approved');
 
         return $this->present($fresh);
     }
@@ -695,7 +695,7 @@ class CorporatePlanService
         if (in_array((string) $row->status, $already, true)) {
             return $this->present($row, $actor);
         }
-        abort_unless((string) $row->status === $expected, 422, $stage === '90' ? 'Pay the remaining 90% after the 10% is in.' : 'The 10% is due after admin approves the plan.');
+        abort_unless((string) $row->status === $expected, 422, $stage === '90' ? 'Pay the remaining balance after the '.\App\Support\AdvancePayment::percent('CORPORATE').'% is in.' : 'The '.\App\Support\AdvancePayment::percent('CORPORATE').'% is due after admin approves the plan.');
         $amount = $stage === '90' ? (int) $row->pay90_paise : (int) $row->pay10_paise;
         if (str_contains($method, 'WALLET')) {
             $fresh = $this->settleStage($row, $stage, 'WALLET', 'CORP'.$row->id.'-PAY'.$stage, $amount, $actor);
@@ -743,7 +743,7 @@ class CorporatePlanService
                 $this->push([(int) $fresh->customer_id], 'Corporate plan paid', 'Invoice '.$fresh->invoice_no.' for '.$fresh->public_ref.'. KarnaRide has the full plan amount.', 'corporate_paid');
                 $this->notifyOpsAndHeads($fresh, 'Corporate plan paid in full', 'Assign one driver for '.$fresh->public_ref.'.', 'corporate_paid');
             } else {
-                $this->push([(int) $fresh->customer_id], '10% received', 'Pay the remaining 90% of '.$fresh->public_ref.'.', 'corporate_pay10');
+                $this->push([(int) $fresh->customer_id], \App\Support\AdvancePayment::percent('CORPORATE').'% received', 'Pay the remaining balance of '.$fresh->public_ref.'.', 'corporate_pay10');
             }
 
             return $fresh;
@@ -1519,7 +1519,7 @@ class CorporatePlanService
 
         return match ($status) {
             'REQUESTED' => 'Waiting for approval',
-            'APPROVED' => 'Pay 10%',
+            'APPROVED' => 'Pay '.\App\Support\AdvancePayment::percent('CORPORATE').'%',
             'APPROVED_10' => 'Pay remaining 90%',
             'PAID_100' => 'Paid in full',
             'ASSIGNED' => 'Driver assigned',

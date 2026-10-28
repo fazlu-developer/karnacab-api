@@ -7,6 +7,7 @@ use App\Services\FcmPushService;
 use App\Services\PayUService;
 use App\Services\WalletAccountService;
 use App\Support\TourBookingSchema;
+use App\Support\AdvancePayment;
 use App\Support\TourMoney;
 use App\Support\TravelPackageSchema;
 use Illuminate\Support\Facades\DB;
@@ -74,7 +75,7 @@ class TourBookingService
         $method = strtoupper((string) ($data['method'] ?? $data['paymentMethod'] ?? 'ONLINE'));
         abort_if(str_contains($method, 'CASH'), 422, 'Cash is not accepted for the tour advance. Pay online or with wallet.');
         abort_unless($row->status === 'APPROVED_UNPAID', 422, $this->payBlockReason((string) $row->status));
-        $split = TourMoney::split((int) $row->quote_paise);
+        $split = $this->money((int) $row->quote_paise);
         if (str_contains($method, 'WALLET')) {
             $fresh = $this->settleAdvance($row, 'WALLET', 'TOUR'.$row->id.'-CUSTOMER', $actor);
 
@@ -102,7 +103,7 @@ class TourBookingService
         if ((string) $row->status !== 'APPROVED_UNPAID') {
             return;
         }
-        $split = TourMoney::split((int) $row->quote_paise);
+        $split = $this->money((int) $row->quote_paise);
         abort_unless($amountPaise === $split['advancePaise'], 422, 'Tour advance amount does not match 30% of the package.');
         $actor = User::query()->find($userId);
         abort_unless($actor, 404);
@@ -136,7 +137,11 @@ class TourBookingService
             'approved_at' => now(),
             'updated_at' => now(),
         ]));
-        $this->writeInvoice($this->row($id), $invoice);
+        try {
+            $this->writeInvoice($this->row($id), $invoice);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('tour.approve_invoice_failed', ['id' => $id, 'error' => $e->getMessage()]);
+        }
         $fresh = $this->row($id);
         if ($fresh->customer_id) {
             $this->push([(int) $fresh->customer_id], 'Tour approved', 'Pay the 30% advance to confirm your seat on '.$fresh->public_ref.'.', 'tour_approved');
@@ -176,7 +181,7 @@ class TourBookingService
             abort_unless($driver, 422, 'Choose a driver from the list.');
             $userId = (int) ($driver->user_id ?? 0);
             abort_if($userId < 1, 422, 'That driver has no login.');
-            $split = TourMoney::split((int) $row->quote_paise);
+            $split = $this->money((int) $row->quote_paise);
             $this->releaseDriverAdvance($userId, (int) $row->id, $split);
             $otp = (string) random_int(1000, 9999);
             DB::table('travel_bookings')->where('id', $id)->update($this->only('travel_bookings', [
@@ -220,7 +225,7 @@ class TourBookingService
         abort_unless($row->status === 'ON_TOUR', 422, 'Start the tour before completing it.');
         $collected = filter_var($data['collected'] ?? $data['paymentCollected'] ?? false, FILTER_VALIDATE_BOOLEAN);
         abort_unless($collected, 422, 'Confirm that the remaining 70% was collected.');
-        $split = TourMoney::split((int) $row->quote_paise);
+        $split = $this->money((int) $row->quote_paise);
         DB::transaction(function () use ($row, $split, $actor) {
             $locked = DB::table('travel_bookings')->where('id', $row->id)->lockForUpdate()->first();
             abort_unless($locked && $locked->status === 'ON_TOUR', 422, 'This tour is already finished.');
@@ -311,7 +316,7 @@ class TourBookingService
         return DB::transaction(function () use ($row, $method, $paymentRef, $actor) {
             $locked = DB::table('travel_bookings')->where('id', $row->id)->lockForUpdate()->first();
             abort_unless($locked && $locked->status === 'APPROVED_UNPAID', 422, 'This tour is not waiting for the 30% advance.');
-            $split = TourMoney::split((int) $locked->quote_paise);
+            $split = $this->money((int) $locked->quote_paise);
             if ($method === 'WALLET') {
                 $this->debitCustomer((int) $actor->id, (int) $locked->id, $split['advancePaise'], $paymentRef);
             }
@@ -494,24 +499,38 @@ class TourBookingService
         if (DB::table('invoices')->where('public_ref', $invoiceNo)->exists()) {
             return;
         }
-        DB::table('invoices')->insert($this->only('invoices', [
+        $payload = [
             'public_ref' => $invoiceNo,
             'customer_id' => $row->customer_id,
             'kind' => 'tour',
             'product' => 'TRAVEL',
             'status' => 'issued',
+            'subtotal_paise' => (int) $row->quote_paise,
+            'tax_paise' => 0,
             'total_paise' => (int) $row->quote_paise,
+            'paid_paise' => 0,
+            'refunded_paise' => 0,
             'currency' => 'INR',
             'issued_at' => now(),
             'created_at' => now(),
             'updated_at' => now(),
-        ]));
+        ];
+        if (Schema::hasColumn('invoices', 'booking_id')) {
+            $nullable = true;
+            try {
+                $col = DB::selectOne("SHOW COLUMNS FROM invoices LIKE 'booking_id'");
+                $nullable = strtoupper((string) ($col->Null ?? 'YES')) !== 'NO';
+            } catch (\Throwable) {
+            }
+            $payload['booking_id'] = $nullable ? null : 0;
+        }
+        DB::table('invoices')->insert($this->only('invoices', $payload));
     }
 
     private function present(object $row, ?object $pkg = null, ?User $viewer = null): array
     {
         $pkg = $pkg ?: (Schema::hasTable('travel_packages') ? DB::table('travel_packages')->where('id', $row->package_id)->first() : null);
-        $split = TourMoney::split((int) ($row->quote_paise ?? 0));
+        $split = $this->money((int) ($row->quote_paise ?? 0));
         $status = (string) ($row->status ?? 'REQUESTED');
         $passengers = $this->decodePassengers($row->passengers ?? null);
         $ticketReady = ! in_array($status, ['REQUESTED', 'REJECTED', 'CANCELLED'], true);
@@ -579,6 +598,7 @@ class TourBookingService
                 'driverAdvancePaise' => $split['driverAdvancePaise'],
                 'balancePaise' => $split['balancePaise'],
                 'balanceRupees' => $split['balancePaise'] / 100,
+                'advancePercent' => $split['advancePercent'] ?? AdvancePayment::percent('TRAVEL'),
                 'currency' => 'INR',
             ],
             'quotePaise' => $split['totalPaise'],
@@ -625,7 +645,7 @@ class TourBookingService
      */
     private function invoiceMap(object $row, ?array $split = null): array
     {
-        $split = $split ?: TourMoney::split((int) ($row->quote_paise ?? 0));
+        $split = $split ?: $this->money((int) ($row->quote_paise ?? 0));
         $paid = (int) ($row->advance_paid_paise ?? 0);
 
         return [
@@ -851,6 +871,14 @@ class TourBookingService
         }
         $ids = DB::table('users')->whereIn('role', ['ADMIN', 'SUPER_ADMIN'])->orderBy('id')->limit(20)->pluck('id')->map(fn ($id) => (int) $id)->all();
         $this->push($ids, $title, $body, $event);
+    }
+
+    /**
+     * @return array{totalPaise: int, advancePaise: int, advancePercent: int, platformCommissionPaise: int, driverAdvancePaise: int, balancePaise: int}
+     */
+    private function money(int $totalPaise): array
+    {
+        return TourMoney::split($totalPaise, AdvancePayment::percent('TRAVEL'));
     }
 
     private function boot(): void

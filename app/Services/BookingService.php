@@ -176,8 +176,7 @@ class BookingService
             $quote['oneWayMode'] = $oneWayFuture ? 'schedule' : 'now';
             $quote['prebook'] = $oneWayFuture;
             $quote['advanceAfterAccept'] = $oneWayFuture;
-            $quote['advancePercent'] = $oneWayFuture ? 10 : 0;
-            $quote['advancePaise'] = $oneWayFuture ? (int) round($oneWayPaise * 0.10) : 0;
+            $this->stampAdvance($quote, 'ONE_WAY', $oneWayFuture);
             $quote['commissionSettled'] = false;
         }
         if ($product === 'AIRPORT') {
@@ -206,8 +205,7 @@ class BookingService
             $quote['flightNo'] = trim((string) ($dto['flightNumber'] ?? $dto['flightNo'] ?? ''));
             $quote['prebook'] = $airportFuture;
             $quote['advanceAfterAccept'] = $airportFuture;
-            $quote['advancePercent'] = $airportFuture ? 10 : 0;
-            $quote['advancePaise'] = $airportFuture ? (int) round($airportPaise * 0.10) : 0;
+            $this->stampAdvance($quote, 'AIRPORT', $airportFuture);
             $quote['commissionSettled'] = false;
         }
         if ($product === 'RAILWAY') {
@@ -236,8 +234,7 @@ class BookingService
             $quote['trainName'] = trim((string) ($dto['trainName'] ?? ''));
             $quote['prebook'] = $railwayFuture;
             $quote['advanceAfterAccept'] = $railwayFuture;
-            $quote['advancePercent'] = $railwayFuture ? 10 : 0;
-            $quote['advancePaise'] = $railwayFuture ? (int) round($railwayPaise * 0.10) : 0;
+            $this->stampAdvance($quote, 'RAILWAY', $railwayFuture);
             $quote['commissionSettled'] = false;
         }
         if ($product === 'ROUND_WAY') {
@@ -260,8 +257,7 @@ class BookingService
             $quote['waitingChargePaise'] = 0;
             $quote['prebook'] = $roundFuture;
             $quote['advanceAfterAccept'] = $roundFuture;
-            $quote['advancePercent'] = $roundFuture ? 10 : 0;
-            $quote['advancePaise'] = $roundFuture ? (int) round($roundPaise * 0.10) : 0;
+            $this->stampAdvance($quote, 'ROUND_WAY', $roundFuture);
             $quote['commissionSettled'] = false;
         }
         if ($product === 'PARCEL') {
@@ -370,8 +366,7 @@ class BookingService
             $quote['routePolyline'] = $route['polyline'] ?? ($resolved['polyline'] ?? null);
             $quote['prebook'] = $multiFuture;
             $quote['advanceAfterAccept'] = $multiFuture;
-            $quote['advancePercent'] = $multiFuture ? 10 : 0;
-            $quote['advancePaise'] = $multiFuture ? (int) round($multiPaise * 0.10) : 0;
+            $this->stampAdvance($quote, 'MULTI_STOP', $multiFuture);
             $quote['commissionSettled'] = false;
             $quote['roundTrip'] = false;
             $quote['waitMinutes'] = 0;
@@ -440,10 +435,8 @@ class BookingService
             $collectAdvance = false;
         }
         if ($collectAdvance) {
-            $totalPaise = (int) ($quote['totalPaise'] ?? 0);
             $quote['prebook'] = true;
-            $quote['advancePercent'] = 10;
-            $quote['advancePaise'] = (int) round($totalPaise * 0.10);
+            $this->stampAdvance($quote, $product, true);
             if ((int) $quote['advancePaise'] < 1) {
                 $collectAdvance = false;
                 $quote['prebook'] = false;
@@ -525,11 +518,9 @@ class BookingService
         $this->storeStops($booking, is_array($dto['stops'] ?? null) ? $dto['stops'] : []);
         $this->ensureParcelShipment($booking, $dto);
         if ($futureSchedule && \App\Support\AdvancePayment::enabled($product) && ! $this->isCityProduct($product)) {
-            $totalPaise = (int) ($quote['totalPaise'] ?? 0);
             $quote['prebook'] = true;
             $quote['advanceAfterAccept'] = true;
-            $quote['advancePercent'] = 10;
-            $quote['advancePaise'] = (int) round($totalPaise * 0.10);
+            $this->stampAdvance($quote, $product, true);
             $booking->update($this->filterColumns([
                 'quote_snapshot' => array_merge(is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [], $quote),
             ]));
@@ -3090,6 +3081,17 @@ class BookingService
         ], true);
     }
 
+    /**
+     * @param  array<string, mixed>  $quote
+     */
+    private function stampAdvance(array &$quote, string $product, bool $on): void
+    {
+        $pct = $on ? \App\Support\AdvancePayment::percent($product) : 0;
+        $total = (int) ($quote['totalPaise'] ?? 0);
+        $quote['advancePercent'] = $pct;
+        $quote['advancePaise'] = $pct > 0 ? (int) round($total * $pct / 100) : 0;
+    }
+
     private function isCityProduct(string $product): bool
     {
         return in_array(strtoupper($product), ['LOCAL_CAB', 'CITY_RIDE', 'CITY'], true);
@@ -3655,9 +3657,9 @@ class BookingService
         if (empty($snapshot['advanceAfterAccept']) && $future && \App\Support\AdvancePayment::payAfterCompleteUnlessScheduled($product)) {
             $snapshot['advanceAfterAccept'] = true;
             $snapshot['prebook'] = true;
-            $snapshot['advancePercent'] = 10;
+            $snapshot['advancePercent'] = \App\Support\AdvancePayment::percent($product);
             if ((int) ($snapshot['advancePaise'] ?? 0) < 1) {
-                $snapshot['advancePaise'] = (int) round(((int) ($booking->quote_paise ?? 0)) * 0.10);
+                $snapshot['advancePaise'] = \App\Support\AdvancePayment::paise((int) ($booking->quote_paise ?? 0), $product);
             }
         }
         abort_unless(! empty($snapshot['advanceAfterAccept']), 422, 'This booking does not need an advance.');

@@ -69,6 +69,8 @@ final class BulkSchema
             'reject_reason' => fn (Blueprint $t) => $t->string('reject_reason', 240)->nullable(),
             'confirmed_at' => fn (Blueprint $t) => $t->timestamp('confirmed_at')->nullable(),
             'assigned_at' => fn (Blueprint $t) => $t->timestamp('assigned_at')->nullable(),
+            'customer_stars' => fn (Blueprint $t) => $t->unsignedTinyInteger('customer_stars')->nullable(),
+            'customer_comment' => fn (Blueprint $t) => $t->string('customer_comment', 240)->nullable(),
         ];
         foreach ($cols as $name => $define) {
             if (! Schema::hasColumn('bulk_bookings', $name)) {

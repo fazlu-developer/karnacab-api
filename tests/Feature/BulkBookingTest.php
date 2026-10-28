@@ -99,10 +99,10 @@ class BulkBookingTest extends TestCase
         $this->assertSame('activated', $live['phase']);
         $track = $this->bulk->track($customer, (string) $id);
         $visible = array_values(array_filter($track['cars'], fn ($car) => $car['showOnMap'] === true));
-        $this->assertCount(1, $visible);
+        $this->assertCount(5, $visible);
         $this->assertSame('SEDAN', $visible[0]['category']);
         $hidden = array_values(array_filter($track['cars'], fn ($car) => $car['showOnMap'] !== true));
-        $this->assertCount(4, $hidden);
+        $this->assertCount(0, $hidden);
 
         $this->bulk->depart($drivers[0]['user'], $cabId);
         $done = $this->bulk->completeCab($drivers[0]['user'], $cabId, ['collected' => true]);

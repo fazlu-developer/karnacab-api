@@ -42,7 +42,7 @@ class BulkBookingService
         }
         $total = (int) ($quote['totalPaise'] ?? 0);
         abort_if($total < 1, 422, 'No fare is published for this bulk trip.');
-        $advance = (int) round($total * 0.10);
+        $advance = \App\Support\AdvancePayment::paise($total, 'BULK');
         $this->splitCommission($cabs, $advance, $total);
         $ref = 'BLK'.random_int(1000000, 9999999);
         $id = DB::transaction(function () use ($actor, $data, $quote, $cabs, $stops, $kind, $when, $passengers, $total, $advance, $ref, $pickupText) {
@@ -75,6 +75,7 @@ class BulkBookingService
                 'lines_json' => json_encode($quote['lines'] ?? []),
                 'quote_snapshot' => json_encode($quote),
                 'stops_json' => json_encode($stops),
+                'invoice_no' => 'BINV'.strtoupper(Str::random(8)),
                 'payment_method' => null,
                 'payment_status' => 'unpaid',
                 'contact_name' => $data['contactName'] ?? $actor->name,
@@ -137,7 +138,7 @@ class BulkBookingService
             'updated_at' => now(),
         ]));
         $fresh = $this->row($id);
-        $this->push([(int) $fresh->customer_id], 'Bulk booking confirmed', 'Pay the 10% advance on '.$fresh->public_ref.' so drivers can be assigned.', 'bulk_confirmed');
+        $this->push([(int) $fresh->customer_id], 'Bulk booking confirmed', 'Pay the '.\App\Support\AdvancePayment::percent('BULK').'% advance on '.$fresh->public_ref.' so drivers can be assigned.', 'bulk_confirmed');
 
         return $this->present($fresh);
     }
@@ -412,6 +413,21 @@ class BulkBookingService
         }
 
         return $this->finishCab($cab, $parent, ! empty($data['collected']));
+    }
+
+    public function rate(User $actor, string $id, int $stars, string $comment = ''): array
+    {
+        $this->boot();
+        $row = $this->owned($actor, $id);
+        abort_unless((string) ($row->status ?? '') === 'COMPLETED', 422, 'Rate this bulk booking after every cab has finished.');
+        $stars = max(1, min(5, $stars));
+        DB::table('bulk_bookings')->where('id', $row->id)->update($this->only('bulk_bookings', [
+            'customer_stars' => $stars,
+            'customer_comment' => $comment !== '' ? $comment : null,
+            'updated_at' => now(),
+        ]));
+
+        return $this->present($this->row((int) $row->id), $actor) + ['ok' => true];
     }
 
     /**
@@ -773,15 +789,19 @@ class BulkBookingService
                 'totalRupees' => $grand / 100,
                 'advancePaise' => $advance,
                 'advanceRupees' => $advance / 100,
-                'advancePercent' => 10,
+                'advancePercent' => \App\Support\AdvancePayment::percent('BULK'),
                 'balancePaise' => max(0, $total - $advance) + $wait,
                 'balanceRupees' => (max(0, $total - $advance) + $wait) / 100,
                 'currency' => 'INR',
             ],
             'quotePaise' => $grand,
             'quoteRupees' => $grand / 100,
-            'invoice' => $row->invoice_no ? $this->invoiceMap($row, $quote, $grand, $wait) : null,
-            'allowedActions' => $this->actions($status, $showOtp, (bool) $row->invoice_no),
+            'invoice' => $this->invoiceMap($row, $quote, $grand, $wait),
+            'tickets' => $this->tickets($row, $cars, $showOtp),
+            'customerReview' => ((int) ($row->customer_stars ?? 0)) > 0
+                ? ['stars' => (int) $row->customer_stars, 'comment' => $row->customer_comment ?? '', 'fromRole' => 'CUSTOMER']
+                : null,
+            'allowedActions' => $this->actions($status, $showOtp, true),
         ];
     }
 
@@ -810,9 +830,13 @@ class BulkBookingService
     {
         $phase = (string) ($cab->phase ?? 'idle');
         $target = $this->target($cab, $parent, $stops);
-        $show = $phase !== 'idle' && $phase !== 'pending' && $cab->lat !== null && $cab->lng !== null;
+        $assigned = (int) ($cab->driver_id ?? 0) > 0;
+        $hasGps = $cab->lat !== null && $cab->lng !== null;
+        $lat = $hasGps ? (float) $cab->lat : ($assigned && $parent->pickup_lat !== null ? (float) $parent->pickup_lat : null);
+        $lng = $hasGps ? (float) $cab->lng : ($assigned && $parent->pickup_lng !== null ? (float) $parent->pickup_lng : null);
+        $show = $assigned && $lat !== null && $lng !== null && $phase !== 'completed';
         $eta = null;
-        if ($show && $target['lat'] !== null) {
+        if ($show && $hasGps && $target['lat'] !== null) {
             $km = Geo::haversineKm((float) $cab->lat, (float) $cab->lng, (float) $target['lat'], (float) $target['lng']);
             $eta = max(1, (int) round(($km / 25) * 60));
         }
@@ -829,8 +853,8 @@ class BulkBookingService
             'phase' => $phase,
             'statusLabel' => $phase === 'idle' ? 'Waiting to start' : ucfirst(str_replace('_', ' ', $phase)),
             'showOnMap' => $show,
-            'lat' => $show ? (float) $cab->lat : null,
-            'lng' => $show ? (float) $cab->lng : null,
+            'lat' => $show ? $lat : null,
+            'lng' => $show ? $lng : null,
             'stopIndex' => (int) ($cab->stop_index ?? 0),
             'waitMinutes' => (int) ($cab->wait_minutes ?? 0),
             'waitChargeRupees' => ((int) ($cab->wait_charge_paise ?? 0)) / 100,
@@ -906,6 +930,8 @@ class BulkBookingService
             'canActivate' => $phase === 'idle',
             'canCancel' => false,
             'collectRupees' => $due / 100,
+            'quoteRupees' => $due / 100,
+            'estimatedFareRupees' => $due / 100,
             'targetLabel' => $target['label'],
             'targetLat' => $target['lat'],
             'targetLng' => $target['lng'],
@@ -956,13 +982,42 @@ class BulkBookingService
     /**
      * @return list<string>
      */
+    /**
+     * @param  list<array<string, mixed>>  $cars
+     * @return list<array<string, mixed>>
+     */
+    private function tickets(object $row, array $cars, bool $showOtp): array
+    {
+        $otp = $showOtp ? ($row->start_otp ?? null) : null;
+        $out = [];
+        foreach ($cars as $car) {
+            $out[] = [
+                'cabNo' => $car['cabNo'] ?? null,
+                'category' => $car['category'] ?? $row->category,
+                'driverName' => $car['driverName'] ?? null,
+                'driverPhone' => $car['driverPhone'] ?? null,
+                'plate' => $car['plate'] ?? null,
+                'pickupText' => $row->pickup_text,
+                'dropText' => $row->drop_text,
+                'eventDate' => $row->event_date,
+                'eventTime' => $row->event_time,
+                'publicRef' => $row->public_ref,
+                'startOtp' => $otp,
+                'statusLabel' => $car['statusLabel'] ?? null,
+            ];
+        }
+
+        return $out;
+    }
+
     private function actions(string $status, bool $otp, bool $invoice): array
     {
         return array_values(array_filter([
             $status === 'CONFIRMED_UNPAID' ? 'pay' : null,
-            in_array($status, ['ASSIGNED', 'LIVE'], true) ? 'track' : null,
+            in_array($status, ['ASSIGNED', 'LIVE', 'COMPLETED'], true) ? 'track' : null,
             $otp ? 'otp' : null,
             $invoice ? 'invoice' : null,
+            in_array($status, ['ASSIGNED', 'LIVE', 'COMPLETED', 'ADVANCE_PAID']) ? 'ticket' : null,
             in_array($status, ['REQUESTED', 'CONFIRMED_UNPAID'], true) ? 'cancel' : null,
         ]));
     }
@@ -971,7 +1026,7 @@ class BulkBookingService
     {
         return match ($status) {
             'REQUESTED' => 'Requested / Waiting for admin',
-            'CONFIRMED_UNPAID' => 'Confirmed · pay 10%',
+            'CONFIRMED_UNPAID' => 'Confirmed · pay '.\App\Support\AdvancePayment::percent('BULK').'%',
             'ADVANCE_PAID' => $assigned < $n ? 'Assign remaining drivers' : 'Advance paid',
             'ASSIGNED' => 'Drivers assigned',
             'LIVE' => 'Live',

@@ -166,6 +166,7 @@ class FareService
             'schedule' => ['reminderMinutes' => 60],
             'advancePayment' => [
                 'percent' => 10,
+                'percents' => \App\Support\AdvancePayment::percentMap(),
                 'products' => \App\Support\AdvancePayment::enabledMap(),
             ],
             'transfer' => [

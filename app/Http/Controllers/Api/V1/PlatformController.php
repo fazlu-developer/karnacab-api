@@ -537,6 +537,15 @@ class PlatformController extends Controller
 
     public function bookingsRate(Request $request, string $id)
     {
+        if (str_starts_with(strtolower($id), 'bulk-') || str_starts_with(strtolower($id), 'blk')) {
+            return app(\App\Services\Bulk\BulkBookingService::class)->rate(
+                $request->user(),
+                $id,
+                (int) $request->input('stars', 5),
+                (string) ($request->input('comment') ?? ''),
+            );
+        }
+
         return $this->bookings->rate($request->user(), $id, (int) $request->input('stars', 5), (string) ($request->input('comment') ?? ''));
     }
 
@@ -1174,6 +1183,16 @@ HTML, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
     public function bulkCompleteCab(Request $request, string $cabId)
     {
         return app(\App\Services\Bulk\BulkBookingService::class)->completeCab($request->user(), $cabId, $request->all());
+    }
+
+    public function bulkRate(Request $request, string $id)
+    {
+        return app(\App\Services\Bulk\BulkBookingService::class)->rate(
+            $request->user(),
+            $id,
+            (int) $request->input('stars', 5),
+            (string) ($request->input('comment') ?? ''),
+        );
     }
 
     public function corporateCatalog()

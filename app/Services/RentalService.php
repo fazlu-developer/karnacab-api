@@ -59,8 +59,8 @@ class RentalService
         $quote['serviceType'] = 'Cab on rent';
         $quote['prebook'] = true;
         $quote['advanceAfterAccept'] = true;
-        $quote['advancePercent'] = 10;
-        $quote['advancePaise'] = (int) round($total * 0.10);
+        $quote['advancePercent'] = \App\Support\AdvancePayment::percent('RENTAL');
+        $quote['advancePaise'] = \App\Support\AdvancePayment::paise($total, 'RENTAL');
         $quote['commissionSettled'] = false;
         $quote['rentalModeLabel'] = $mode === 'DAY' ? 'By day' : 'By hour';
 

@@ -226,6 +226,7 @@ Route::middleware('jwt')->group(function () {
     Route::post('/v1/bulk/cabs/{cabId}/return', [PlatformController::class, 'bulkReturn']);
     Route::post('/v1/bulk/cabs/{cabId}/stop', [PlatformController::class, 'bulkStop']);
     Route::post('/v1/bulk/cabs/{cabId}/complete', [PlatformController::class, 'bulkCompleteCab']);
+    Route::post('/v1/bulk/{id}/rate', [PlatformController::class, 'bulkRate']);
     Route::post('/v1/corporate/quote', [PlatformController::class, 'corporateQuote']);
     Route::post('/v1/corporate/book', [PlatformController::class, 'corporateBook']);
     Route::get('/v1/corporate/bookings', [PlatformController::class, 'corporateList']);
