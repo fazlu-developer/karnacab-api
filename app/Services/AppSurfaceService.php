@@ -564,7 +564,9 @@ class AppSurfaceService
                 $q->where('placement', $placement);
             }
         }
-        $rows = $home ? $q->orderByDesc('id')->get() : $q->orderByDesc('id')->limit(20)->get();
+        $rows = $home
+            ? $q->orderByDesc('id')->limit(3)->get()->reverse()->values()
+            : $q->orderByDesc('id')->limit(20)->get();
 
         return [
             'placement' => $placement,

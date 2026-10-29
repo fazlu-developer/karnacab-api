@@ -67,7 +67,7 @@ class BookingService
         if ($this->isCityProduct($requestedProduct) && $distanceKm > 30) {
             abort(422, 'City ride is only for trips within 30 km. Book a one way ride for longer trips.');
         }
-        if (in_array($requestedProduct, ['ONE_WAY', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'AMBULANCE'], true)) {
+        if (in_array($requestedProduct, ['ONE_WAY', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'AMBULANCE', 'PARCEL'], true)) {
             $dto['product'] = $requestedProduct;
             $dto['lockProduct'] = true;
             if ($requestedProduct === 'AMBULANCE') {
@@ -4211,14 +4211,11 @@ class BookingService
                     $parcelOk = $parcelCats->contains(function (string $vehicleCat) use ($row) {
                         $wanted = (string) $row->category;
 
-                        return \App\Support\VehicleCategory::parcelCompatible($vehicleCat, $wanted)
-                            && \App\Support\VehicleCategory::sameKind($vehicleCat, $wanted);
+                        return \App\Support\VehicleCategory::parcelCompatible($vehicleCat, $wanted);
                     });
                     if (! $parcelOk) {
                         $reason = 'vehicle_family';
-                    } elseif ($driverLat === null || $row->pickup_lat === null) {
-                        $reason = 'driver_location_missing';
-                    } else {
+                    } elseif ($driverLat !== null && $row->pickup_lat !== null) {
                         $km = Geo::haversineKm($driverLat, $driverLng ?? 0, (float) $row->pickup_lat, (float) $row->pickup_lng);
                         if ($km > $radius) {
                             $reason = 'radius';

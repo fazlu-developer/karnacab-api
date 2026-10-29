@@ -216,8 +216,7 @@ class DriverOpsService
                             ->unique()
                             ->values();
                         $matched = $driverCategories->contains(function (string $vehicleCat) use ($wanted) {
-                            return \App\Support\VehicleCategory::parcelCompatible($vehicleCat, $wanted)
-                                && \App\Support\VehicleCategory::sameKind($vehicleCat, $wanted);
+                            return \App\Support\VehicleCategory::parcelCompatible($vehicleCat, $wanted);
                         });
                         if (! $matched) {
                             return false;
