@@ -10,7 +10,7 @@ return [
     'static_test_otp_enabled' => filter_var(env('STATIC_TEST_OTP_ENABLED', false), FILTER_VALIDATE_BOOL),
     'demo_otp_phones' => array_values(array_filter(array_map('trim', explode(',', (string) env(
         'DEMO_OTP_PHONES',
-        '7428059960,7428059961,7065876175,7065876176,8595238890,9560210876,9560210875',
+        '7428059960,7428059961,7065876175,7065876176,8595238890,9560210876,9560210875,9534343483,9296343483,9523707084,9204935020',
     ))))),
     'demo_otp_code' => (string) env('DEMO_OTP_CODE', '123456'),
     'fast2sms_api_key' => (string) env('FAST2SMS_API_KEY', ''),
