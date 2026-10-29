@@ -903,4 +903,41 @@ class TourBookingService
             ARRAY_FILTER_USE_KEY,
         );
     }
+
+    public function remindDue(): int
+    {
+        $this->boot();
+        if (! Schema::hasTable('travel_bookings') || ! Schema::hasColumn('travel_bookings', 'travel_date')) {
+            return 0;
+        }
+        if (! Schema::hasColumn('travel_bookings', 'pickup_reminded_at')) {
+            Schema::table('travel_bookings', fn ($table) => $table->timestamp('pickup_reminded_at')->nullable());
+        }
+        $now = \Carbon\Carbon::now('Asia/Kolkata');
+        $sent = 0;
+        $rows = DB::table('travel_bookings')
+            ->whereDate('travel_date', $now->toDateString())
+            ->whereNull('pickup_reminded_at')
+            ->where('status', 'ASSIGNED')
+            ->whereNotNull('driver_id')
+            ->limit(100)
+            ->get();
+        $nowMinutes = ((int) $now->format('H')) * 60 + (int) $now->format('i');
+        foreach ($rows as $row) {
+            $pickupAt = 9 * 60;
+            $until = $pickupAt - $nowMinutes;
+            if ($until > 60 || $until < -20) {
+                continue;
+            }
+            $userId = (int) (DB::table('drivers')->where('id', $row->driver_id)->value('user_id') ?? 0);
+            if ($userId < 1) {
+                continue;
+            }
+            DB::table('travel_bookings')->where('id', $row->id)->update(['pickup_reminded_at' => now(), 'updated_at' => now()]);
+            $this->push([$userId], 'Tour pickup soon', 'Pickup at 09:00 · '.($row->pickup_text ?? 'Pickup').' · '.$row->public_ref.'.', 'tour_pickup_alert');
+            $sent++;
+        }
+
+        return $sent;
+    }
 }

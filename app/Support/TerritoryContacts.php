@@ -68,8 +68,49 @@ final class TerritoryContacts
         return [
             'state' => $state,
             'district' => $district,
-            'stateHead' => self::operator('STATE_HEAD', 'state_id', $stateId),
-            'districtHead' => self::operator('DISTRICT_HEAD', 'district_id', $districtId),
+            'stateHead' => self::headInfo('STATE_HEAD', $stateId, null) ?? self::operator('STATE_HEAD', 'state_id', $stateId),
+            'districtHead' => self::headInfo('DISTRICT_HEAD', $stateId, $districtId) ?? self::operator('DISTRICT_HEAD', 'district_id', $districtId),
+        ];
+    }
+
+    /**
+     * Saved territory contact (head_info), including photo, phone, and address.
+     *
+     * @return array{name:string,phone:?string,email:?string,photoUrl:?string,address:?string,role:string}|null
+     */
+    private static function headInfo(string $role, int $stateId, ?int $districtId): ?array
+    {
+        if (! Schema::hasTable('head_info')) {
+            return null;
+        }
+        $q = DB::table('head_info')->where('role', $role);
+        if ($role === 'DISTRICT_HEAD') {
+            if (($districtId ?? 0) < 1) {
+                return null;
+            }
+            $q->where('district_id', $districtId);
+        } elseif ($stateId > 0) {
+            $q->where('state_id', $stateId);
+        } else {
+            return null;
+        }
+        $row = $q->orderByDesc('id')->first();
+        if (! $row) {
+            return null;
+        }
+        $name = '';
+        if (! empty($row->user_id) && Schema::hasTable('users')) {
+            $name = (string) (DB::table('users')->where('id', $row->user_id)->value('name') ?? '');
+        }
+        $phone = $row->connect_phone ?? $row->support_phone ?? null;
+
+        return [
+            'name' => $name !== '' ? $name : ($role === 'DISTRICT_HEAD' ? 'District Head' : 'State Head'),
+            'phone' => $phone ? (string) $phone : null,
+            'email' => isset($row->email) ? (string) $row->email : null,
+            'photoUrl' => PublicMedia::presentMediaUrl($row->photo_url ?? null, $row->updated_at ?? null),
+            'address' => isset($row->address) ? (string) $row->address : null,
+            'role' => $role,
         ];
     }
 

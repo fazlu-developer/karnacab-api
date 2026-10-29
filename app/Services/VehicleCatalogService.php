@@ -115,6 +115,9 @@ class VehicleCatalogService
                     ['key' => 'PICKUP', 'label' => 'Pickup'],
                     ['key' => 'VAN', 'label' => 'Van'],
                 ]],
+                ['key' => 'AMBULANCE', 'label' => 'Ambulance', 'categories' => [
+                    ['key' => 'AMBULANCE', 'label' => 'Ambulance'],
+                ]],
             ];
         }
 
@@ -145,6 +148,7 @@ class VehicleCatalogService
             'BIKE', 'SCOOTY' => 'BIKE',
             'AUTO', 'E_RICKSHAW' => 'AUTO',
             'TRUCK', 'VAN', 'PICKUP' => 'LOADING',
+            'AMBULANCE' => 'AMBULANCE',
             default => 'CAR',
         };
     }
@@ -349,6 +353,20 @@ class VehicleCatalogService
                 $table->string('family_image_url', 255)->nullable();
             });
         }
+        if (Schema::hasTable(self::TABLE) && ! DB::table(self::TABLE)->where('key', 'AMBULANCE')->exists()) {
+            $now = now();
+            DB::table(self::TABLE)->insert([
+                'family_key' => 'AMBULANCE',
+                'family_label' => 'Ambulance',
+                'key' => 'AMBULANCE',
+                'label' => 'Ambulance',
+                'seats' => 2,
+                'sort_order' => 100,
+                'active' => 1,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+        }
     }
 
     /**
@@ -391,6 +409,7 @@ class VehicleCatalogService
             'AUTO' => 'Auto',
             'CAR' => 'Car',
             'LOADING' => 'Loading',
+            'AMBULANCE' => 'Ambulance',
             default => $key,
         };
     }

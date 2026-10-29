@@ -113,6 +113,7 @@ Route::middleware('jwt')->group(function () {
     Route::post('/v1/bookings/{id}/return', [PlatformController::class, 'bookingsRentalReturn']);
     Route::post('/v1/bookings/{id}/start', [PlatformController::class, 'bookingsStart']);
     Route::post('/v1/bookings/{id}/complete', [PlatformController::class, 'bookingsComplete']);
+    Route::post('/v1/bookings/{id}/ambulance-fare', [PlatformController::class, 'bookingsAmbulanceFare']);
     Route::post('/v1/bookings/{id}/arrive', function (\Illuminate\Http\Request $request, string $id) {
         return app(\App\Services\BookingService::class)->lifecycle($request->user(), $id, 'arrive');
     });

@@ -30,7 +30,9 @@ Artisan::command('bookings:remind-upcoming', function () {
 
 Artisan::command('corporate:remind', function () {
     $count = app(\App\Services\Corporate\CorporatePlanService::class)->remindDue();
-    $this->info("Sent {$count} corporate reminder(s).");
+    $count += app(\App\Services\Bulk\BulkBookingService::class)->remindDue();
+    $count += app(\App\Services\Tour\TourBookingService::class)->remindDue();
+    $this->info("Sent {$count} corporate, bulk, and tour reminder(s).");
 })->purpose('Remind corporate daily pickups and mark expired plans');
 
 Schedule::command('bookings:expire-searching')->everyMinute();

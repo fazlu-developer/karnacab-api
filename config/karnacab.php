@@ -40,5 +40,6 @@ return [
         ['key' => 'SEDAN', 'label' => 'Sedan', 'seats' => 4],
         ['key' => 'SUV', 'label' => 'SUV', 'seats' => 6],
         ['key' => 'TRAVELLER', 'label' => 'Traveller', 'seats' => 12],
+        ['key' => 'AMBULANCE', 'label' => 'Ambulance', 'seats' => 2],
     ],
 ];

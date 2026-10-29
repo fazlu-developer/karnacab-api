@@ -377,7 +377,6 @@ class BookingService
         }
         if ($product === 'AMBULANCE') {
             $photo = trim((string) ($dto['patientPhotoUrl'] ?? $dto['patient_photo_url'] ?? ''));
-            abort_if($photo === '', 422, 'Upload a patient photo.');
             $quote = [
                 'product' => 'AMBULANCE',
                 'category' => 'AMBULANCE',
@@ -404,9 +403,7 @@ class BookingService
         if ($futureSchedule && ! $citySearch) {
             $timeout = max($timeout, $scheduledAt->getTimestamp() - now()->getTimestamp());
         }
-        $status = $product === 'AMBULANCE'
-            ? BookingStatus::LEGACY_REQUESTED
-            : ($driverDispatch ? BookingStatus::SEARCHING : 'CONFIRMED');
+        $status = $driverDispatch ? BookingStatus::SEARCHING : 'CONFIRMED';
 
         $matches = [];
         $notifyCitySchedule = $this->isCityProduct($product) && $futureSchedule;
@@ -417,7 +414,8 @@ class BookingService
         $notifyRailway = $product === 'RAILWAY';
         $notifyMultiStop = $product === 'MULTI_STOP';
         $notifyRental = $product === 'RENTAL';
-        if ($driverDispatch && (! $futureSchedule || $notifyCitySchedule || $notifyOneWay || $notifyRound || $notifyParcel || $notifyAirport || $notifyRailway || $notifyMultiStop || $notifyRental)) {
+        $notifyAmbulance = $product === 'AMBULANCE';
+        if ($driverDispatch && (! $futureSchedule || $notifyCitySchedule || $notifyOneWay || $notifyRound || $notifyParcel || $notifyAirport || $notifyRailway || $notifyMultiStop || $notifyRental || $notifyAmbulance)) {
             $matches = $this->nearby->search(
                 $pickupLat,
                 $pickupLng,
@@ -945,7 +943,7 @@ class BookingService
 
     public static function searchesNearbyNow(string $product): bool
     {
-        return in_array(strtoupper($product), ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'SCHEDULE', 'RENTAL'], true);
+        return in_array(strtoupper($product), ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'SCHEDULE', 'RENTAL', 'AMBULANCE'], true);
     }
 
     public static function driverCanAccept(string $product): bool
@@ -1069,8 +1067,19 @@ class BookingService
 
             return $this->present($booking, $actor);
         }
-        abort_unless((string) $booking->status === BookingStatus::OTP_VERIFIED, 422, 'Confirm the customer OTP before starting the trip.');
-        abort_unless(BookingStatus::canTransition((string) $booking->status, BookingStatus::TRIP_STARTED), 422, 'Invalid booking status');
+        $ambulanceStart = $this->isAmbulance($booking);
+        if ($ambulanceStart) {
+            abort_unless(in_array((string) $booking->status, [
+                BookingStatus::DRIVER_ACCEPTED,
+                BookingStatus::LEGACY_ASSIGNED,
+                BookingStatus::DRIVER_ARRIVED,
+                BookingStatus::OTP_VERIFIED,
+                'DRIVER_ARRIVING',
+            ], true), 422, 'Accept the ambulance before starting the trip.');
+        } else {
+            abort_unless((string) $booking->status === BookingStatus::OTP_VERIFIED, 422, 'Confirm the customer OTP before starting the trip.');
+            abort_unless(BookingStatus::canTransition((string) $booking->status, BookingStatus::TRIP_STARTED), 422, 'Invalid booking status');
+        }
         $startSnapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
         if ($this->isRoundTrip($booking)) {
             $startSnapshot['roundTripPhase'] = 'outbound';
@@ -1263,6 +1272,10 @@ class BookingService
             return $this->completeMultiStop($actor, $id);
         }
 
+        if (in_array($action, ['submit_fare', 'ambulance_fare'], true)) {
+            return $this->submitAmbulanceFare($actor, $id, (int) ($extra['rupees'] ?? $extra['fareRupees'] ?? $extra['amount'] ?? 0));
+        }
+
         if (in_array($action, ['complete', 'completed'], true)) {
             $result = $this->complete($actor, $id, $otp, isset($extra['durationSeconds']) ? (int) $extra['durationSeconds'] : null);
             app(DriverSessionService::class)->finishPendingLogout($actor);
@@ -1299,7 +1312,8 @@ class BookingService
             abort_unless($openStops === [], 422, 'Complete each stop in order. The trip finishes only at the last stop.');
             $multiStopFinish = true;
         }
-        if (! $multiStopFinish && ! $rentalReturn) {
+        $ambulanceFareLater = $this->isAmbulance($booking);
+        if (! $multiStopFinish && ! $rentalReturn && ! $ambulanceFareLater) {
             $pin = preg_replace('/\D+/', '', (string) $otp) ?? '';
             abort_unless($pin !== '' && hash_equals((string) $booking->end_otp, $pin), 422, $this->isParcel($booking) ? 'Invalid delivery PIN' : 'Invalid completion PIN');
         }
@@ -1327,7 +1341,7 @@ class BookingService
             $bookedWait = (int) (($bookedSnapshot['fareInputs']['waitMinutes'] ?? 0));
             $wait = max($wait, $bookedWait);
         }
-        if (! $rentalReturn) {
+        if (! $rentalReturn && ! $ambulanceFareLater) {
             $this->applyRouteFare($booking, $trackedKm, 0, $wait);
             $booking->refresh();
         }
@@ -1368,6 +1382,16 @@ class BookingService
             : $split['platformPaise'];
         $districtShare = $commissionSettled ? 0 : $split['districtHeadPaise'];
         $earning = max(0, $totalPaise - $commission);
+        if ($ambulanceFareLater) {
+            $totalPaise = 0;
+            $commission = 0;
+            $earning = 0;
+            $fleetShare = 0;
+            $platformShare = 0;
+            $districtShare = 0;
+            $snapshot['manualFarePending'] = true;
+            $snapshot['fareNote'] = 'Fare is not calculated. Driver and customer agree the amount. The driver enters it after the trip.';
+        }
 
         $booking->update($this->filterColumns([
             'status' => BookingStatus::COMPLETED,
@@ -1400,7 +1424,12 @@ class BookingService
         $this->syncLinkedParcel($booking, 'delivered');
         Driver::query()->where('id', $driver->id)->update(['duty_status' => 'online']);
         $payMode = strtoupper((string) ($booking->payment_mode ?? 'CASH'));
-        if ($commissionSettled) {
+        if ($ambulanceFareLater) {
+            $commissionSettled = true;
+        }
+        if ($ambulanceFareLater) {
+            // Fare, cash collection, and wallet rows are written when the driver submits the agreed amount.
+        } elseif ($commissionSettled) {
             app(WalletAccountService::class)->recordCashTrip(
                 (int) $driver->user_id,
                 (int) $booking->id,
@@ -1492,7 +1521,7 @@ class BookingService
     public function expireSearching(?int $exceptId = null): int
     {
         $timeout = $this->settings->requestTimeoutSeconds();
-        $q = Booking::query()->whereIn('status', BookingStatus::searching())->where('product', '!=', 'AMBULANCE');
+        $q = Booking::query()->whereIn('status', BookingStatus::searching());
         if ($exceptId) {
             $q->where('id', '!=', $exceptId);
         }
@@ -1532,12 +1561,63 @@ class BookingService
         return $ids->count();
     }
 
+    public function submitAmbulanceFare(User $actor, string $id, int $rupees): array
+    {
+        abort_unless($actor->role === 'DRIVER', 403, 'Only the assigned driver can enter the fare');
+        $booking = $this->assignedToDriver($actor, $id);
+        abort_unless($this->isAmbulance($booking), 422, 'This trip is not an ambulance booking.');
+        abort_unless((string) $booking->status === BookingStatus::COMPLETED, 422, 'End the trip before entering the fare.');
+        $snapshot = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+        abort_unless(! empty($snapshot['manualFarePending']), 422, 'This ambulance fare is already saved.');
+        abort_unless($rupees >= 1 && $rupees <= 500000, 422, 'Enter the agreed fare in rupees.');
+        $paise = $rupees * 100;
+        unset($snapshot['manualFarePending']);
+        $snapshot['totalPaise'] = $paise;
+        $snapshot['totalRupees'] = $rupees;
+        $snapshot['driverEarningPaise'] = $paise;
+        $snapshot['commissionPaise'] = 0;
+        $snapshot['commissionPercent'] = 0;
+        $snapshot['fareEnteredAt'] = now()->toIso8601String();
+        $booking->update($this->filterColumns([
+            'final_fare_paise' => $paise,
+            'commission_paise' => 0,
+            'platform_commission_paise' => 0,
+            'district_head_commission_paise' => 0,
+            'fleet_commission_paise' => 0,
+            'driver_earning_paise' => $paise,
+            'quote_paise' => $paise,
+            'payment_mode' => 'CASH',
+            'quote_snapshot' => $snapshot,
+        ]));
+        $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
+        app(WalletAccountService::class)->recordCashTrip(
+            (int) $driver->user_id,
+            (int) $booking->id,
+            $paise,
+            0,
+            $paise,
+            'Agreed ambulance fare collected in cash ₹'.number_format($rupees, 0).' for '.$booking->public_ref.'. Commission ₹0.',
+        );
+        app(CustomerWallet::class)->recordMemo(
+            (int) $booking->customer_id,
+            (int) $booking->id,
+            $paise,
+            'Agreed ambulance fare ₹'.number_format($rupees, 0).' for booking '.$booking->public_ref,
+            'ambulance_fare',
+            'PAID',
+        );
+
+        return $this->present($booking->fresh(), $actor);
+    }
+
     public function present(Booking $row, ?User $actor = null): array
     {
         $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
         $total = (int) ($row->final_fare_paise ?? $snapshot['totalPaise'] ?? $row->quote_paise);
+        $manualFarePending = $this->isAmbulance($row) && ! empty($snapshot['manualFarePending']);
         if ($this->isAmbulance($row)) {
-            $total = 0;
+            $entered = (int) ($row->final_fare_paise ?? 0);
+            $total = $manualFarePending ? 0 : $entered;
         }
         $commissionPaise = $this->isAmbulance($row)
             ? 0
@@ -1644,6 +1724,10 @@ class BookingService
             'patientPhotoUrl' => $snapshot['patientPhotoUrl'] ?? ($row->patient_photo_url ?? null),
             'isEmergency' => $this->isAmbulance($row) || (bool) ($row->is_emergency ?? false),
             'ambulancePhase' => $this->isAmbulance($row) ? $this->ambulancePhase($row) : null,
+            'manualFarePending' => $manualFarePending,
+            'fareNote' => $this->isAmbulance($row)
+                ? 'Fare is not calculated. Driver and customer agree the amount. The driver enters it after the trip.'
+                : null,
             'pickupText' => $row->pickup_text,
             'dropText' => $row->drop_text,
             'pickupLat' => $row->pickup_lat !== null ? (float) $row->pickup_lat : null,
@@ -2761,6 +2845,10 @@ class BookingService
             return ['call', 'cancel'];
         }
 
+        if ($this->isAmbulance($row)) {
+            return ['start'];
+        }
+
         if ($this->commissionLocksDriver($row)) {
             return $this->isRental($row) ? ['call', 'arrive'] : ['arrive'];
         }
@@ -3822,10 +3910,11 @@ class BookingService
             return match ($status) {
                 'SCHEDULED' => $this->scheduledDriverActions($row),
                 BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED, 'DRIVER_ARRIVING' => $this->driverEnRouteActions($row),
-                BookingStatus::DRIVER_ARRIVED => $this->isRental($row) ? ['handover'] : ['verify_otp'],
-                BookingStatus::OTP_VERIFIED => $this->isRental($row) ? ['handover'] : ['start'],
+                BookingStatus::DRIVER_ARRIVED => $this->isAmbulance($row) ? ['start'] : ($this->isRental($row) ? ['handover'] : ['verify_otp']),
+                BookingStatus::OTP_VERIFIED => $this->isAmbulance($row) ? ['start'] : ($this->isRental($row) ? ['handover'] : ['start']),
                 BookingStatus::RENTAL_IN_USE => ['return'],
-                BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED' => $this->isRental($row) ? ['return'] : ($this->isMultiStop($row) ? $this->multiStopActions($row) : $this->roundTripActions($row)),
+                BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED' => $this->isAmbulance($row) ? ['complete'] : ($this->isRental($row) ? ['return'] : ($this->isMultiStop($row) ? $this->multiStopActions($row) : $this->roundTripActions($row))),
+                BookingStatus::COMPLETED => $this->isAmbulance($row) && ! empty((is_array($row->quote_snapshot) ? $row->quote_snapshot : [])['manualFarePending']) ? ['submit_fare'] : [],
                 default => [],
             };
         }
@@ -3868,7 +3957,8 @@ class BookingService
         if (! $customer) {
             return null;
         }
-        $mask = $actor?->role !== 'DRIVER' || BookingStatus::isSearching((string) $row->status);
+        $searching = BookingStatus::isSearching((string) $row->status) && ! $row->driver_id;
+        $mask = $actor?->role !== 'DRIVER' || $searching;
 
         return [
             'name' => $customer->name,
@@ -4097,14 +4187,14 @@ class BookingService
             ->where('status', BookingStatus::SEARCHING)
             ->whereNull('driver_id')
             ->where(function ($query) {
-                $query->whereNull('scheduled_at')->orWhere('scheduled_at', '<=', now()->addMinutes(5))->orWhereIn('product', ['LOCAL_CAB', 'CITY_RIDE', 'CITY', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'RENTAL', 'SCHEDULE']);
+                $query->whereNull('scheduled_at')->orWhere('scheduled_at', '<=', now()->addMinutes(5))->orWhereIn('product', ['LOCAL_CAB', 'CITY_RIDE', 'CITY', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'RENTAL', 'SCHEDULE', 'AMBULANCE']);
             })
-            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'SCHEDULE', 'MULTI_STOP', 'RENTAL'])
+            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'SCHEDULE', 'MULTI_STOP', 'RENTAL', 'AMBULANCE'])
             ->where(function ($query) use ($ids) {
                 if ($ids) {
                     $query->whereIn('id', $ids);
                 }
-                $query->orWhere('product', 'PARCEL')->orWhere('product', 'MULTI_STOP')->orWhere('product', 'RENTAL');
+                $query->orWhere('product', 'PARCEL')->orWhere('product', 'MULTI_STOP')->orWhere('product', 'RENTAL')->orWhere('product', 'AMBULANCE');
             })
             ->orderByDesc('id')
             ->limit(40)
@@ -4114,7 +4204,17 @@ class BookingService
                 if (! $visible && $this->isParcel($row)) {
                     $reason = null;
                     $km = null;
-                    if ($category === '' || ! \App\Support\VehicleCategory::parcelCompatible($category, (string) $row->category)) {
+                    $parcelCats = $driver->vehicles
+                        ->map(fn ($vehicle) => strtoupper(trim((string) $vehicle->category)))
+                        ->filter()
+                        ->unique();
+                    $parcelOk = $parcelCats->contains(function (string $vehicleCat) use ($row) {
+                        $wanted = (string) $row->category;
+
+                        return \App\Support\VehicleCategory::parcelCompatible($vehicleCat, $wanted)
+                            && \App\Support\VehicleCategory::sameKind($vehicleCat, $wanted);
+                    });
+                    if (! $parcelOk) {
                         $reason = 'vehicle_family';
                     } elseif ($driverLat === null || $row->pickup_lat === null) {
                         $reason = 'driver_location_missing';

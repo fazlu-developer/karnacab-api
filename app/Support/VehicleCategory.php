@@ -47,6 +47,14 @@ class VehicleCategory
         return in_array(strtoupper(trim($right)), self::family($left), true);
     }
 
+    public static function sameKind(string $left, string $right): bool
+    {
+        $a = self::canonical($left);
+        $b = self::canonical($right);
+
+        return $a !== '' && $a === $b;
+    }
+
     /**
      * Parcel goods vehicles share one family so a pickup request reaches a van or truck.
      *
@@ -77,11 +85,9 @@ class VehicleCategory
      */
     public static function parcelOfferFamily(string $bookingCategory): array
     {
-        $cars = ['SEDAN', 'MINI', 'SUV', 'CAR', 'CAB', 'HATCHBACK', 'PREMIUM'];
-        $upper = strtoupper(trim($bookingCategory));
         $canonical = self::canonical($bookingCategory);
-        if (in_array($canonical, ['SEDAN', 'SUV'], true) || in_array($upper, $cars, true)) {
-            return array_values(array_unique([...self::family('SEDAN'), ...self::family('SUV')]));
+        if (in_array($canonical, ['SEDAN', 'SUV', 'BIKE', 'AUTO', 'AMBULANCE'], true)) {
+            return self::family($canonical);
         }
 
         return self::parcelSearchFamily($bookingCategory);

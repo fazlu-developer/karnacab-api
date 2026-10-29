@@ -1336,4 +1336,44 @@ class BulkBookingService
     {
         BulkSchema::ensure();
     }
+
+    public function remindDue(): int
+    {
+        $this->boot();
+        if (! Schema::hasTable('bulk_bookings') || ! Schema::hasColumn('bulk_bookings', 'event_date')) {
+            return 0;
+        }
+        if (! Schema::hasColumn('bulk_bookings', 'pickup_reminded_at')) {
+            Schema::table('bulk_bookings', fn ($table) => $table->timestamp('pickup_reminded_at')->nullable());
+        }
+        $now = \Carbon\Carbon::now('Asia/Kolkata');
+        $sent = 0;
+        $rows = DB::table('bulk_bookings')
+            ->whereDate('event_date', $now->toDateString())
+            ->whereNull('pickup_reminded_at')
+            ->whereIn('status', ['ASSIGNED', 'LIVE', 'ADVANCE_PAID'])
+            ->limit(100)
+            ->get();
+        $nowMinutes = ((int) $now->format('H')) * 60 + (int) $now->format('i');
+        foreach ($rows as $row) {
+            $clock = substr((string) ($row->event_time ?? '09:00'), 0, 5);
+            $parts = explode(':', $clock);
+            $pickupAt = ((int) ($parts[0] ?? 0)) * 60 + (int) ($parts[1] ?? 0);
+            $until = $pickupAt - $nowMinutes;
+            if ($until > 60 || $until < -20) {
+                continue;
+            }
+            $drivers = Schema::hasTable('bulk_booking_cabs')
+                ? DB::table('bulk_booking_cabs')->where('bulk_booking_id', $row->id)->whereNotNull('driver_user_id')->pluck('driver_user_id')->map(fn ($id) => (int) $id)->all()
+                : [];
+            if ($drivers === []) {
+                continue;
+            }
+            DB::table('bulk_bookings')->where('id', $row->id)->update(['pickup_reminded_at' => now(), 'updated_at' => now()]);
+            $this->push($drivers, 'Bulk pickup soon', 'Pickup at '.$clock.' · '.($row->pickup_text ?? 'Pickup').' · '.$row->public_ref.'.', 'bulk_pickup_alert');
+            $sent++;
+        }
+
+        return $sent;
+    }
 }

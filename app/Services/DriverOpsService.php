@@ -209,8 +209,17 @@ class DriverOpsService
                         if ($driver && $dismissals->hidden((int) $driver->id, 'parcel', (string) $row->id)) {
                             return false;
                         }
-                        $vehicleCat = strtoupper((string) ($driver?->vehicles?->first()?->category ?? ''));
-                        if ($vehicleCat !== '' && ! \App\Support\VehicleCategory::parcelCompatible($vehicleCat, (string) ($row->category ?? ''))) {
+                        $wanted = (string) ($row->category ?? '');
+                        $driverCategories = collect($driver?->vehicles ?? [])
+                            ->map(fn ($vehicle) => strtoupper(trim((string) ($vehicle->category ?? ''))))
+                            ->filter()
+                            ->unique()
+                            ->values();
+                        $matched = $driverCategories->contains(function (string $vehicleCat) use ($wanted) {
+                            return \App\Support\VehicleCategory::parcelCompatible($vehicleCat, $wanted)
+                                && \App\Support\VehicleCategory::sameKind($vehicleCat, $wanted);
+                        });
+                        if (! $matched) {
                             return false;
                         }
                         if ($driver && Schema::hasColumn('parcel_shipments', 'pickup_lat') && $row->pickup_lat && $lat !== null) {
@@ -266,7 +275,7 @@ class DriverOpsService
                 && $row->scheduled_at
                 && (! $needsAdvance || $cityRide)
                 && \Illuminate\Support\Carbon::parse($row->scheduled_at)->lte(now()->addMinutes(45));
-            if ((string) $row->status === 'SCHEDULED' && $row->customer_id) {
+            if ($row->driver_id && $row->customer_id && ! \App\Support\BookingStatus::isSearching((string) $row->status)) {
                 $phone = DB::table('users')->where('id', $row->customer_id)->value('phone');
             }
             $mode = strtoupper((string) ($row->payment_mode ?? 'CASH'));
@@ -480,6 +489,72 @@ class DriverOpsService
     }
 
     /**
+     * Driver amounts from completed tour, bulk, and corporate days in the window.
+     *
+     * @return array{earn: int, gross: int, cash: int, count: int}
+     */
+    private function serviceJobEarnings(int $driverId, $from, $to): array
+    {
+        $earn = 0;
+        $gross = 0;
+        $cash = 0;
+        $count = 0;
+        if (Schema::hasTable('travel_bookings')) {
+            $tours = DB::table('travel_bookings')
+                ->where('driver_id', $driverId)
+                ->where('status', 'COMPLETED')
+                ->whereBetween('updated_at', [$from, $to])
+                ->get();
+            foreach ($tours as $row) {
+                $split = \App\Support\TourMoney::split((int) ($row->quote_paise ?? 0));
+                $driverPaise = (int) $split['driverAdvancePaise'] + (int) $split['balancePaise'];
+                $earn += $driverPaise;
+                $gross += (int) $split['totalPaise'];
+                $cash += (int) $split['balancePaise'];
+                $count++;
+            }
+        }
+        if (Schema::hasTable('bulk_booking_cabs')) {
+            $cabs = DB::table('bulk_booking_cabs')
+                ->where('driver_id', $driverId)
+                ->where('phase', 'completed')
+                ->whereBetween('completed_at', [$from, $to])
+                ->get();
+            foreach ($cabs as $cab) {
+                $fare = (int) ($cab->fare_paise ?? 0);
+                $commission = (int) ($cab->commission_paise ?? 0);
+                $due = max(0, $fare - $commission) + (int) ($cab->wait_charge_paise ?? 0);
+                $earn += $due;
+                $gross += $fare;
+                $cash += (int) ($cab->collected_paise ?? $due);
+                $count++;
+            }
+        }
+        if (Schema::hasTable('corporate_daily_trips') && Schema::hasTable('corporate_travel_bookings')) {
+            $days = DB::table('corporate_daily_trips as t')
+                ->join('corporate_travel_bookings as p', 'p.id', '=', 't.corporate_booking_id')
+                ->where('p.driver_id', $driverId)
+                ->whereIn('t.status', ['completed', 'COMPLETED'])
+                ->whereBetween('t.updated_at', [$from, $to])
+                ->get(['t.id', 'p.id as plan_id', 'p.driver_share_paise']);
+            $planDays = [];
+            foreach ($days as $day) {
+                $planId = (int) $day->plan_id;
+                if (! isset($planDays[$planId])) {
+                    $planDays[$planId] = max(1, (int) DB::table('corporate_daily_trips')->where('corporate_booking_id', $planId)->count());
+                }
+                $share = intdiv((int) ($day->driver_share_paise ?? 0), $planDays[$planId]);
+                $earn += $share;
+                $gross += $share;
+                $cash += $share;
+                $count++;
+            }
+        }
+
+        return ['earn' => $earn, 'gross' => $gross, 'cash' => $cash, 'count' => $count];
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function periodEarnings(int $driverId, int $userId, $from, $to): array
@@ -541,6 +616,10 @@ class DriverOpsService
                 ->where('created_at', '<=', $to)
                 ->sum('amount_paise');
         }
+        $jobs = $this->serviceJobEarnings($driverId, $from, $to);
+        $earn += $jobs['earn'];
+        $gross += $jobs['gross'];
+        $cashGross += $jobs['cash'];
         $net = $earn + $parcelEarn;
 
         return [
@@ -556,7 +635,7 @@ class DriverOpsService
             'cashCollectedRupees' => $cashGross / 100,
             'incentivesPaise' => $incentives,
             'incentivesRupees' => $incentives / 100,
-            'trips' => $rides->count() + $parcelCount,
+            'trips' => $rides->count() + $parcelCount + $jobs['count'],
             'rides' => $rides->count(),
             'parcels' => $parcelCount,
         ];
@@ -1060,22 +1139,36 @@ class DriverOpsService
         if (! $driver) {
             return [];
         }
-        $category = $driver->vehicles->first()?->category;
         $rows = \App\Models\Booking::query()
             ->whereNotNull('scheduled_at')
             ->whereNotIn('product', ['LOCAL_CAB', 'CITY_RIDE', 'CITY'])
             ->whereNotIn('status', \App\Support\BookingStatus::terminal())
             ->whereNull('driver_id')
             ->whereIn('status', array_merge(\App\Support\BookingStatus::searching(), ['CONFIRMED']))
-            ->when($category, function ($query) use ($category) {
-                $family = \App\Support\VehicleCategory::family((string) $category);
-                $query->where(function ($cat) use ($family) {
-                    $cat->whereIn('category', $family)->orWhereNull('category');
-                });
-            })
             ->orderBy('scheduled_at')
             ->limit(40)
-            ->get();
+            ->get()
+            ->filter(function ($row) use ($driver) {
+                $wanted = (string) ($row->category ?? '');
+                $parcel = strtoupper((string) ($row->product ?? '')) === 'PARCEL';
+                $cats = $driver->vehicles
+                    ->map(fn ($vehicle) => strtoupper(trim((string) $vehicle->category)))
+                    ->filter()
+                    ->unique();
+                if ($cats->isEmpty() || $wanted === '') {
+                    return false;
+                }
+
+                return $cats->contains(function (string $cat) use ($parcel, $wanted) {
+                    if ($parcel) {
+                        return \App\Support\VehicleCategory::parcelCompatible($cat, $wanted)
+                            && \App\Support\VehicleCategory::sameKind($cat, $wanted);
+                    }
+
+                    return \App\Support\VehicleCategory::sameFamily($cat, $wanted)
+                        || \App\Support\VehicleCategory::sameKind($cat, $wanted);
+                });
+            });
 
         return $rows->map(function ($row) use ($actor, $driver) {
             $presented = app(BookingService::class)->present($row, $actor);

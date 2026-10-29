@@ -542,26 +542,29 @@ class AppSurfaceService
             return ['ads' => [], 'placement' => $placement];
         }
         $q = DB::table('ad_campaigns')->whereIn('status', ['published', 'active', 'PUBLISHED', 'ACTIVE']);
-        if (Schema::hasColumn('ad_campaigns', 'starts_on')) {
-            $q->where(function ($inner) {
-                $inner->whereNull('starts_on')->orWhere('starts_on', '<=', now());
-            });
+        $home = $placement === null || $placement === '' || in_array($placement, ['home', 'driver'], true);
+        if ($home) {
+            if (Schema::hasColumn('ad_campaigns', 'placement')) {
+                $q->where(function ($inner) {
+                    $inner->whereNull('placement')->orWhere('placement', '')->orWhere('placement', 'home');
+                });
+            }
+        } else {
+            if (Schema::hasColumn('ad_campaigns', 'starts_on')) {
+                $q->where(function ($inner) {
+                    $inner->whereNull('starts_on')->orWhere('starts_on', '<=', now());
+                });
+            }
+            if (Schema::hasColumn('ad_campaigns', 'ends_on')) {
+                $q->where(function ($inner) {
+                    $inner->whereNull('ends_on')->orWhereDate('ends_on', '>=', now()->toDateString());
+                });
+            }
+            if (Schema::hasColumn('ad_campaigns', 'placement') && $placement) {
+                $q->where('placement', $placement);
+            }
         }
-        if (Schema::hasColumn('ad_campaigns', 'ends_on')) {
-            $q->where(function ($inner) {
-                $inner->whereNull('ends_on')->orWhereDate('ends_on', '>=', now()->toDateString());
-            });
-        }
-        if (Schema::hasColumn('ad_campaigns', 'placement') && $placement) {
-            $q->where(function ($inner) use ($placement) {
-                if (in_array($placement, ['home', 'driver'], true)) {
-                    $inner->whereNull('placement')->orWhere('placement', $placement)->orWhere('placement', 'home');
-                } else {
-                    $inner->where('placement', $placement);
-                }
-            });
-        }
-        $rows = $q->orderByDesc('id')->limit(20)->get();
+        $rows = $home ? $q->orderByDesc('id')->get() : $q->orderByDesc('id')->limit(20)->get();
 
         return [
             'placement' => $placement,
@@ -756,7 +759,7 @@ class AppSurfaceService
         $fromRules = Schema::hasTable('parcel_fare_rules')
             ? DB::table('parcel_fare_rules')->where('active', 1)->pluck('category')->unique()->values()->all()
             : [];
-        $categories = $fromRules ?: ['BIKE', 'AUTO', 'SEDAN', 'TRAVELLER', 'TRUCK'];
+        $categories = array_values(array_unique([...$fromRules, 'BIKE', 'AUTO', 'SEDAN', 'SUV', 'TRAVELLER', 'TRUCK']));
         $order = ['BIKE', 'AUTO', 'E_RICKSHAW', 'MINI', 'SEDAN', 'SUV', 'TRAVELLER', 'TRUCK'];
         usort($categories, function ($a, $b) use ($order) {
             $ai = array_search(strtoupper((string) $a), $order, true);

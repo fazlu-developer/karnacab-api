@@ -508,6 +508,15 @@ class PlatformController extends Controller
         );
     }
 
+    public function bookingsAmbulanceFare(Request $request, string $id)
+    {
+        $data = $request->validate([
+            'rupees' => 'required|integer|min:1|max:500000',
+        ]);
+
+        return $this->bookings->submitAmbulanceFare($request->user(), $id, (int) $data['rupees']);
+    }
+
     public function bookingsLifecycle(Request $request, string $id)
     {
         return $this->bookings->lifecycle(
