@@ -38,7 +38,7 @@ return new class extends Migration
             'service_group' => 'RIDE',
             'category_key' => 'AMBULANCE',
             'icon_key' => Schema::hasColumn('catalog_services', 'icon_key') ? 'ambulance' : null,
-            'sort_order' => 15,
+            'sort_order' => 80,
             'subtitle' => 'Free emergency ambulance',
             'featured' => Schema::hasColumn('catalog_services', 'featured') ? 0 : null,
             'active' => Schema::hasColumn('catalog_services', 'active') ? 1 : null,

@@ -30,3 +30,13 @@ SELECT 'AMBULANCE', 'Ambulance', 'AMBULANCE', 'Ambulance', 2, 100, 1, NOW(3), NO
 WHERE NOT EXISTS (
   SELECT 1 FROM catalog_vehicle_types WHERE `key` = 'AMBULANCE'
 );
+
+-- Customer home order. Smaller sort_order shows first. Admin can change these
+-- later from Services → Save home order; the customer app reads sort_order live.
+UPDATE catalog_services
+SET sort_order = 80, updated_at = NOW(3)
+WHERE category_key = 'AMBULANCE' OR slug = 'ambulance';
+
+UPDATE catalog_services
+SET sort_order = 130, updated_at = NOW(3)
+WHERE category_key = 'SCHEDULE' OR slug IN ('schedule-ride', 'schedule', 'pre-book');

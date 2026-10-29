@@ -46,7 +46,7 @@ PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 INSERT INTO catalog_services
   (title, slug, service_group, category_key, icon_key, sort_order, subtitle, featured, active, seats, created_at, updated_at)
-SELECT 'Ambulance', 'ambulance', 'RIDE', 'AMBULANCE', 'ambulance', 15, 'Free emergency ambulance', 0, 1, 2, NOW(3), NOW(3)
+SELECT 'Ambulance', 'ambulance', 'RIDE', 'AMBULANCE', 'ambulance', 80, 'Free emergency ambulance', 0, 1, 2, NOW(3), NOW(3)
 WHERE NOT EXISTS (
   SELECT 1 FROM catalog_services WHERE category_key = 'AMBULANCE' OR slug = 'ambulance'
 );
