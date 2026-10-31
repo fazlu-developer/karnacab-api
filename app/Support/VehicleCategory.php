@@ -23,6 +23,9 @@ class VehicleCategory
             'E_RICKSHAW' => 'AUTO',
             'PICKUP' => 'TRUCK',
             'LOADING' => 'TRUCK',
+            'BASIC' => 'AMBULANCE',
+            'BLS' => 'AMBULANCE',
+            'ALS' => 'AMBULANCE',
         ];
         $category = $aliases[$category] ?? $category;
 
@@ -33,6 +36,7 @@ class VehicleCategory
             'SUV' => ['SUV'],
             'TRAVELLER' => ['TRAVELLER', 'VAN', 'TEMPO'],
             'TRUCK' => ['TRUCK', 'PICKUP', 'LOADING'],
+            'AMBULANCE' => ['AMBULANCE', 'BASIC', 'BLS', 'ALS'],
             default => [$category],
         };
     }
