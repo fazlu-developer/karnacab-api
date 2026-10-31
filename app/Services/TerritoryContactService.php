@@ -67,7 +67,8 @@ class TerritoryContactService
             'lat' => $row->lat !== null ? (float) $row->lat : null,
             'lng' => $row->lng !== null ? (float) $row->lng : null,
             'placeName' => $row->place_name,
-            'photoUrl' => PublicMedia::presentMediaUrl($row->photo_url ?? null, $row->updated_at ?? null),
+            'photoUrl' => PublicMedia::presentMediaUrl($row->photo_url ?? null, $row->updated_at ?? null)
+                ?? \App\Support\TerritoryContacts::userPhoto(isset($row->user_id) ? (int) $row->user_id : 0),
         ];
     }
 

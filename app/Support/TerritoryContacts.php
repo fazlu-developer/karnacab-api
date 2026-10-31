@@ -51,17 +51,25 @@ final class TerritoryContacts
 
         $state = null;
         if ($stateId > 0 && Schema::hasTable('states')) {
-            $row = DB::table('states')->where('id', $stateId)->first(['id', 'name']);
+            $row = DB::table('states')->where('id', $stateId)->first();
             if ($row) {
-                $state = ['id' => (int) $row->id, 'name' => (string) $row->name];
+                $state = [
+                    'id' => (int) $row->id,
+                    'name' => (string) $row->name,
+                    'photoUrl' => PublicMedia::presentMediaUrl($row->photo_url ?? null),
+                ];
             }
         }
 
         $district = null;
         if ($districtId > 0 && Schema::hasTable('districts')) {
-            $row = DB::table('districts')->where('id', $districtId)->first(['id', 'name']);
+            $row = DB::table('districts')->where('id', $districtId)->first();
             if ($row) {
-                $district = ['id' => (int) $row->id, 'name' => (string) $row->name];
+                $district = [
+                    'id' => (int) $row->id,
+                    'name' => (string) $row->name,
+                    'photoUrl' => PublicMedia::presentMediaUrl($row->photo_url ?? null),
+                ];
             }
         }
 
@@ -105,6 +113,10 @@ final class TerritoryContacts
         $support = trim((string) ($row->support_phone ?? ''));
         $connect = trim((string) ($row->connect_phone ?? ''));
         $phone = $support !== '' ? $support : $connect;
+        $photo = PublicMedia::presentMediaUrl($row->photo_url ?? null, $row->updated_at ?? null);
+        if ($photo === null && ! empty($row->user_id)) {
+            $photo = self::userPhoto((int) $row->user_id);
+        }
 
         return [
             'name' => $name !== '' ? $name : ($role === 'DISTRICT_HEAD' ? 'District Head' : 'State Head'),
@@ -112,7 +124,7 @@ final class TerritoryContacts
             'supportPhone' => $support !== '' ? $support : null,
             'connectPhone' => $connect !== '' ? $connect : null,
             'email' => isset($row->email) && trim((string) $row->email) !== '' ? (string) $row->email : null,
-            'photoUrl' => PublicMedia::presentMediaUrl($row->photo_url ?? null, $row->updated_at ?? null),
+            'photoUrl' => $photo,
             'address' => isset($row->address) && trim((string) $row->address) !== '' ? (string) $row->address : null,
             'placeName' => isset($row->place_name) && trim((string) $row->place_name) !== '' ? (string) $row->place_name : null,
             'lat' => isset($row->lat) ? (float) $row->lat : null,
@@ -129,14 +141,9 @@ final class TerritoryContacts
         if ($id < 1 || ! Schema::hasTable('users')) {
             return null;
         }
-        $cols = ['name', 'phone'];
+        $cols = ['id', 'name', 'phone'];
         if (Schema::hasColumn('users', 'email')) {
             $cols[] = 'email';
-        }
-        if (Schema::hasColumn('users', 'avatar_url')) {
-            $cols[] = 'avatar_url';
-        } elseif (Schema::hasColumn('users', 'photo_url')) {
-            $cols[] = 'photo_url';
         }
         $row = DB::table('users')
             ->where('role', $role)
@@ -155,14 +162,29 @@ final class TerritoryContacts
         if (! $row) {
             return null;
         }
-        $photo = $row->avatar_url ?? $row->photo_url ?? null;
-
         return [
             'name' => (string) $row->name,
             'phone' => $row->phone ? (string) $row->phone : null,
             'email' => isset($row->email) && $row->email ? (string) $row->email : null,
-            'photoUrl' => $photo ? (PublicMedia::storagePath((string) $photo) ?? (string) $photo) : null,
+            'photoUrl' => self::userPhoto((int) $row->id),
             'role' => $role,
         ];
+    }
+
+    public static function userPhoto(int $userId): ?string
+    {
+        if ($userId < 1 || ! Schema::hasTable('users') || ! Schema::hasColumn('users', 'avatar_path')) {
+            return null;
+        }
+        $avatar = DB::table('users')->where('id', $userId)->value('avatar_path');
+        if (! is_string($avatar) || trim($avatar) === '') {
+            return null;
+        }
+        $stored = PublicMedia::storagePath($avatar);
+        if ($stored !== null) {
+            return PublicMedia::presentMediaUrl($stored);
+        }
+
+        return app(\App\Services\KycDocumentService::class)->previewUrl($avatar);
     }
 }
