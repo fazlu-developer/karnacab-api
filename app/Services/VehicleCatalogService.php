@@ -356,34 +356,6 @@ class VehicleCatalogService
                 $table->string('family_image_url', 255)->nullable();
             });
         }
-        if (! Schema::hasTable(self::TABLE)) {
-            return;
-        }
-        $now = now();
-        $rows = [
-            ['AMBULANCE', 'Ambulance', 2, 100, 'Emergency ambulance', null],
-            ['BASIC', 'Basic Patient Transport', 2, 101, 'सामान्य मरीज ट्रांसफर', '/uploads/vehicles/ambulance_basic.png'],
-            ['BLS', 'BLS Ambulance', 2, 102, 'बेसिक लाइफ सपोर्ट', '/uploads/vehicles/ambulance_bls.png'],
-            ['ALS', 'ALS Ambulance', 2, 103, 'उन्नत चिकित्सा सहायता', '/uploads/vehicles/ambulance_als.png'],
-        ];
-        foreach ($rows as [$key, $label, $seats, $sort, $blurb, $image]) {
-            if (DB::table(self::TABLE)->where('key', $key)->exists()) {
-                continue;
-            }
-            DB::table(self::TABLE)->insert([
-                'family_key' => 'AMBULANCE',
-                'family_label' => 'Ambulance',
-                'key' => $key,
-                'label' => $label,
-                'seats' => $seats,
-                'sort_order' => $sort,
-                'active' => 1,
-                'blurb' => $blurb,
-                'image_url' => $image,
-                'created_at' => $now,
-                'updated_at' => $now,
-            ]);
-        }
     }
 
     /**
