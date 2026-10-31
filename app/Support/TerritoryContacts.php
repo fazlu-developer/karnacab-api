@@ -102,14 +102,21 @@ final class TerritoryContacts
         if (! empty($row->user_id) && Schema::hasTable('users')) {
             $name = (string) (DB::table('users')->where('id', $row->user_id)->value('name') ?? '');
         }
-        $phone = $row->connect_phone ?? $row->support_phone ?? null;
+        $support = trim((string) ($row->support_phone ?? ''));
+        $connect = trim((string) ($row->connect_phone ?? ''));
+        $phone = $support !== '' ? $support : $connect;
 
         return [
             'name' => $name !== '' ? $name : ($role === 'DISTRICT_HEAD' ? 'District Head' : 'State Head'),
-            'phone' => $phone ? (string) $phone : null,
-            'email' => isset($row->email) ? (string) $row->email : null,
+            'phone' => $phone !== '' ? $phone : null,
+            'supportPhone' => $support !== '' ? $support : null,
+            'connectPhone' => $connect !== '' ? $connect : null,
+            'email' => isset($row->email) && trim((string) $row->email) !== '' ? (string) $row->email : null,
             'photoUrl' => PublicMedia::presentMediaUrl($row->photo_url ?? null, $row->updated_at ?? null),
-            'address' => isset($row->address) ? (string) $row->address : null,
+            'address' => isset($row->address) && trim((string) $row->address) !== '' ? (string) $row->address : null,
+            'placeName' => isset($row->place_name) && trim((string) $row->place_name) !== '' ? (string) $row->place_name : null,
+            'lat' => isset($row->lat) ? (float) $row->lat : null,
+            'lng' => isset($row->lng) ? (float) $row->lng : null,
             'role' => $role,
         ];
     }

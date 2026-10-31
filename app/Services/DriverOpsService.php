@@ -270,10 +270,11 @@ class DriverOpsService
             $phone = null;
             $needsAdvance = ! empty($snapshot['advanceAfterAccept']) && $advancePaid < 1 && $product !== 'LOCAL_CAB';
             $cityRide = $product === 'LOCAL_CAB';
+            $rental = $product === 'RENTAL';
             $canActivate = (string) $row->status === 'SCHEDULED'
                 && $row->scheduled_at
                 && (! $needsAdvance || $cityRide)
-                && \Illuminate\Support\Carbon::parse($row->scheduled_at)->lte(now()->addMinutes(45));
+                && ($rental || \Illuminate\Support\Carbon::parse($row->scheduled_at)->lte(now()->addMinutes(45)));
             if ($row->driver_id && $row->customer_id && ! \App\Support\BookingStatus::isSearching((string) $row->status)) {
                 $phone = DB::table('users')->where('id', $row->customer_id)->value('phone');
             }

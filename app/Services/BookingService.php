@@ -2177,6 +2177,18 @@ class BookingService
             $snapshot['reminder30m'] = now()->toIso8601String();
             $changed = true;
             $sent++;
+        } elseif ($mins <= 45 && $mins > 30 && empty($snapshot['reminder45m'])) {
+            $this->push->notifyUsers($customer, 'Cab rental starts soon', 'Your cab on rent at '.$when.' is in about 45 minutes. Your driver can activate the booking now.', [
+                'type' => 'trip', 'event' => 'ride_reminder', 'bookingId' => (string) $booking->id,
+            ]);
+            if ($driver !== []) {
+                $this->push->notifyUsers($driver, 'Activate this cab rental', 'Booking '.$booking->public_ref.' is in about 45 minutes. Open the app and tap Activate booking.', [
+                    'type' => 'booking_offer', 'event' => 'activate_reminder', 'bookingId' => (string) $booking->id,
+                ]);
+            }
+            $snapshot['reminder45m'] = now()->toIso8601String();
+            $changed = true;
+            $sent++;
         }
         if ($changed) {
             $booking->update($this->filterColumns(['quote_snapshot' => $snapshot]));
@@ -3741,6 +3753,9 @@ class BookingService
         if (! $this->isCityRide($row) && ! empty($snapshot['advanceAfterAccept']) && (int) ($snapshot['advancePaidPaise'] ?? 0) < 1) {
             return false;
         }
+        if ($this->isRental($row)) {
+            return true;
+        }
 
         return \Illuminate\Support\Carbon::parse($row->scheduled_at)->lte(now()->addMinutes(45));
     }
@@ -3865,7 +3880,9 @@ class BookingService
         abort_unless($booking, 404, 'Booking not found');
         abort_unless($this->scheduleCanActivate($booking), 422, $this->isCityRide($booking)
             ? 'This scheduled city ride can be activated 45 minutes before pickup.'
-            : ($this->isParcel($booking)
+            : ($this->isRental($booking)
+                ? 'Activate this cab rental after the customer pays the 10%.'
+                : ($this->isParcel($booking)
                 ? 'Activate this parcel only after the 10% is paid, and only near the pickup time.'
                 : ($this->isAirport($booking)
                 ? 'Activate this airport ride only after the 10% is paid, and only near the pickup time.'
@@ -3875,7 +3892,7 @@ class BookingService
                 ? 'Activate this one way only after the 10% is paid, and only near the pickup time.'
                 : ($this->isRoundTrip($booking)
                     ? 'Activate this round trip only after the 10% is paid, and only near the pickup time.'
-                    : 'This scheduled booking can be activated 45 minutes before the pickup time, after the customer pays the 10% advance.'))))));
+                    : 'This scheduled booking can be activated 45 minutes before the pickup time, after the customer pays the 10% advance.')))))));
         $busy = Booking::query()->where('driver_id', $driver->id)->where('id', '!=', $booking->id)->whereIn('status', BookingStatus::openForDriver())->exists();
         abort_if($busy, 422, 'Finish your current trip before activating this booking.');
         $booking->update($this->filterColumns(['status' => BookingStatus::DRIVER_ACCEPTED]));
@@ -3903,6 +3920,14 @@ class BookingService
                         : 'Your scheduled ride is active. The driver is heading to pickup.'))))))),
             ['type' => 'trip', 'event' => 'activated', 'bookingId' => (string) $fresh->id],
         );
+        if ($this->isRental($fresh)) {
+            $this->push->notifyUsers(
+                [(int) $actor->id],
+                'Cab rental activated',
+                'Booking '.$fresh->public_ref.' is active. Drive to the customer and enter the handover OTP.',
+                ['type' => 'trip', 'event' => 'activated', 'bookingId' => (string) $fresh->id],
+            );
+        }
         $this->notifyOps($fresh, 'Booking activated · '.$fresh->public_ref);
 
         return $this->present($fresh, $actor);
