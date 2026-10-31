@@ -278,9 +278,8 @@ class BookingService
             $parcelPaise = (int) ($quote['totalPaise'] ?? 0);
             $quote['parcelMode'] = $parcelFuture ? 'schedule' : 'now';
             $quote['prebook'] = $parcelFuture;
-            $quote['advanceAfterAccept'] = false;
-            $quote['advancePercent'] = 0;
-            $quote['advancePaise'] = 0;
+            $quote['advanceAfterAccept'] = $parcelFuture;
+            $this->stampAdvance($quote, 'PARCEL', $parcelFuture);
             $quote['commissionSettled'] = false;
             $quote['parcelType'] = $dto['parcelType'] ?? null;
             $quote['receiverName'] = $dto['passengerName'] ?? $dto['contactName'] ?? null;
@@ -393,6 +392,7 @@ class BookingService
                 'billedKm' => $distanceKm,
                 'isEmergency' => true,
                 'patientPhotoUrl' => $photo,
+                'ambulanceType' => strtoupper((string) ($dto['ambulanceType'] ?? 'BASIC')),
             ];
             $dto['paymentMode'] = 'CASH';
         }
@@ -1722,6 +1722,7 @@ class BookingService
             'lifecycle' => $lifecycle,
             'lifecycleLabel' => $lifecycleLabel,
             'patientPhotoUrl' => $snapshot['patientPhotoUrl'] ?? ($row->patient_photo_url ?? null),
+            'ambulanceType' => $snapshot['ambulanceType'] ?? null,
             'isEmergency' => $this->isAmbulance($row) || (bool) ($row->is_emergency ?? false),
             'ambulancePhase' => $this->isAmbulance($row) ? $this->ambulancePhase($row) : null,
             'manualFarePending' => $manualFarePending,
@@ -2825,6 +2826,20 @@ class BookingService
         if ($this->isCityRide($row)) {
             return ['call', 'activate', 'cancel'];
         }
+        if ($this->isRental($row) && $this->rentalNeedsAdvance($row)) {
+            return ['cancel'];
+        }
+        if ($this->isParcel($row) && $this->parcelMode($row) === 'schedule') {
+            if ($this->parcelNeedsAdvance($row)) {
+                return ['cancel'];
+            }
+            $actions = ['call'];
+            if ($this->scheduleCanActivate($row)) {
+                $actions[] = 'activate';
+            }
+
+            return $actions;
+        }
         $actions = ['call'];
         if ($this->scheduleCanActivate($row)) {
             $actions[] = 'activate';
@@ -2841,8 +2856,11 @@ class BookingService
      */
     private function driverEnRouteActions(Booking $row): array
     {
-        if (($this->isOneWay($row) && $this->oneWayNeedsAdvance($row)) || ($this->isRoundTrip($row) && $this->roundTripNeedsAdvance($row)) || ($this->isParcel($row) && $this->parcelNeedsAdvance($row)) || ($this->isAirport($row) && $this->airportNeedsAdvance($row)) || ($this->isRailway($row) && $this->railwayNeedsAdvance($row)) || ($this->isMultiStop($row) && $this->multiStopNeedsAdvance($row)) || ($this->isRental($row) && $this->rentalNeedsAdvance($row))) {
-            return ['call', 'cancel'];
+        if ($this->isParcel($row) && $this->parcelNeedsAdvance($row)) {
+            return ['cancel'];
+        }
+        if (($this->isOneWay($row) && $this->oneWayNeedsAdvance($row)) || ($this->isRoundTrip($row) && $this->roundTripNeedsAdvance($row)) || ($this->isAirport($row) && $this->airportNeedsAdvance($row)) || ($this->isRailway($row) && $this->railwayNeedsAdvance($row)) || ($this->isMultiStop($row) && $this->multiStopNeedsAdvance($row)) || ($this->isRental($row) && $this->rentalNeedsAdvance($row))) {
+            return ['cancel'];
         }
 
         if ($this->isAmbulance($row)) {
@@ -2955,7 +2973,26 @@ class BookingService
 
     private function parcelNeedsAdvance(Booking $row): bool
     {
-        return false;
+        if (! $this->isParcel($row) || ! $row->driver_id) {
+            return false;
+        }
+        if ($this->parcelMode($row) !== 'schedule') {
+            return false;
+        }
+        $snapshot = is_array($row->quote_snapshot) ? $row->quote_snapshot : [];
+        if (empty($snapshot['advanceAfterAccept'])) {
+            return false;
+        }
+        if ((int) ($snapshot['advancePaidPaise'] ?? 0) > 0 || ! empty($snapshot['commissionSettled'])) {
+            return false;
+        }
+
+        return in_array((string) $row->status, [
+            'SCHEDULED',
+            BookingStatus::DRIVER_ACCEPTED,
+            BookingStatus::LEGACY_ASSIGNED,
+            'DRIVER_ARRIVING',
+        ], true);
     }
 
     private function parcelPickupOtpVisible(Booking $row): bool
