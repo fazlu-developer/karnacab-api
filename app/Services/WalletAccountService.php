@@ -470,8 +470,8 @@ class WalletAccountService
             'destination' => $row->upi_or_account ?? null,
             'transferRef' => $row->transfer_ref,
             'note' => $row->note,
-            'createdAt' => $row->created_at,
-            'settledAt' => $row->settled_at ?? null,
+            'createdAt' => \App\Support\IndiaTime::format($row->created_at),
+            'settledAt' => \App\Support\IndiaTime::format($row->settled_at ?? null),
         ];
     }
 

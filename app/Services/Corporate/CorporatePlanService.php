@@ -985,6 +985,59 @@ class CorporatePlanService
         return $dates;
     }
 
+    public function invoiceRows(User $actor): array
+    {
+        if (! Schema::hasTable('corporate_travel_bookings')) {
+            return [];
+        }
+        $q = DB::table('corporate_travel_bookings')->whereNotNull('invoice_no')->where('paid_paise', '>', 0);
+        if ($actor->role === 'DRIVER') {
+            $driverId = \App\Models\Driver::query()->where('user_id', $actor->id)->value('id');
+            $q->where(function ($inner) use ($actor, $driverId) {
+                $inner->where('driver_user_id', $actor->id);
+                if ($driverId) {
+                    $inner->orWhere('driver_id', $driverId);
+                }
+            });
+        } else {
+            $q->where('customer_id', $actor->id);
+        }
+
+        return $q->orderByDesc('id')->limit(30)->get()->map(function ($row) {
+            $total = (int) ($row->quote_paise ?? 0);
+            $paid = (int) ($row->paid_paise ?? 0);
+            $balance = max(0, $total - $paid);
+            $lines = [
+                ['key' => 'base', 'label' => 'Plan fare', 'rupees' => $total / 100],
+                ['key' => 'total', 'label' => 'Total fare', 'rupees' => $total / 100],
+                ['key' => 'advance', 'label' => 'Already paid', 'rupees' => $paid / 100],
+                ['key' => 'payDriver', 'label' => 'Balance', 'rupees' => $balance / 100],
+            ];
+
+            return [
+                'id' => 'corporate-'.$row->id,
+                'bookingId' => 'corporate-'.$row->id,
+                'publicRef' => $row->invoice_no ?: $row->public_ref,
+                'invoiceNumber' => $row->invoice_no ?: $row->public_ref,
+                'kind' => 'corporate',
+                'product' => 'CORPORATE',
+                'status' => $row->status,
+                'paymentMode' => $row->payment_method ?? 'ONLINE',
+                'customerName' => $row->contact_name,
+                'customerPhone' => $row->contact_phone,
+                'pickup' => $row->pickup_text,
+                'drop' => $row->drop_text,
+                'totalPaise' => $total,
+                'totalRupees' => $total / 100,
+                'subtotalRupees' => $total / 100,
+                'advanceRupees' => $paid / 100,
+                'balanceRupees' => $balance / 100,
+                'fareDetail' => ['product' => 'CORPORATE', 'lines' => $lines, 'driverLines' => $lines],
+                'issuedAt' => \App\Support\IndiaTime::format($row->updated_at ?? $row->created_at ?? null),
+            ];
+        })->all();
+    }
+
     private function present(object $row, ?User $viewer = null): array
     {
         $this->markExpired($row);

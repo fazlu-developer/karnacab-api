@@ -17,6 +17,6 @@ final class IndiaTime
             return (string) $value;
         }
 
-        return $dt->timezone('Asia/Kolkata')->format('d/m/Y h:i A');
+        return $dt->timezone('Asia/Kolkata')->format('j M Y, g:i A');
     }
 }

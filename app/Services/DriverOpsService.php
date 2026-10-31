@@ -452,24 +452,30 @@ class DriverOpsService
         $month = $this->periodEarnings((int) $driver->id, (int) $actor->id, $ist->copy()->startOfMonth()->utc(), now());
         $cash = [];
         if (Schema::hasTable('wallet_ledger')) {
-            $cash = DB::table('wallet_ledger')
+            $rows = DB::table('wallet_ledger')
                 ->where('owner_user_id', $actor->id)
-                ->whereIn('kind', ['cash_trip', 'cash', 'commission', 'trip'])
+                ->whereNotIn('kind', ['withdrawal', 'withdraw', 'payout', 'withdraw_hold'])
                 ->orderByDesc('id')
                 ->limit(80)
-                ->get()
-                ->map(fn ($row) => [
-                    'id' => (string) $row->id,
-                    'bookingId' => $row->booking_id ? (string) $row->booking_id : null,
-                    'kind' => $row->kind,
-                    'direction' => strtoupper((string) ($row->direction ?? 'CREDIT')),
-                    'note' => $row->note,
-                    'grossRupees' => ((int) ($row->gross_paise ?? $row->amount_paise)) / 100,
-                    'amountRupees' => ((int) $row->amount_paise) / 100,
-                    'commissionRupees' => ((int) ($row->commission_paise ?? 0)) / 100,
-                    'earningRupees' => ((int) $row->amount_paise) / 100,
-                    'createdAt' => $row->created_at,
-                ])->all();
+                ->get();
+            $refs = [];
+            $bookingIds = $rows->pluck('booking_id')->filter()->unique()->values();
+            if ($bookingIds->isNotEmpty() && Schema::hasTable('bookings')) {
+                $refs = DB::table('bookings')->whereIn('id', $bookingIds)->pluck('public_ref', 'id')->all();
+            }
+            $cash = $rows->map(fn ($row) => [
+                'id' => (string) $row->id,
+                'bookingId' => $row->booking_id ? (string) $row->booking_id : null,
+                'bookingRef' => $row->booking_id ? ($refs[(int) $row->booking_id] ?? $refs[(string) $row->booking_id] ?? null) : null,
+                'kind' => $row->kind,
+                'direction' => strtoupper((string) ($row->direction ?? 'CREDIT')),
+                'note' => $row->note,
+                'grossRupees' => ((int) ($row->gross_paise ?? $row->amount_paise)) / 100,
+                'amountRupees' => ((int) $row->amount_paise) / 100,
+                'commissionRupees' => ((int) ($row->commission_paise ?? 0)) / 100,
+                'earningRupees' => ((int) $row->amount_paise) / 100,
+                'createdAt' => \App\Support\IndiaTime::format($row->created_at),
+            ])->all();
         }
 
         return [
@@ -491,13 +497,14 @@ class DriverOpsService
     /**
      * Driver amounts from completed tour, bulk, and corporate days in the window.
      *
-     * @return array{earn: int, gross: int, cash: int, count: int}
+     * @return array{earn: int, gross: int, cash: int, collected: int, count: int}
      */
     private function serviceJobEarnings(int $driverId, $from, $to): array
     {
         $earn = 0;
         $gross = 0;
         $cash = 0;
+        $collected = 0;
         $count = 0;
         if (Schema::hasTable('travel_bookings')) {
             $tours = DB::table('travel_bookings')
@@ -511,6 +518,7 @@ class DriverOpsService
                 $earn += $driverPaise;
                 $gross += (int) $split['totalPaise'];
                 $cash += (int) $split['balancePaise'];
+                $collected += (int) $split['totalPaise'];
                 $count++;
             }
         }
@@ -527,6 +535,7 @@ class DriverOpsService
                 $earn += $due;
                 $gross += $fare;
                 $cash += (int) ($cab->collected_paise ?? $due);
+                $collected += $fare + (int) ($cab->wait_charge_paise ?? 0);
                 $count++;
             }
         }
@@ -547,11 +556,12 @@ class DriverOpsService
                 $earn += $share;
                 $gross += $share;
                 $cash += $share;
+                $collected += $share;
                 $count++;
             }
         }
 
-        return ['earn' => $earn, 'gross' => $gross, 'cash' => $cash, 'count' => $count];
+        return ['earn' => $earn, 'gross' => $gross, 'cash' => $cash, 'collected' => $collected, 'count' => $count];
     }
 
     /**
@@ -577,13 +587,31 @@ class DriverOpsService
         $earn = 0;
         $commission = 0;
         $cashGross = 0;
+        $collected = 0;
+        $rideCount = 0;
+        $rideIds = [];
+        $settled = function (object $row): bool {
+            $mode = strtoupper((string) ($row->payment_mode ?? 'CASH'));
+            if (in_array($mode, ['CASH', 'COD', 'CASH_ON_DELIVERY'], true)) {
+                return true;
+            }
+            $pay = strtoupper((string) ($row->payment_status ?? ''));
+
+            return $pay === '' || in_array($pay, ['PAID', 'SETTLED', 'SUCCESS', 'CAPTURED', 'COMPLETED', 'CASH', 'ADVANCE_PAID'], true);
+        };
         foreach ($rides as $row) {
+            $rideIds[] = (int) $row->id;
+            if (! $settled($row)) {
+                continue;
+            }
             $fare = (int) ($row->final_fare_paise ?? $row->quote_paise ?? 0);
             $comm = (int) ($row->commission_paise ?? 0);
             $net = (int) ($row->driver_earning_paise ?? max(0, $fare - $comm));
             $gross += $fare;
+            $collected += $fare;
             $commission += $comm;
             $earn += $net;
+            $rideCount++;
             $mode = strtoupper((string) ($row->payment_mode ?? 'CASH'));
             if (in_array($mode, ['CASH', 'COD', 'CASH_ON_DELIVERY'], true)) {
                 $cashGross += $fare;
@@ -599,11 +627,23 @@ class DriverOpsService
                 ->where('updated_at', '>=', $from)
                 ->where('updated_at', '<=', $to)
                 ->get();
-            $parcelCount = $parcels->count();
             foreach ($parcels as $row) {
+                $bookingId = (int) ($row->booking_id ?? 0);
+                if ($bookingId > 0 && in_array($bookingId, $rideIds, true)) {
+                    continue;
+                }
+                if (! $settled($row)) {
+                    continue;
+                }
                 $fare = (int) ($row->quote_paise ?? 0);
                 $parcelGross += $fare;
+                $collected += $fare;
                 $parcelEarn += (int) ($row->driver_earning_paise ?? (int) round($fare * 0.9));
+                $parcelCount++;
+                $mode = strtoupper((string) ($row->payment_mode ?? 'CASH'));
+                if (in_array($mode, ['CASH', 'COD', 'CASH_ON_DELIVERY'], true)) {
+                    $cashGross += $fare;
+                }
             }
         }
         $incentives = 0;
@@ -620,6 +660,7 @@ class DriverOpsService
         $earn += $jobs['earn'];
         $gross += $jobs['gross'];
         $cashGross += $jobs['cash'];
+        $collected += $jobs['collected'];
         $net = $earn + $parcelEarn;
 
         return [
@@ -633,10 +674,12 @@ class DriverOpsService
             'commissionRupees' => $commission / 100,
             'cashCollectedPaise' => $cashGross,
             'cashCollectedRupees' => $cashGross / 100,
+            'collectedPaise' => $collected,
+            'collectedRupees' => $collected / 100,
             'incentivesPaise' => $incentives,
             'incentivesRupees' => $incentives / 100,
-            'trips' => $rides->count() + $parcelCount + $jobs['count'],
-            'rides' => $rides->count(),
+            'trips' => $rideCount + $parcelCount + $jobs['count'],
+            'rides' => $rideCount,
             'parcels' => $parcelCount,
         ];
     }

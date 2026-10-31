@@ -297,18 +297,18 @@ class TourBookingService
     public function invoiceRows(User $actor): array
     {
         $this->boot();
-        if (! Schema::hasTable('travel_bookings') || $actor->role === 'DRIVER') {
+        if (! Schema::hasTable('travel_bookings')) {
             return [];
         }
+        $q = DB::table('travel_bookings')->whereNotNull('invoice_no');
+        if ($actor->role === 'DRIVER') {
+            $driverId = \App\Models\Driver::query()->where('user_id', $actor->id)->value('id');
+            $q->where('driver_id', $driverId ?: 0)->where('status', 'COMPLETED');
+        } else {
+            $q->where('customer_id', $actor->id);
+        }
 
-        return DB::table('travel_bookings')
-            ->where('customer_id', $actor->id)
-            ->whereNotNull('invoice_no')
-            ->orderByDesc('id')
-            ->limit(30)
-            ->get()
-            ->map(fn ($row) => $this->invoiceMap($row))
-            ->all();
+        return $q->orderByDesc('id')->limit(30)->get()->map(fn ($row) => $this->invoiceMap($row))->all();
     }
 
     private function settleAdvance(object $row, string $method, string $paymentRef, User $actor): object
@@ -647,6 +647,14 @@ class TourBookingService
     {
         $split = $split ?: $this->money((int) ($row->quote_paise ?? 0));
         $paid = (int) ($row->advance_paid_paise ?? 0);
+        $total = (int) $split['totalPaise'];
+        $balance = max(0, $total - $paid);
+        $lines = [
+            ['key' => 'base', 'label' => 'Package fare', 'rupees' => $total / 100],
+            ['key' => 'total', 'label' => 'Total fare', 'rupees' => $total / 100],
+            ['key' => 'advance', 'label' => 'Already paid', 'rupees' => $paid / 100],
+            ['key' => 'payDriver', 'label' => 'Balance', 'rupees' => $balance / 100],
+        ];
 
         return [
             'id' => 'tour-'.$row->id,
@@ -666,11 +674,12 @@ class TourBookingService
             'totalRupees' => $split['totalPaise'] / 100,
             'subtotalRupees' => $split['totalPaise'] / 100,
             'gstRupees' => 0,
-            'advanceRupees' => $split['advancePaise'] / 100,
-            'balanceRupees' => $split['balancePaise'] / 100,
+            'advanceRupees' => $paid / 100,
+            'balanceRupees' => $balance / 100,
             'platformRupees' => $split['platformCommissionPaise'] / 100,
             'driverAdvanceRupees' => $split['driverAdvancePaise'] / 100,
-            'issuedAt' => $row->approved_at ?? $row->created_at ?? null,
+            'fareDetail' => ['product' => 'TRAVEL', 'lines' => $lines, 'driverLines' => $lines],
+            'issuedAt' => \App\Support\IndiaTime::format($row->approved_at ?? $row->created_at ?? null),
         ];
     }
 

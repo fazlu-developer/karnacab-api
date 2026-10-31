@@ -698,6 +698,35 @@ class BulkBookingService
         return ['lat' => $lat !== null ? (float) $lat : null, 'lng' => $lng !== null ? (float) $lng : null];
     }
 
+    public function invoiceRows(User $actor): array
+    {
+        if (! Schema::hasTable('bulk_bookings')) {
+            return [];
+        }
+        $q = DB::table('bulk_bookings')->where('status', 'COMPLETED');
+        if ($actor->role === 'DRIVER') {
+            $driverId = \App\Models\Driver::query()->where('user_id', $actor->id)->value('id');
+            $parentIds = Schema::hasTable('bulk_booking_cabs')
+                ? DB::table('bulk_booking_cabs')->where('driver_id', $driverId ?: 0)->pluck('bulk_booking_id')
+                : collect();
+            $q->whereIn('id', $parentIds);
+        } else {
+            $q->where('customer_id', $actor->id);
+        }
+
+        return $q->orderByDesc('id')->limit(30)->get()->map(function ($row) {
+            $quote = $this->decode($row->quote_snapshot ?? null);
+            $wait = (int) ($row->waiting_extra_paise ?? 0);
+            $grand = (int) ($row->quote_paise ?? 0) + $wait;
+            $map = $this->invoiceMap($row, is_array($quote) ? $quote : [], $grand, $wait);
+            $map['id'] = 'bulk-'.$row->id;
+            $map['bookingId'] = 'bulk-'.$row->id;
+            $map['invoiceNumber'] = $row->invoice_no ?: $row->public_ref;
+
+            return $map;
+        })->all();
+    }
+
     private function present(object $row, ?User $viewer = null): array
     {
         $quote = $this->decode($row->quote_snapshot ?? null);
@@ -956,6 +985,18 @@ class BulkBookingService
     private function invoiceMap(object $row, array $quote, int $grand, int $wait): array
     {
         $gst = (int) ($quote['gstPaise'] ?? 0);
+        $paid = (int) ($row->advance_paid_paise ?? 0);
+        $base = max(0, $grand - $wait);
+        $balance = max(0, $grand - $paid);
+        $lines = [
+            ['key' => 'base', 'label' => 'Base fare', 'rupees' => $base / 100],
+        ];
+        if ($wait > 0) {
+            $lines[] = ['key' => 'extra', 'label' => 'Extras', 'rupees' => $wait / 100];
+        }
+        $lines[] = ['key' => 'total', 'label' => 'Total fare', 'rupees' => $grand / 100];
+        $lines[] = ['key' => 'advance', 'label' => 'Already paid', 'rupees' => $paid / 100];
+        $lines[] = ['key' => 'payDriver', 'label' => 'Balance', 'rupees' => $balance / 100];
 
         return [
             'publicRef' => $row->invoice_no ?: $row->public_ref,
@@ -972,10 +1013,11 @@ class BulkBookingService
             'totalPaise' => $grand,
             'totalRupees' => $grand / 100,
             'waitingExtraRupees' => $wait / 100,
-            'advanceRupees' => ((int) $row->advance_paid_paise) / 100,
-            'balanceRupees' => (max(0, (int) $row->quote_paise - (int) $row->advance_paise) + $wait) / 100,
+            'advanceRupees' => $paid / 100,
+            'balanceRupees' => $balance / 100,
             'paymentMode' => $row->payment_method ?: 'ADVANCE',
-            'issuedAt' => (string) ($row->confirmed_at ?? $row->created_at ?? ''),
+            'fareDetail' => ['product' => 'BULK', 'lines' => $lines, 'driverLines' => $lines],
+            'issuedAt' => \App\Support\IndiaTime::format($row->confirmed_at ?? $row->created_at ?? null),
         ];
     }
 

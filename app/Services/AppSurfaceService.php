@@ -182,13 +182,26 @@ class AppSurfaceService
 
         $fromBookings = $bookings->map(fn ($row) => $this->presentInvoice($actor, $row))->all();
         $tourInvoices = [];
+        $bulkInvoices = [];
+        $corporateInvoices = [];
         try {
             $tourInvoices = app(\App\Services\Tour\TourBookingService::class)->invoiceRows($actor);
         } catch (\Throwable) {
             $tourInvoices = [];
         }
-        if ($fromBookings !== [] || $tourInvoices !== []) {
-            return ['invoices' => array_merge($fromBookings, $tourInvoices)];
+        try {
+            $bulkInvoices = app(\App\Services\Bulk\BulkBookingService::class)->invoiceRows($actor);
+        } catch (\Throwable) {
+            $bulkInvoices = [];
+        }
+        try {
+            $corporateInvoices = app(\App\Services\Corporate\CorporatePlanService::class)->invoiceRows($actor);
+        } catch (\Throwable) {
+            $corporateInvoices = [];
+        }
+        $merged = array_merge($fromBookings, $tourInvoices, $bulkInvoices, $corporateInvoices);
+        if ($merged !== []) {
+            return ['invoices' => $merged];
         }
         if (! Schema::hasTable('invoices')) {
             return ['invoices' => []];
@@ -261,7 +274,7 @@ class AppSurfaceService
             'driverEarningPaise' => $earningPaise,
             'driverEarningRupees' => $earningPaise / 100,
             'currency' => $row->currency ?? 'INR',
-            'issuedAt' => $row->issued_at ?? $row->trip_ended_at ?? $row->updated_at ?? $row->created_at,
+            'issuedAt' => \App\Support\IndiaTime::format($row->issued_at ?? $row->trip_ended_at ?? $row->updated_at ?? $row->created_at),
             'pickup' => $row->pickup_text ?? $row->pickup ?? null,
             'drop' => $row->drop_text ?? $row->drop ?? null,
             'stops' => $productName === 'MULTI_STOP' ? ($snapshot['multiStops'] ?? $snapshot['stops'] ?? []) : [],
@@ -1605,7 +1618,7 @@ class AppSurfaceService
                 'status' => $item->status ?? 'posted',
                 'note' => $item->note ?? '',
                 'description' => $item->note ?? ($item->kind ?? 'Entry'),
-                'createdAt' => $item->created_at ?? null,
+                'createdAt' => \App\Support\IndiaTime::format($item->created_at ?? null),
             ])->all();
         }
 
