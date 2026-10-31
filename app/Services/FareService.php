@@ -321,19 +321,16 @@ class FareService
             return $fallback;
         }
         $legs = $response->json('routes.0.legs') ?? [];
-        if ($points !== [] && count($legs) < 2) {
-            return $fallback;
-        }
+        $poly = $response->json('routes.0.overview_polyline.points');
         $legKm = 0.0;
         $seconds = 0;
         foreach ($legs as $leg) {
             $legKm += ((float) ($leg['distance']['value'] ?? 0)) / 1000;
             $seconds += (int) ($leg['duration']['value'] ?? 0);
         }
-        if ($legKm <= 0) {
+        if ((! is_string($poly) || $poly === '') && ($legKm <= 0 || ($points !== [] && count($legs) < 2))) {
             return $fallback;
         }
-        $poly = $response->json('routes.0.overview_polyline.points');
 
         return [
             'distanceKm' => max(1, round($legKm, 2)),

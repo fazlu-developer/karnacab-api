@@ -16,6 +16,7 @@ class OperatorFleetService
 {
     public const VEHICLE_TYPES = [
         'BIKE', 'AUTO', 'E_RICKSHAW', 'MINI', 'SEDAN', 'SUV', 'TRAVELLER',
+        'AMBULANCE', 'BASIC', 'BLS', 'ALS',
     ];
 
     public function capabilities(User $actor): array
@@ -358,7 +359,7 @@ class OperatorFleetService
                 'district_id' => $territory['districtId'],
                 'driver_type' => 'fleet_driver',
                 'updated_at' => now(),
-            ], $this->driverIdentity($data))));
+            ], $this->driverIdentity($data), $this->driverCategoryPatch($data))));
             DB::table('users')->where('id', $existing->id)->update($this->onlyColumns('users', [
                 'state_id' => $territory['stateId'],
                 'district_id' => $territory['districtId'],
@@ -412,7 +413,7 @@ class OperatorFleetService
         if (Schema::hasColumn('drivers', 'application_submitted_at')) {
             $driverPayload['application_submitted_at'] = now();
         }
-        $driverPayload = array_merge($driverPayload, $this->driverIdentity($data));
+        $driverPayload = array_merge($driverPayload, $this->driverIdentity($data), $this->driverCategoryPatch($data));
         try {
             $driverId = DB::table('drivers')->insertGetId($this->onlyColumns('drivers', $driverPayload));
         } catch (QueryException $e) {
@@ -1636,6 +1637,26 @@ class OperatorFleetService
         }
 
         return ['stateId' => $stateId, 'districtId' => $districtId, 'city' => $city];
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array<string, string>
+     */
+    private function driverCategoryPatch(array $data): array
+    {
+        $category = strtoupper(trim((string) ($data['category'] ?? $data['vehicleType'] ?? '')));
+        if ($category === '') {
+            return [];
+        }
+        abort_unless(app(VehicleCatalogService::class)->isVehicleKey($category) || in_array($category, self::VEHICLE_TYPES, true), 422, 'Select a vehicle category.');
+        if (! Schema::hasColumn('drivers', 'vehicle_category')) {
+            Schema::table('drivers', function ($table) {
+                $table->string('vehicle_category', 40)->nullable();
+            });
+        }
+
+        return ['vehicle_category' => $category];
     }
 
     /**

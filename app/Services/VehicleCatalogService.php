@@ -83,7 +83,10 @@ class VehicleCatalogService
         $this->ensureTable();
         $groups = [];
         foreach ($this->allTypes() as $type) {
-            $bucket = $type['family'] ?: $this->familyBucket($type['key']);
+            $key = strtoupper((string) $type['key']);
+            $bucket = in_array($key, ['AMBULANCE', 'BASIC', 'BLS', 'ALS'], true)
+                ? 'AMBULANCE'
+                : ($type['family'] ?: $this->familyBucket($key));
             if (! isset($groups[$bucket])) {
                 $groups[$bucket] = [
                     'key' => $bucket,
@@ -124,6 +127,20 @@ class VehicleCatalogService
             ];
         }
 
+        if (! isset($groups['AMBULANCE'])) {
+            $groups['AMBULANCE'] = [
+                'key' => 'AMBULANCE',
+                'label' => 'Ambulance',
+                'imageUrl' => '',
+                'categories' => [
+                    ['key' => 'AMBULANCE', 'label' => 'Ambulance', 'imageUrl' => '', 'seats' => 2],
+                    ['key' => 'BASIC', 'label' => 'Basic Patient Transport', 'imageUrl' => '', 'seats' => 2],
+                    ['key' => 'BLS', 'label' => 'BLS Ambulance', 'imageUrl' => '', 'seats' => 2],
+                    ['key' => 'ALS', 'label' => 'ALS Ambulance', 'imageUrl' => '', 'seats' => 2],
+                ],
+            ];
+        }
+
         return array_values($groups);
     }
 
@@ -134,7 +151,7 @@ class VehicleCatalogService
             return true;
         }
 
-        return in_array($key, ['TRUCK', 'VAN', 'CAR', 'SCOOTY', 'PICKUP'], true);
+        return in_array($key, ['TRUCK', 'VAN', 'CAR', 'SCOOTY', 'PICKUP', 'AMBULANCE', 'BASIC', 'BLS', 'ALS'], true);
     }
 
     public function familyBucket(string $key): string
@@ -151,7 +168,7 @@ class VehicleCatalogService
             'BIKE', 'SCOOTY' => 'BIKE',
             'AUTO', 'E_RICKSHAW' => 'AUTO',
             'TRUCK', 'VAN', 'PICKUP' => 'LOADING',
-            'AMBULANCE' => 'AMBULANCE',
+            'AMBULANCE', 'BASIC', 'BLS', 'ALS' => 'AMBULANCE',
             default => 'CAR',
         };
     }
