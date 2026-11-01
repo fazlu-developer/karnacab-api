@@ -870,16 +870,9 @@ class BookingService
                     $body = $futureAccept
                         ? 'Pay 10% to confirm your railway ride. It stays scheduled after payment.'
                         : 'Pay 10% to confirm your railway ride. Your driver heads to pickup after payment.';
-                } elseif ($this->isParcel($noticeBooking)) {
-                    $title = 'Driver accepted. Pay 10% to confirm';
-                    $body = $futureAccept
-                        ? 'Pay 10% to confirm your parcel. It stays scheduled after payment.'
-                        : 'Pay 10% to confirm your parcel. Pickup starts after payment.';
-                } elseif ($this->isMultiStop($noticeBooking)) {
-                    $title = 'Driver accepted. Pay 10% to confirm';
-                    $body = $futureAccept
-                        ? 'Pay 10% to confirm your multi-stop. It stays scheduled after payment.'
-                        : 'Pay 10% to confirm your multi-stop. Your driver heads to pickup after payment.';
+                } elseif ($this->isParcel($noticeBooking) || $this->isMultiStop($noticeBooking) || $this->isRental($noticeBooking)) {
+                    $title = 'Your booking is accepted';
+                    $body = $driverName.' accepted your booking '.$noticeBooking->public_ref.'.';
                 } elseif ($this->isRoundTrip($noticeBooking)) {
                     $title = 'Driver accepted. Pay 10% to confirm';
                     $body = $futureAccept
@@ -960,6 +953,7 @@ class BookingService
     {
         $booking = $this->findVisible($actor, $id);
         $stars = max(1, min(5, $stars));
+        $comment = mb_substr(trim($comment), 0, 255);
         if (Schema::hasTable('booking_ratings')) {
             $columns = Schema::getColumnListing('booking_ratings');
             $row = [
@@ -975,10 +969,15 @@ class BookingService
             if (in_array('from_role', $columns, true)) {
                 $match['from_role'] = $actor->role;
             }
-            DB::table('booking_ratings')->updateOrInsert(
-                $match,
-                array_filter($row, fn ($key) => in_array($key, $columns, true), ARRAY_FILTER_USE_KEY),
-            );
+            try {
+                DB::table('booking_ratings')->updateOrInsert(
+                    $match,
+                    array_filter($row, fn ($key) => in_array($key, $columns, true), ARRAY_FILTER_USE_KEY),
+                );
+            } catch (\Throwable $e) {
+                report($e);
+                abort(422, 'Could not save your review. Try again.');
+            }
         }
         if ($booking->driver_id && Schema::hasTable('booking_ratings')) {
             $ids = Booking::query()->where('driver_id', $booking->driver_id)->pluck('id');
@@ -1644,6 +1643,9 @@ class BookingService
         if (BookingStatus::isSearching((string) $row->status) && Schema::hasTable('booking_driver_requests')) {
             $nearbyCount = (int) DB::table('booking_driver_requests')->where('booking_id', $row->id)->whereIn('status', ['OFFERED', 'ACCEPTED'])->count();
         }
+        if ($this->isParcel($row)) {
+            $this->ensureParcelDeliveryPin($row);
+        }
         $isCustomer = $actor && in_array($actor->role, ['CUSTOMER', 'CORPORATE', 'ADMIN', 'SUPER_ADMIN'], true);
         $expires = Schema::hasColumn('bookings', 'search_expires_at') ? $row->search_expires_at : null;
         $secondsLeft = $expires ? max(0, $expires->getTimestamp() - time()) : null;
@@ -1825,8 +1827,10 @@ class BookingService
             'startOtp' => ($isCustomer && (! $this->isParcel($row) || $this->parcelPickupOtpVisible($row))) ? $row->start_otp : null,
             'endOtp' => $isCustomer && ! $this->isMultiStop($row) && (
                 ($this->isRental($row) && in_array((string) $row->status, [BookingStatus::RENTAL_IN_USE, BookingStatus::COMPLETED], true))
-                || (! $this->isRental($row) && in_array($row->status, [BookingStatus::TRIP_STARTED, BookingStatus::COMPLETED], true) && (! $isRound || $roundPhase === 'return' || $roundPhase === 'completed'))
+                || ($this->isParcel($row) && in_array((string) $row->status, [BookingStatus::OTP_VERIFIED, BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED', BookingStatus::COMPLETED], true))
+                || (! $this->isRental($row) && ! $this->isParcel($row) && in_array($row->status, [BookingStatus::TRIP_STARTED, BookingStatus::COMPLETED], true) && (! $isRound || $roundPhase === 'return' || $roundPhase === 'completed'))
             ) ? $row->end_otp : null,
+            'deliveryPin' => ($isCustomer && $this->isParcel($row) && in_array((string) $row->status, [BookingStatus::OTP_VERIFIED, BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED', BookingStatus::COMPLETED], true)) ? $row->end_otp : null,
             'driverName' => $driverPayload['name'] ?? null,
             'driverLat' => $driverPayload['lat'] ?? null,
             'driverLng' => $driverPayload['lng'] ?? null,
@@ -3021,12 +3025,26 @@ class BookingService
             BookingStatus::LEGACY_ASSIGNED,
             'DRIVER_ARRIVING',
             BookingStatus::DRIVER_ARRIVED,
-            BookingStatus::OTP_VERIFIED,
-            BookingStatus::TRIP_STARTED,
-            BookingStatus::COMPLETED,
-            'ONGOING',
-            'STARTED',
         ], true);
+    }
+
+    private function ensureParcelDeliveryPin(Booking $row): void
+    {
+        if (trim((string) ($row->end_otp ?? '')) !== '' || ! Schema::hasTable('parcel_shipments')) {
+            return;
+        }
+        if (! Schema::hasColumn('parcel_shipments', 'booking_id') || ! Schema::hasColumn('parcel_shipments', 'delivery_pin')) {
+            return;
+        }
+        $pin = DB::table('parcel_shipments')->where('booking_id', $row->id)->value('delivery_pin');
+        $pin = trim((string) $pin);
+        if ($pin === '') {
+            return;
+        }
+        $row->end_otp = $pin;
+        DB::table('bookings')->where('id', $row->id)->where(function ($query) {
+            $query->whereNull('end_otp')->orWhere('end_otp', '');
+        })->update(['end_otp' => $pin]);
     }
 
     private function isRoundTrip(object $row): bool
@@ -3951,6 +3969,7 @@ class BookingService
                 BookingStatus::DRIVER_ACCEPTED,
                 BookingStatus::LEGACY_ASSIGNED,
                 BookingStatus::DRIVER_ARRIVED,
+                'DRIVER_ARRIVING',
                 'DRIVER_SEARCHING',
                 'CONFIRMED',
                 'SCHEDULED',
