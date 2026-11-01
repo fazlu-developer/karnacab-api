@@ -769,7 +769,7 @@ class OperatorFleetService
                 if ($dir === 'DEBIT' && in_array($kind, ['settlement_payout', 'payout', 'settlement'], true)) {
                     $paid += $amount;
                 }
-                if (! $inPeriod) {
+                if ($dir === 'DEBIT' || ! $inPeriod) {
                     continue;
                 }
                 $ledger[] = [
