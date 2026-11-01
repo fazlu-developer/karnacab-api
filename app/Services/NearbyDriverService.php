@@ -76,14 +76,22 @@ class NearbyDriverService
         }
         if ($stateId && Schema::hasColumn('drivers', 'state_id')) {
             $rowsQuery->where(function ($q) use ($stateId, $districtId) {
-                $q->where('d.state_id', $stateId)->orWhere('u.state_id', $stateId);
+                $q->where('d.state_id', $stateId)
+                    ->orWhere('u.state_id', $stateId)
+                    ->orWhere(function ($open) {
+                        $open->whereNull('d.state_id')->whereNull('u.state_id');
+                    });
                 if ($districtId) {
                     $q->orWhere('d.district_id', $districtId)->orWhere('u.district_id', $districtId);
                 }
             });
         } elseif ($districtId && Schema::hasColumn('drivers', 'district_id')) {
             $rowsQuery->where(function ($q) use ($districtId) {
-                $q->where('d.district_id', $districtId)->orWhere('u.district_id', $districtId);
+                $q->where('d.district_id', $districtId)
+                    ->orWhere('u.district_id', $districtId)
+                    ->orWhere(function ($open) {
+                        $open->whereNull('d.district_id')->whereNull('u.district_id');
+                    });
             });
         }
         $rows = $rowsQuery

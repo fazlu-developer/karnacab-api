@@ -48,6 +48,18 @@ class DriverOpsService
         $canGoOnline = $approved && ! $blocked && ! $fleetUnassigned;
         $online = (bool) $driver->online;
         $duty = $driver->duty_status ?: ($online ? 'online' : 'offline');
+        $activeRide = \App\Models\Booking::query()
+            ->where('driver_id', $driver->id)
+            ->whereIn('status', \App\Support\BookingStatus::openForDriver())
+            ->orderByDesc('id')
+            ->first();
+        $activeParcel = Schema::hasTable('parcel_shipments')
+            ? DB::table('parcel_shipments')->where('driver_id', $driver->id)->whereIn('status', ['assigned', 'picked_up', 'in_transit', 'out_for_delivery'])->orderByDesc('id')->first()
+            : null;
+        if ($online && in_array(strtolower((string) $duty), ['on_trip', 'on_delivery'], true) && ! $activeRide && ! $activeParcel) {
+            $driver->update(['duty_status' => 'online']);
+            $duty = 'online';
+        }
         $canReceive = $canGoOnline && $online && in_array(strtolower((string) $duty), ['online', 'available'], true);
         $vehicle = $driver->vehicles->first();
         $wallet = Schema::hasTable('wallets')
@@ -65,36 +77,28 @@ class DriverOpsService
         $todayEarnPaise = (int) ($todayStats['netPaise'] ?? $todayStats['earningsPaise'] ?? 0);
         $todayParcels = (int) $todayStats['parcels'];
         $pending = 0;
-        $offerIds = [];
-        if ($canReceive) {
-            foreach (app(\App\Services\BookingService::class)->offersForDriver($actor) as $row) {
-                $offerIds[(string) ($row['id'] ?? '')] = true;
-            }
-            if (Schema::hasTable('parcel_shipments') && $driver) {
-                $dismissals = app(OfferDismissal::class);
-                $parcelCount = DB::table('parcel_shipments')
-                    ->whereNull('driver_id')
-                    ->when(Schema::hasColumn('parcel_shipments', 'booking_id'), fn ($q) => $q->whereNull('booking_id'))
-                    ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
-                    ->where('created_at', '>=', now()->subMinutes(20))
-                    ->pluck('id')
-                    ->filter(fn ($id) => ! $dismissals->hidden((int) $driver->id, 'parcel', (string) $id))
-                    ->count();
-                $pending = count(array_filter(array_keys($offerIds))) + $parcelCount;
-            }
+        if ($canReceive && Schema::hasTable('booking_driver_requests')) {
+            $pending = (int) DB::table('booking_driver_requests as r')
+                ->join('bookings as b', 'b.id', '=', 'r.booking_id')
+                ->where('r.driver_id', $driver->id)
+                ->where('r.status', 'OFFERED')
+                ->where('b.status', \App\Support\BookingStatus::SEARCHING)
+                ->whereNull('b.driver_id')
+                ->count();
         }
-        if (! isset($pending) || $pending === 0) {
-            $pending = count(array_filter(array_keys($offerIds)));
+        if ($canReceive && Schema::hasTable('parcel_shipments') && $driver) {
+            $dismissals = app(OfferDismissal::class);
+            $parcelCount = DB::table('parcel_shipments')
+                ->whereNull('driver_id')
+                ->when(Schema::hasColumn('parcel_shipments', 'booking_id'), fn ($q) => $q->whereNull('booking_id'))
+                ->whereIn('status', ['created', 'paid', 'CREATED', 'PAID'])
+                ->where('created_at', '>=', now()->subMinutes(20))
+                ->pluck('id')
+                ->filter(fn ($id) => ! $dismissals->hidden((int) $driver->id, 'parcel', (string) $id))
+                ->count();
+            $pending += $parcelCount;
         }
         $rating = $this->rideRatingAverage((int) $driver->id);
-        $activeRide = \App\Models\Booking::query()
-            ->where('driver_id', $driver->id)
-            ->whereIn('status', \App\Support\BookingStatus::openForDriver())
-            ->orderByDesc('id')
-            ->first();
-        $activeParcel = Schema::hasTable('parcel_shipments')
-            ? DB::table('parcel_shipments')->where('driver_id', $driver->id)->whereIn('status', ['assigned', 'picked_up', 'in_transit', 'out_for_delivery'])->orderByDesc('id')->first()
-            : null;
         $kycDocs = app(KycDocumentService::class);
         $documents = $driver->documents->map(fn ($doc) => $kycDocs->present($doc))->all();
         $incentives = [];
@@ -687,9 +691,11 @@ class DriverOpsService
     public function setOnline(User $actor, bool $online): array
     {
         $driver = Driver::query()->where('user_id', $actor->id)->firstOrFail();
-        if ($online && in_array(strtolower((string) $driver->duty_status), ['on_trip', 'on_delivery'], true)) {
-            return $this->me($actor);
-        }
+        $onJob = in_array(strtolower((string) $driver->duty_status), ['on_trip', 'on_delivery'], true);
+        $openJob = $onJob && (
+            \App\Models\Booking::query()->where('driver_id', $driver->id)->whereIn('status', \App\Support\BookingStatus::openForDriver())->exists()
+            || (Schema::hasTable('parcel_shipments') && DB::table('parcel_shipments')->where('driver_id', $driver->id)->whereIn('status', ['assigned', 'picked_up', 'in_transit', 'out_for_delivery'])->exists())
+        );
         if ($online) {
             $kyc = strtolower((string) ($driver->kyc_status ?? ''));
             abort_if($kyc === 'left_fleet', 403, 'Contact admin to complete KYC before you can go online.');
@@ -698,12 +704,9 @@ class DriverOpsService
                 abort_unless($driver->vehicles()->exists(), 422, 'You are not assigned to a vehicle.');
             }
         }
-        if (! $online && in_array(strtolower((string) $driver->duty_status), ['on_trip', 'on_delivery'], true)) {
-            abort(422, 'Complete the trip before going offline.');
-        }
         $driver->update([
             'online' => $online,
-            'duty_status' => $online ? 'online' : 'offline',
+            'duty_status' => $online ? ($openJob ? $driver->duty_status : 'online') : 'offline',
         ]);
         if ($online) {
             try {
@@ -1282,11 +1285,15 @@ class DriverOpsService
         }
         if ($kind === 'phone') {
             $digits = preg_replace('/\D+/', '', $value) ?? '';
-            if (strlen($digits) === 10) {
-                $digits = '91'.$digits;
+            if (strlen($digits) >= 12 && str_starts_with($digits, '91')) {
+                $digits = substr($digits, -10);
+            } elseif (strlen($digits) === 11 && str_starts_with($digits, '0')) {
+                $digits = substr($digits, 1);
             }
 
-            return User::query()->where('phone', $digits)->where('id', '!=', $ignoreUserId)->exists();
+            $role = User::query()->where('id', $ignoreUserId)->value('role');
+
+            return User::query()->where('phone', $digits)->where('role', $role)->where('id', '!=', $ignoreUserId)->exists();
         }
         $q = Driver::query()->where('user_id', '!=', $ignoreUserId);
         if ($kind === 'aadhaar') {

@@ -643,7 +643,7 @@ class OperatorFleetService
         }
         $phone = preg_replace('/\D+/', '', (string) ($data['customerMobile'] ?? $data['phone'] ?? ''));
         abort_unless(strlen($phone) === 10, 422, 'Enter a valid customer mobile number.');
-        $customer = DB::table('users')->where('phone', $phone)->first();
+        $customer = DB::table('users')->where('phone', $phone)->where('role', 'CUSTOMER')->first();
         if (! $customer) {
             $customerId = DB::table('users')->insertGetId([
                 'role' => 'CUSTOMER',

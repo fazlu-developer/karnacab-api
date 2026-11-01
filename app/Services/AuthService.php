@@ -149,12 +149,14 @@ class AuthService
             abort(422, 'Invalid OTP');
         }
 
-        $user = User::query()->where('phone', $phone)->first();
+        $user = User::query()->where('phone', $phone)->where('role', $role)->first();
         if (! $user) {
-            $placeholder = $phone.'@otp.karnacab.local';
-            $user = User::query()->where('email', $placeholder)->first();
+            $placeholder = $role === 'CUSTOMER'
+                ? $phone.'@otp.karnacab.local'
+                : $phone.'.'.strtolower($role).'@otp.karnacab.local';
+            $user = User::query()->where('email', $placeholder)->where('role', $role)->first();
             if ($user && (string) $user->phone !== $phone) {
-                $taken = User::query()->where('phone', $phone)->where('id', '!=', $user->id)->exists();
+                $taken = User::query()->where('phone', $phone)->where('role', $role)->where('id', '!=', $user->id)->exists();
                 if (! $taken) {
                     $user->update(['phone' => $phone]);
                     $user->refresh();
@@ -163,9 +165,11 @@ class AuthService
         }
         $this->ensureProfileColumns();
         if (! $user) {
-            $email = $phone.'@otp.karnacab.local';
+            $email = $role === 'CUSTOMER'
+                ? $phone.'@otp.karnacab.local'
+                : $phone.'.'.strtolower($role).'@otp.karnacab.local';
             if (User::query()->where('email', $email)->exists()) {
-                $email = $phone.'.'.substr((string) time(), -4).'@otp.karnacab.local';
+                $email = $phone.'.'.strtolower($role).'.'.substr((string) time(), -4).'@otp.karnacab.local';
             }
             $user = User::query()->create([
                 'role' => $role,
@@ -184,12 +188,6 @@ class AuthService
                     'updated_at' => now(),
                 ]);
             }
-        } elseif ($role === 'DRIVER' && $user->role !== 'DRIVER') {
-            abort(403, $user->role === 'FLEET_OWNER' ? 'Use Fleet Owner mode for this number' : 'Use the customer app for this number');
-        } elseif ($role === 'CUSTOMER' && in_array($user->role, ['DRIVER', 'FLEET_OWNER'], true)) {
-            abort(403, $user->role === 'FLEET_OWNER' ? 'Use the driver app Fleet Owner mode for this number' : 'Use the driver app for this number');
-        } elseif ($role === 'FLEET_OWNER' && $user->role !== 'FLEET_OWNER') {
-            abort(403, $user->role === 'DRIVER' ? 'Use Driver mode for this number' : 'This number is already registered');
         }
 
         if ($role === 'FLEET_OWNER') {

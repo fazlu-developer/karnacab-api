@@ -564,32 +564,45 @@ class BookingService
             ]);
         }
 
+        if ($driverDispatch && $matches !== []) {
+            $this->writeOffers($booking, $matches);
+        }
         $presented = $this->present($booking->fresh(), $actor);
         $opsTitle = $driverDispatch
             ? 'New ride request'
             : 'Assign a driver · '.str_replace('_', ' ', $product);
-        try {
-            if ($driverDispatch && $matches !== []) {
-                $this->writeOffers($booking, $matches);
-                $this->push->notifyUsers(
-                    array_map(fn ($row) => (int) ($row['userId'] ?? 0), $matches),
-                    $product === 'PARCEL' ? 'New parcel request' : ($product === 'AIRPORT' ? 'New airport ride' : ($product === 'RAILWAY' ? 'New railway ride' : 'New KarnaRide booking')),
-                    trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
-                    [
-                        'type' => 'booking_offer',
-                        'event' => 'new_booking',
-                        'product' => (string) $booking->product,
-                        'bookingId' => (string) $booking->id,
-                    ],
-                );
+        $notifyMatches = $matches;
+        $notifyBookingId = (int) $booking->id;
+        $notifyProduct = (string) $booking->product;
+        $notifyTitle = $product === 'PARCEL' ? 'New parcel request' : ($product === 'AIRPORT' ? 'New airport ride' : ($product === 'RAILWAY' ? 'New railway ride' : 'New KarnaRide booking'));
+        $notifyBody = trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop'));
+        dispatch(function () use ($driverDispatch, $notifyMatches, $notifyBookingId, $notifyProduct, $notifyTitle, $notifyBody, $opsTitle) {
+            try {
+                $fresh = Booking::query()->find($notifyBookingId);
+                if (! $fresh) {
+                    return;
+                }
+                if ($driverDispatch && $notifyMatches !== []) {
+                    app(FcmPushService::class)->notifyUsers(
+                        array_map(fn ($row) => (int) ($row['userId'] ?? 0), $notifyMatches),
+                        $notifyTitle,
+                        $notifyBody,
+                        [
+                            'type' => 'booking_offer',
+                            'event' => 'new_booking',
+                            'product' => $notifyProduct,
+                            'bookingId' => (string) $notifyBookingId,
+                        ],
+                    );
+                }
+                app(self::class)->notifyOps($fresh, $opsTitle);
+            } catch (\Throwable $e) {
+                Log::warning('booking.notify_failed', [
+                    'bookingId' => $notifyBookingId,
+                    'error' => $e->getMessage(),
+                ]);
             }
-            $this->notifyOps($booking, $opsTitle);
-        } catch (\Throwable $e) {
-            Log::warning('booking.notify_failed', [
-                'bookingId' => $booking->id,
-                'error' => $e->getMessage(),
-            ]);
-        }
+        })->afterResponse();
 
         return $presented;
     }
@@ -1103,14 +1116,16 @@ class BookingService
         $this->syncLinkedParcel($booking->fresh(), 'in_transit');
         $this->push->notifyUsers(
             [(int) $booking->customer_id],
-            $this->isParcel($booking) ? 'Parcel in transit' : ($this->isMultiStop($booking) ? 'Going to stop 1' : ($this->isRoundTrip($booking) ? 'Going' : 'Trip started')),
+            $this->isParcel($booking) ? 'Parcel in transit' : ($this->isAmbulance($booking) ? 'Going to hospital' : ($this->isMultiStop($booking) ? 'Going to stop 1' : ($this->isRoundTrip($booking) ? 'Going' : 'Trip started'))),
             $this->isParcel($booking)
                 ? 'Your parcel is on the way to the receiver.'
+                : ($this->isAmbulance($booking)
+                ? 'The ambulance is on the way to the hospital.'
                 : ($this->isMultiStop($booking)
                 ? 'OTP started the trip. The driver is going to stop 1. The trip finishes only at the last stop.'
                 : ($this->isRoundTrip($booking)
                 ? 'OTP started the first side only. The round trip is not finished at the destination.'
-                : 'Your trip has started.')),
+                : 'Your trip has started.'))),
             ['type' => 'trip', 'event' => 'started', 'bookingId' => (string) $booking->id],
         );
         Log::info('booking.trip_started', ['bookingId' => $booking->id]);
@@ -1218,8 +1233,8 @@ class BookingService
             $this->syncLinkedParcel($booking, 'arrived');
             $this->push->notifyUsers(
                 [(int) $booking->customer_id],
-                'Driver has arrived',
-                'Your driver is at the pickup point.',
+                $this->isAmbulance($booking) ? 'Ambulance has arrived' : 'Driver has arrived',
+                $this->isAmbulance($booking) ? 'The ambulance is at the pickup point.' : 'Your driver is at the pickup point.',
                 ['type' => 'trip', 'event' => 'arrived', 'bookingId' => (string) $booking->id],
             );
 
@@ -1519,6 +1534,9 @@ class BookingService
 
     public function expireSearching(?int $exceptId = null): int
     {
+        if ($exceptId === null && ! Cache::add('booking-expire-search', 1, now()->addSeconds(8))) {
+            return 0;
+        }
         $timeout = $this->settings->requestTimeoutSeconds();
         $q = Booking::query()->whereIn('status', BookingStatus::searching());
         if ($exceptId) {
@@ -2880,7 +2898,7 @@ class BookingService
         }
 
         if ($this->isAmbulance($row)) {
-            return ['start'];
+            return ['arrive'];
         }
 
         if ($this->commissionLocksDriver($row)) {
@@ -4165,12 +4183,76 @@ class BookingService
     }
 
     /**
+     * Write nearby searching bookings onto this driver so the next offers poll rings immediately.
+     *
+     * @return list<Booking>
+     */
+    private function attachNearbySearching(Driver $driver, User $actor, ?float $lat = null, ?float $lng = null): array
+    {
+        $lat = $lat ?? ($actor->last_lat !== null ? (float) $actor->last_lat : null);
+        $lng = $lng ?? ($actor->last_lng !== null ? (float) $actor->last_lng : null);
+        if ($lat === null || $lng === null || ! Schema::hasTable('booking_driver_requests')) {
+            return [];
+        }
+        $categories = $driver->vehicles
+            ->map(fn ($vehicle) => strtoupper(trim((string) $vehicle->category)))
+            ->filter()
+            ->unique()
+            ->values();
+        if ($categories->isEmpty()) {
+            return [];
+        }
+        $radius = $this->settings->radiusKm();
+        $rows = Booking::query()
+            ->where('status', BookingStatus::SEARCHING)
+            ->whereNull('driver_id')
+            ->where(function ($query) {
+                $query->whereNull('scheduled_at')->orWhere('scheduled_at', '<=', now()->addMinutes(5));
+            })
+            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'SCHEDULE', 'RENTAL', 'AMBULANCE'])
+            ->orderByDesc('id')
+            ->limit(15)
+            ->get();
+        $attached = [];
+        foreach ($rows as $booking) {
+            $product = strtoupper((string) $booking->product);
+            $familyOk = $categories->contains(function (string $vehicleCat) use ($booking, $product) {
+                return $product === 'PARCEL'
+                    ? \App\Support\VehicleCategory::parcelCompatible($vehicleCat, (string) $booking->category)
+                    : \App\Support\VehicleCategory::sameFamily($vehicleCat, (string) $booking->category);
+            });
+            if (! $familyOk || $booking->pickup_lat === null) {
+                continue;
+            }
+            $km = Geo::haversineKm($lat, $lng, (float) $booking->pickup_lat, (float) $booking->pickup_lng);
+            if ($km > $radius) {
+                continue;
+            }
+            $already = DB::table('booking_driver_requests')
+                ->where('booking_id', $booking->id)
+                ->where('driver_id', $driver->id)
+                ->exists();
+            if ($already) {
+                continue;
+            }
+            $this->writeOffers($booking, [[
+                'driverId' => (int) $driver->id,
+                'userId' => (int) $actor->id,
+                'distanceKm' => round($km, 2),
+            ]]);
+            $attached[] = $booking;
+        }
+
+        return $attached;
+    }
+
+    /**
      * A customer can be waiting while every driver is offline. When one comes
      * online, attach that waiting search immediately.
      */
     public function offerWaitingToDriver(User $actor, ?float $lat = null, ?float $lng = null): void
     {
-        if (! Cache::add('offer-wait:'.$actor->id, 1, now()->addSeconds(12))) {
+        if (! Cache::add('offer-wait:'.$actor->id, 1, now()->addSeconds(2))) {
             return;
         }
         $driver = Driver::query()->where('user_id', $actor->id)->with('vehicles')->first();
@@ -4183,54 +4265,9 @@ class BookingService
         }
         $lat = $lat ?? ($actor->last_lat !== null ? (float) $actor->last_lat : null);
         $lng = $lng ?? ($actor->last_lng !== null ? (float) $actor->last_lng : null);
-        if ($lat === null || $lng === null) {
-            return;
-        }
-        $category = strtoupper((string) ($driver->vehicles->first()?->category ?? ''));
-        if ($category === '') {
-            return;
-        }
-        $radius = $this->settings->radiusKm();
-        $rows = Booking::query()
-            ->where('status', BookingStatus::SEARCHING)
-            ->whereNull('driver_id')
-            ->where(function ($query) {
-                $query->whereNull('scheduled_at')->orWhere('scheduled_at', '<=', now()->addMinutes(5))->orWhereIn('product', ['LOCAL_CAB', 'CITY_RIDE', 'CITY', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'RENTAL', 'SCHEDULE']);
-            })
-            ->whereIn('product', ['LOCAL_CAB', 'ONE_WAY', 'ROUND_WAY', 'PARCEL', 'AIRPORT', 'RAILWAY', 'MULTI_STOP', 'SCHEDULE', 'RENTAL'])
-            ->orderByDesc('id')
-            ->limit(20)
-            ->get();
+        $rows = $this->attachNearbySearching($driver, $actor, $lat, $lng);
         $pushes = [];
         foreach ($rows as $booking) {
-            $bookingProduct = strtoupper((string) $booking->product);
-            $familyOk = $bookingProduct === 'PARCEL'
-                ? \App\Support\VehicleCategory::parcelCompatible($category, (string) $booking->category)
-                : \App\Support\VehicleCategory::sameFamily($category, (string) $booking->category);
-            if (! $familyOk) {
-                continue;
-            }
-            if ($this->scheduleConflicts($driver, $booking)) {
-                continue;
-            }
-            $km = Geo::haversineKm($lat, $lng, (float) $booking->pickup_lat, (float) $booking->pickup_lng);
-            $offerRadius = $radius;
-            if ($km > $offerRadius) {
-                continue;
-            }
-            $alreadyOffered = Schema::hasTable('booking_driver_requests')
-                && DB::table('booking_driver_requests')
-                    ->where('booking_id', $booking->id)
-                    ->where('driver_id', $driver->id)
-                    ->exists();
-            $this->writeOffers($booking, [[
-                'driverId' => (int) $driver->id,
-                'userId' => (int) $actor->id,
-                'distanceKm' => round($km, 2),
-            ]]);
-            if ($alreadyOffered) {
-                continue;
-            }
             $pushes[] = [
                 'title' => strtoupper((string) $booking->product) === 'PARCEL' ? 'New parcel request' : (strtoupper((string) $booking->product) === 'MULTI_STOP' ? 'New multi-stop ride' : (strtoupper((string) $booking->product) === 'AIRPORT' ? 'New airport ride' : (strtoupper((string) $booking->product) === 'RAILWAY' ? 'New railway ride' : 'New KarnaRide booking'))),
                 'body' => trim(($booking->pickup_text ?: 'Pickup').' → '.($booking->drop_text ?: 'Drop')),
@@ -4259,6 +4296,9 @@ class BookingService
         if (! $driver) {
             return [];
         }
+        if ($driver->online && in_array(strtolower((string) $driver->duty_status), ['online', 'available'], true)) {
+            $this->attachNearbySearching($driver, $actor);
+        }
         $ids = $this->offeredBookingIds((int) $driver->id);
         $category = strtoupper((string) ($driver->vehicles->first()?->category ?? ''));
         $driverLat = $actor->last_lat !== null ? (float) $actor->last_lat : null;
@@ -4278,7 +4318,7 @@ class BookingService
                 $query->orWhere('product', 'PARCEL')->orWhere('product', 'MULTI_STOP')->orWhere('product', 'RENTAL')->orWhere('product', 'AMBULANCE');
             })
             ->orderByDesc('id')
-            ->limit(40)
+            ->limit(12)
             ->get()
             ->filter(function (Booking $row) use ($ids, $category, $driver, $driverLat, $driverLng, $radius) {
                 $visible = $ids && in_array((int) $row->id, $ids, true);
@@ -4920,7 +4960,7 @@ class BookingService
         return $ref;
     }
 
-    private function notifyOps(Booking $booking, string $title): void
+    public function notifyOps(Booking $booking, string $title): void
     {
         $email = (string) (DB::table('system_settings')->where('key', 'booking_notify_email')->value('value')
             ?? config('karnacab.booking_notify_email', 'karnaride@gmail.com'));
