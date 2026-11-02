@@ -2063,6 +2063,7 @@ class AppSurfaceService
         $total = (int) ($row->quote_paise ?? 0);
         $status = strtolower((string) $row->status);
         $bookingStatus = null;
+        $linked = null;
         if (! empty($row->booking_id)) {
             $linked = DB::table('bookings')->where('id', $row->booking_id)->first();
             if ($linked) {
@@ -2145,7 +2146,11 @@ class AppSurfaceService
                 'driverEarningRupees' => $earningPaise / 100,
                 'currency' => 'INR',
             ],
-            'billedKm' => (float) ($row->distance_km ?? 0),
+            'billedKm' => (float) ($row->distance_km ?? data_get($linked ?? null, 'distance_km') ?? 0),
+            'distanceKm' => ($km = data_get($linked ?? null, 'actual_distance_km') ?? data_get($linked ?? null, 'distance_km') ?? $row->distance_km) !== null && (float) $km > 0 ? (float) $km : null,
+            'durationSeconds' => data_get($linked ?? null, 'duration_seconds'),
+            'tripStartedAt' => ($started = data_get($linked ?? null, 'trip_started_at')) ? (string) $started : null,
+            'tripEndedAt' => ($ended = data_get($linked ?? null, 'trip_ended_at')) ? (string) $ended : null,
             'allowedActions' => $actions,
             'navigation' => [
                 'pickupUrl' => $pickupUrl,
