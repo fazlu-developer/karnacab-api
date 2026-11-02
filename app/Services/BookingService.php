@@ -1775,6 +1775,7 @@ class BookingService
             'category' => $row->category,
             'status' => $row->status,
             'cancelReason' => $row->cancel_reason ?? null,
+            'cancelledBy' => $row->cancelled_by ?? null,
             'paymentMode' => $row->payment_mode ?? 'CASH',
             'paymentType' => $this->paymentTypeLabel($row->payment_mode ?? 'CASH'),
             'ratings' => $this->ratingsPayload($row),

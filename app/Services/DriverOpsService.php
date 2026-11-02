@@ -50,7 +50,14 @@ class DriverOpsService
         $duty = $driver->duty_status ?: ($online ? 'online' : 'offline');
         $activeRide = \App\Models\Booking::query()
             ->where('driver_id', $driver->id)
-            ->whereIn('status', \App\Support\BookingStatus::openForDriver())
+            ->where(function ($query) {
+                $query->whereIn('status', \App\Support\BookingStatus::openForDriver())
+                    ->orWhere(function ($pending) {
+                        $pending->where('status', \App\Support\BookingStatus::COMPLETED)
+                            ->where('product', 'AMBULANCE')
+                            ->where('quote_snapshot', 'like', '%"manualFarePending":true%');
+                    });
+            })
             ->orderByDesc('id')
             ->first();
         $activeParcel = Schema::hasTable('parcel_shipments')
