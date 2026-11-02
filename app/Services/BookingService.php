@@ -1961,7 +1961,10 @@ class BookingService
             return null;
         }
 
-        return 'https://www.google.com/maps/dir/?api=1&destination='.(float) $lat.','.(float) $lng.'&travelmode=driving';
+        $lat = number_format((float) $lat, 6, '.', '');
+        $lng = number_format((float) $lng, 6, '.', '');
+
+        return 'https://www.google.com/maps/dir/?api=1&destination='.$lat.','.$lng.'&travelmode=driving&dir_action=navigate';
     }
 
     public function remindUpcoming(): int
@@ -4065,8 +4068,8 @@ class BookingService
             'phoneMasked' => $customer->phone ? substr($customer->phone, 0, 2).'******'.substr($customer->phone, -2) : null,
             'photoUrl' => app(KycDocumentService::class)->previewUrl($customer->avatar_path ?? null),
             'avatarUrl' => app(KycDocumentService::class)->previewUrl($customer->avatar_path ?? null),
-            'lat' => $customer->last_lat !== null ? (float) $customer->last_lat : (float) $row->pickup_lat,
-            'lng' => $customer->last_lng !== null ? (float) $customer->last_lng : (float) $row->pickup_lng,
+            'lat' => $row->pickup_lat !== null ? (float) $row->pickup_lat : ($customer->last_lat !== null ? (float) $customer->last_lat : null),
+            'lng' => $row->pickup_lng !== null ? (float) $row->pickup_lng : ($customer->last_lng !== null ? (float) $customer->last_lng : null),
         ];
     }
 

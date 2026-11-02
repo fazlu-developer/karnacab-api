@@ -54,7 +54,7 @@ class DriverOpsService
             ->orderByDesc('id')
             ->first();
         $activeParcel = Schema::hasTable('parcel_shipments')
-            ? DB::table('parcel_shipments')->where('driver_id', $driver->id)->whereIn('status', ['assigned', 'picked_up', 'in_transit', 'out_for_delivery'])->orderByDesc('id')->first()
+            ? DB::table('parcel_shipments')->where('driver_id', $driver->id)->whereIn('status', ['assigned', 'arrived', 'picked_up', 'in_transit', 'destination', 'out_for_delivery'])->orderByDesc('id')->first()
             : null;
         if ($online && in_array(strtolower((string) $duty), ['on_trip', 'on_delivery'], true) && ! $activeRide && ! $activeParcel) {
             $driver->update(['duty_status' => 'online']);
@@ -181,11 +181,32 @@ class DriverOpsService
                 'model' => $vehicle->model,
                 'status' => $vehicle->status,
             ] : null,
-            'activeJob' => $activeRide
-                ? array_merge(app(\App\Services\BookingService::class)->present($activeRide, $actor), ['kind' => 'ride'])
-                : ($activeParcel ? ['kind' => 'parcel', 'id' => (string) $activeParcel->id, 'status' => $activeParcel->status] : null),
+            'activeJob' => $this->activeJobPayload($activeRide, $activeParcel, $actor),
             'territory' => TerritoryContacts::forUser($actor),
         ];
+    }
+
+    /**
+     * A parcel shipment must stay the active job after the pickup PIN.
+     * The linked booking also becomes TRIP_STARTED, and returning that ride
+     * replaces the parcel screen.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function activeJobPayload(?\App\Models\Booking $activeRide, ?object $activeParcel, User $actor): ?array
+    {
+        $rideIsParcel = $activeRide && strtoupper((string) $activeRide->product) === 'PARCEL';
+        if ($activeParcel && ($rideIsParcel || ! $activeRide)) {
+            return ['kind' => 'parcel', 'id' => (string) $activeParcel->id, 'status' => $activeParcel->status];
+        }
+        if ($activeRide && ! $rideIsParcel) {
+            return array_merge(app(\App\Services\BookingService::class)->present($activeRide, $actor), ['kind' => 'ride']);
+        }
+        if ($activeParcel) {
+            return ['kind' => 'parcel', 'id' => (string) $activeParcel->id, 'status' => $activeParcel->status];
+        }
+
+        return null;
     }
 
     public function offers(User $actor): array
@@ -694,7 +715,7 @@ class DriverOpsService
         $onJob = in_array(strtolower((string) $driver->duty_status), ['on_trip', 'on_delivery'], true);
         $openJob = $onJob && (
             \App\Models\Booking::query()->where('driver_id', $driver->id)->whereIn('status', \App\Support\BookingStatus::openForDriver())->exists()
-            || (Schema::hasTable('parcel_shipments') && DB::table('parcel_shipments')->where('driver_id', $driver->id)->whereIn('status', ['assigned', 'picked_up', 'in_transit', 'out_for_delivery'])->exists())
+            || (Schema::hasTable('parcel_shipments') && DB::table('parcel_shipments')->where('driver_id', $driver->id)->whereIn('status', ['assigned', 'arrived', 'picked_up', 'in_transit', 'destination', 'out_for_delivery'])->exists())
         );
         if ($online) {
             $kyc = strtolower((string) ($driver->kyc_status ?? ''));
