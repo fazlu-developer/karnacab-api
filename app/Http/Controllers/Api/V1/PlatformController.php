@@ -176,6 +176,11 @@ class PlatformController extends Controller
         $requested = strtoupper((string) ($payload['category'] ?? 'BIKE'));
         $options = [];
         $product = strtoupper((string) ($payload['product'] ?? 'LOCAL_CAB'));
+        $pickupLat = $payload['pickupLat'] ?? $request->input('pickupLat', $request->input('lat'));
+        $pickupLng = $payload['pickupLng'] ?? $request->input('pickupLng', $request->input('lng'));
+        $nearest = (is_numeric($pickupLat) && is_numeric($pickupLng))
+            ? app(\App\Services\NearbyDriverService::class)->nearestByCategory((float) $pickupLat, (float) $pickupLng, $product)
+            : [];
         foreach (app(\App\Services\VehicleCatalogService::class)->typesForProduct($product) as $vehicle) {
             try {
                 $quote = $this->fares->quote(array_merge($payload, [
@@ -192,17 +197,10 @@ class PlatformController extends Controller
             }
             $billedKm = (float) ($quote['billedKm'] ?? $payload['distanceKm'] ?? 5);
             $routeMinutes = (int) ($payload['durationMinutes'] ?? 0);
-            $durationMinutes = $routeMinutes > 0 ? $routeMinutes : max(1, (int) round($billedKm * 2.3));
-            $etaMinutes = match ($vehicle['key']) {
-                'BIKE' => 3,
-                'AUTO' => 4,
-                'E_RICKSHAW' => 6,
-                'MINI' => 5,
-                'SEDAN' => 8,
-                'SUV' => 8,
-                'TRAVELLER' => 10,
-                default => 7,
-            };
+            $durationMinutes = $routeMinutes > 0 ? $routeMinutes : null;
+            $near = $nearest[strtoupper((string) $vehicle['key'])] ?? null;
+            $etaMinutes = null;
+            $pickupDistanceKm = $near['distanceKm'] ?? null;
             $blurbs = [
                 'BIKE' => 'Best for single rider',
                 'AUTO' => 'Quick & affordable',
@@ -220,8 +218,12 @@ class PlatformController extends Controller
                 'imageUrl' => $image,
                 'blurb' => $subtitle !== '' ? $subtitle : ($blurbs[$vehicle['key']] ?? ''),
                 'etaMinutes' => $etaMinutes,
+                'etaLabel' => $near ? 'ETA unavailable' : null,
                 'durationMinutes' => $durationMinutes,
                 'distanceKm' => $billedKm,
+                'pickupDistanceKm' => $pickupDistanceKm,
+                'availableCount' => (int) ($near['count'] ?? 0),
+                'availability' => $near ? 'available' : 'unavailable',
             ]);
         }
         usort($options, function ($a, $b) use ($requested) {
@@ -511,10 +513,13 @@ class PlatformController extends Controller
     public function bookingsAmbulanceFare(Request $request, string $id)
     {
         $data = $request->validate([
-            'rupees' => 'required|integer|min:1|max:500000',
+            'rupees' => 'required|numeric|min:0|max:500000',
+            'method' => 'required|in:CASH,UPI,OTHER',
+            'reference' => 'nullable|string|max:80',
+            'remarks' => 'nullable|string|max:240',
         ]);
 
-        return $this->bookings->submitAmbulanceFare($request->user(), $id, (int) $data['rupees']);
+        return $this->bookings->submitAmbulanceFare($request->user(), $id, $data);
     }
 
     public function bookingsLifecycle(Request $request, string $id)
@@ -589,6 +594,7 @@ class PlatformController extends Controller
             'lat' => 'required|numeric',
             'lng' => 'required|numeric',
             'heading' => 'nullable|numeric',
+            'speed' => 'nullable|numeric',
             'bookingId' => 'nullable|string',
         ]);
 
@@ -598,6 +604,7 @@ class PlatformController extends Controller
             (float) $data['lng'],
             isset($data['heading']) ? (float) $data['heading'] : null,
             $data['bookingId'] ?? null,
+            isset($data['speed']) ? (float) $data['speed'] : null,
         );
     }
 

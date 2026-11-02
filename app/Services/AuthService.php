@@ -479,12 +479,55 @@ class AuthService
     {
         $this->rotateDeviceSession($user);
         $fresh = $user->fresh() ?? $user;
+        $jti = (string) \Illuminate\Support\Str::uuid();
+        $this->openSingleSession($fresh, $jti);
 
         return [
-            'accessToken' => JwtToken::encode((string) $fresh->id, $fresh->role, (int) ($fresh->session_epoch ?? 0)),
+            'accessToken' => JwtToken::encode((string) $fresh->id, $fresh->role, (int) ($fresh->session_epoch ?? 0), $jti),
             'tokenType' => 'Bearer',
             'user' => $this->present($fresh),
         ];
+    }
+
+    private function openSingleSession(User $user, string $jti): void
+    {
+        $this->ensureSessionTable();
+        $now = now();
+        DB::table('app_sessions')->where('user_id', $user->id)->whereNull('revoked_at')->update([
+            'status' => 'revoked',
+            'revoked_at' => $now,
+            'updated_at' => $now,
+        ]);
+        DB::table('app_sessions')->insert([
+            'user_id' => $user->id,
+            'jti' => $jti,
+            'role' => $user->role,
+            'device_type' => substr((string) request()->userAgent(), 0, 80),
+            'status' => 'active',
+            'logged_in_at' => $now,
+            'last_seen_at' => $now,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+    }
+
+    private function ensureSessionTable(): void
+    {
+        if (Schema::hasTable('app_sessions')) {
+            return;
+        }
+        Schema::create('app_sessions', function ($table) {
+            $table->id();
+            $table->unsignedBigInteger('user_id')->index();
+            $table->string('jti', 64)->unique();
+            $table->string('role', 32)->nullable();
+            $table->string('device_type', 80)->nullable();
+            $table->string('status', 20)->default('active')->index();
+            $table->timestamp('logged_in_at')->nullable();
+            $table->timestamp('last_seen_at')->nullable();
+            $table->timestamp('revoked_at')->nullable();
+            $table->timestamps();
+        });
     }
 
     private function rotateDeviceSession(User $user): void
@@ -508,6 +551,14 @@ class AuthService
     public function revokeAppSession(User $user): array
     {
         $this->rotateDeviceSession($user);
+        if (Schema::hasTable('app_sessions')) {
+            $now = now();
+            DB::table('app_sessions')->where('user_id', $user->id)->whereNull('revoked_at')->update([
+                'status' => 'revoked',
+                'revoked_at' => $now,
+                'updated_at' => $now,
+            ]);
+        }
 
         return ['ok' => true];
     }

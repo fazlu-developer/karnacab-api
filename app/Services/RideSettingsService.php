@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Schema;
 class RideSettingsService
 {
     public const RADIUS_KEY = 'driver_search_radius_km';
+    public const RADIUS_STEPS_KEY = 'driver_search_radius_steps';
     public const LEGACY_RADIUS_KEY = 'driver_offer_radius_km';
     public const TIMEOUT_KEY = 'ride_request_timeout_seconds';
     public const LOCATION_STALE_KEY = 'driver_location_stale_seconds';
@@ -39,6 +40,36 @@ class RideSettingsService
         $km = is_numeric($value) ? (float) $value : 20.0;
 
         return max(1, min(100, $km));
+    }
+
+    /**
+     * Expanding search rings. The last step is never larger than the admin maximum.
+     *
+     * @return list<float>
+     */
+    public function radiusSteps(): array
+    {
+        $max = $this->radiusKm();
+        $raw = (string) ($this->get(self::RADIUS_STEPS_KEY) ?? '5,10,15,20');
+        $steps = [];
+        foreach (preg_split('/[,\s]+/', $raw) ?: [] as $part) {
+            if (! is_numeric($part)) {
+                continue;
+            }
+            $km = max(1, min($max, (float) $part));
+            if (! in_array($km, $steps, true)) {
+                $steps[] = $km;
+            }
+        }
+        if ($steps === []) {
+            $steps = [min(5, $max)];
+        }
+        sort($steps);
+        if ($steps[array_key_last($steps)] < $max) {
+            $steps[] = $max;
+        }
+
+        return array_values($steps);
     }
 
     public function requestTimeoutSeconds(): int
@@ -266,6 +297,7 @@ class RideSettingsService
         $this->ensureDefaults();
         return [
             'driverSearchRadiusKm' => $this->radiusKm(),
+            'driverSearchRadiusSteps' => $this->radiusSteps(),
             'rideRequestTimeoutSeconds' => $this->requestTimeoutSeconds(),
             'driverLocationStaleSeconds' => $this->locationStaleSeconds(),
             'driverWalletMinPaise' => $this->driverWalletMinPaise(),

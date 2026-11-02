@@ -740,16 +740,34 @@ class DriverOpsService
         return $this->me($actor);
     }
 
-    public function pingLocation(User $actor, float $lat, float $lng, ?float $heading = null, ?string $bookingId = null): array
+    public function pingLocation(User $actor, float $lat, float $lng, ?float $heading = null, ?string $bookingId = null, ?float $speed = null): array
     {
         abort_unless($lat >= -90 && $lat <= 90 && $lng >= -180 && $lng <= 180, 422, 'Unable to update driver location.');
+        if ($actor->last_lat !== null && $actor->last_lng !== null && $actor->location_updated_at) {
+            $seconds = abs(now()->diffInSeconds($actor->location_updated_at));
+            $jumpKm = \App\Support\Geo::haversineKm((float) $actor->last_lat, (float) $actor->last_lng, $lat, $lng);
+            if ($seconds < 20 && $jumpKm > 2) {
+                return [
+                    'ok' => true,
+                    'lat' => (float) $actor->last_lat,
+                    'lng' => (float) $actor->last_lng,
+                    'heading' => $actor->last_heading ?? null,
+                    'bookingId' => $bookingId,
+                    'ignored' => 'jump',
+                    'recordedAt' => optional($actor->location_updated_at)?->toIso8601String(),
+                ];
+            }
+        }
         $payload = [
             'last_lat' => $lat,
             'last_lng' => $lng,
             'location_updated_at' => now(),
         ];
-        if ($heading !== null && \Illuminate\Support\Facades\Schema::hasColumn('users', 'last_heading')) {
+        if ($heading !== null && $heading >= 0 && $heading <= 360 && \Illuminate\Support\Facades\Schema::hasColumn('users', 'last_heading')) {
             $payload['last_heading'] = $heading;
+        }
+        if ($speed !== null && $speed >= 0 && \Illuminate\Support\Facades\Schema::hasColumn('users', 'last_speed')) {
+            $payload['last_speed'] = round($speed, 2);
         }
         User::query()->where('id', $actor->id)->update($payload);
         $driver = Driver::query()->where('user_id', $actor->id)->first();

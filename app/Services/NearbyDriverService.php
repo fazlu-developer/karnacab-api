@@ -24,9 +24,15 @@ class NearbyDriverService
         bool $includeOutside = false,
         ?int $districtId = null,
         ?string $product = null,
+        bool $anyCategory = false,
     ): array {
+        if ($lat < -90 || $lat > 90 || $lng < -180 || $lng > 180 || ($lat == 0.0 && $lng == 0.0)) {
+            return [];
+        }
         $radius = $radiusKm ?? $this->settings->radiusKm();
         $staleAfter = now()->subSeconds($this->settings->locationStaleSeconds());
+        $latPad = $radius / 110;
+        $lngPad = $radius / max(1, 110 * cos(deg2rad($lat)));
         $busyStatuses = BookingStatus::openForDriver();
 
         $rowsQuery = DB::table('drivers as d')
@@ -43,18 +49,20 @@ class NearbyDriverService
             ->whereNotNull('v.id')
             ->whereNotNull('u.last_lat')
             ->whereNotNull('u.last_lng')
-            ->where(function ($q) use ($staleAfter) {
-                $q->whereNull('u.location_updated_at')
-                    ->orWhere('u.location_updated_at', '>=', $staleAfter);
-            })
-            ->where(function ($q) use ($category, $product) {
+            ->whereNotNull('u.location_updated_at')
+            ->where('u.location_updated_at', '>=', $staleAfter)
+            ->whereBetween('u.last_lat', [$lat - $latPad, $lat + $latPad])
+            ->whereBetween('u.last_lng', [$lng - $lngPad, $lng + $lngPad])
+            ->when(! $anyCategory, function ($q) use ($category, $product) {
                 $family = strtoupper((string) $product) === 'PARCEL'
                     ? \App\Support\VehicleCategory::parcelOfferFamily((string) $category)
                     : \App\Support\VehicleCategory::family((string) $category);
-                $q->whereIn('v.category', $family);
-                foreach ($family as $item) {
-                    $q->orWhereRaw('UPPER(v.category) = ?', [$item]);
-                }
+                $q->where(function ($inner) use ($family) {
+                    $inner->whereIn('v.category', $family);
+                    foreach ($family as $item) {
+                        $inner->orWhereRaw('UPPER(v.category) = ?', [$item]);
+                    }
+                });
             })
             ->whereNotExists(function ($q) use ($busyStatuses) {
                 $q->select(DB::raw(1))
@@ -68,30 +76,6 @@ class NearbyDriverService
                     ->from('parcel_shipments as ps')
                     ->whereColumn('ps.driver_id', 'd.id')
                     ->whereIn('ps.status', ['assigned', 'picked_up', 'in_transit', 'out_for_delivery', 'arrived']);
-            });
-        }
-        $stateId = null;
-        if ($districtId && Schema::hasTable('districts')) {
-            $stateId = DB::table('districts')->where('id', $districtId)->value('state_id');
-        }
-        if ($stateId && Schema::hasColumn('drivers', 'state_id')) {
-            $rowsQuery->where(function ($q) use ($stateId, $districtId) {
-                $q->where('d.state_id', $stateId)
-                    ->orWhere('u.state_id', $stateId)
-                    ->orWhere(function ($open) {
-                        $open->whereNull('d.state_id')->whereNull('u.state_id');
-                    });
-                if ($districtId) {
-                    $q->orWhere('d.district_id', $districtId)->orWhere('u.district_id', $districtId);
-                }
-            });
-        } elseif ($districtId && Schema::hasColumn('drivers', 'district_id')) {
-            $rowsQuery->where(function ($q) use ($districtId) {
-                $q->where('d.district_id', $districtId)
-                    ->orWhere('u.district_id', $districtId)
-                    ->orWhere(function ($open) {
-                        $open->whereNull('d.district_id')->whereNull('u.district_id');
-                    });
             });
         }
         $rows = $rowsQuery
@@ -116,6 +100,9 @@ class NearbyDriverService
             ->map(function ($row) use ($lat, $lng) {
                 $driverLat = (float) $row->last_lat;
                 $driverLng = (float) $row->last_lng;
+                if ($driverLat < -90 || $driverLat > 90 || $driverLng < -180 || $driverLng > 180 || ($driverLat == 0.0 && $driverLng == 0.0)) {
+                    return null;
+                }
                 $km = Geo::haversineKm($lat, $lng, $driverLat, $driverLng);
 
                 return [
@@ -133,7 +120,7 @@ class NearbyDriverService
                     'locationUpdatedAt' => $row->location_updated_at,
                 ];
             })
-            ->filter(fn (array $row) => $includeOutside || $row['distanceKm'] <= $radius)
+            ->filter(fn ($row) => is_array($row) && ($includeOutside || $row['distanceKm'] <= $radius))
             ->sortBy('distanceKm')
             ->values()
             ->all();
@@ -208,6 +195,28 @@ class NearbyDriverService
         }
 
         return $dropped;
+    }
+
+    /**
+     * Nearest fresh driver for each vehicle category inside the maximum radius.
+     *
+     * @return array<string, array{count: int, distanceKm: float, driverId: int}>
+     */
+    public function nearestByCategory(float $lat, float $lng, ?string $product = null): array
+    {
+        $grouped = [];
+        foreach ($this->search($lat, $lng, '', $this->settings->radiusKm(), false, null, $product, true) as $row) {
+            $key = strtoupper((string) ($row['vehicleCategory'] ?? ''));
+            if ($key === '') {
+                continue;
+            }
+            if (! isset($grouped[$key])) {
+                $grouped[$key] = ['count' => 0, 'distanceKm' => (float) $row['distanceKm'], 'driverId' => (int) $row['driverId']];
+            }
+            $grouped[$key]['count']++;
+        }
+
+        return $grouped;
     }
 
     public function publicMarkers(float $lat, float $lng, string $category, ?string $product = null): Collection
