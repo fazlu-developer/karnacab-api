@@ -1022,7 +1022,17 @@ class BookingService
     {
         abort_unless($actor->role === 'DRIVER', 403, 'Only the assigned driver can verify OTP');
         $booking = $this->assignedToDriver($actor, $id);
-        abort_unless($booking->status === BookingStatus::DRIVER_ARRIVED, 422, 'Arrive at pickup before verifying OTP.');
+        $parcelPickup = $this->isParcel($booking);
+        if ($parcelPickup) {
+            abort_unless(in_array((string) $booking->status, [
+                BookingStatus::DRIVER_ACCEPTED,
+                BookingStatus::LEGACY_ASSIGNED,
+                'DRIVER_ARRIVING',
+                BookingStatus::DRIVER_ARRIVED,
+            ], true), 422, 'Accept the parcel before entering the pickup OTP.');
+        } else {
+            abort_unless($booking->status === BookingStatus::DRIVER_ARRIVED, 422, 'Arrive at pickup before verifying OTP.');
+        }
         abort_unless(hash_equals((string) $booking->start_otp, trim($otp)), 422, 'Invalid OTP');
         if ($this->isRental($booking)) {
             abort_unless(BookingStatus::canTransition((string) $booking->status, BookingStatus::RENTAL_IN_USE), 422, 'Invalid booking status');
@@ -1046,10 +1056,13 @@ class BookingService
 
             return $this->present($booking->fresh(), $actor);
         }
-        abort_unless(BookingStatus::canTransition((string) $booking->status, BookingStatus::OTP_VERIFIED), 422, 'Invalid booking status');
+        if (! $parcelPickup) {
+            abort_unless(BookingStatus::canTransition((string) $booking->status, BookingStatus::OTP_VERIFIED), 422, 'Invalid booking status');
+        }
         $booking->update($this->filterColumns([
             'status' => BookingStatus::OTP_VERIFIED,
             'otp_verified_at' => now(),
+            'arrived_at' => $booking->arrived_at ?: now(),
         ]));
         $this->syncLinkedParcel($booking, 'picked_up');
         $this->push->notifyUsers(
@@ -1160,13 +1173,10 @@ class BookingService
             if ($actor->role !== 'DRIVER' && $this->isRental($booking) && $this->commissionLocksDriver($booking)) {
                 abort(422, 'This cab rental is confirmed. It cannot be cancelled after the 10% is paid.');
             }
-            if ($this->isParcel($booking) && $this->commissionLocksDriver($booking)) {
-                if ($actor->role === 'DRIVER') {
-                    abort(403, $this->parcelMode($booking) === 'schedule'
-                        ? 'The customer already paid the 10% commission. Call the customer and activate the parcel. You cannot cancel it.'
-                        : 'The customer already paid the 10% commission. You cannot cancel this parcel.');
-                }
-                abort(422, 'This parcel is confirmed. It cannot be cancelled after the 10% is paid.');
+            if ($actor->role === 'DRIVER' && $this->isParcel($booking) && $this->commissionLocksDriver($booking)) {
+                abort(403, $this->parcelMode($booking) === 'schedule'
+                    ? 'The customer already paid the 10% commission. Call the customer and activate the parcel. You cannot cancel it.'
+                    : 'The customer already paid the 10% commission. You cannot cancel this parcel.');
             }
             if ($actor->role === 'DRIVER' && $this->commissionLocksDriver($booking)) {
                 if ($this->isOneWay($booking)) {
@@ -1895,7 +1905,7 @@ class BookingService
                 || ($this->isParcel($row) && in_array((string) $row->status, [BookingStatus::OTP_VERIFIED, BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED', BookingStatus::COMPLETED], true))
                 || (! $this->isRental($row) && ! $this->isParcel($row) && in_array($row->status, [BookingStatus::TRIP_STARTED, BookingStatus::COMPLETED], true) && (! $isRound || $roundPhase === 'return' || $roundPhase === 'completed'))
             ) ? $row->end_otp : null,
-            'deliveryPin' => ($isCustomer && $this->isParcel($row) && in_array((string) $row->status, [BookingStatus::OTP_VERIFIED, BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED', BookingStatus::COMPLETED], true)) ? $row->end_otp : null,
+            'deliveryPin' => $this->parcelDeliveryPinFor($row, $actor, $isCustomer, $driverUser),
             'driverName' => $driverPayload['name'] ?? null,
             'driverLat' => $driverPayload['lat'] ?? null,
             'driverLng' => $driverPayload['lng'] ?? null,
@@ -2943,6 +2953,9 @@ class BookingService
         if ($this->isParcel($row) && $this->parcelNeedsAdvance($row)) {
             return ['cancel'];
         }
+        if ($this->isParcel($row)) {
+            return $this->commissionLocksDriver($row) ? ['verify_otp'] : ['verify_otp', 'cancel'];
+        }
         if (($this->isOneWay($row) && $this->oneWayNeedsAdvance($row)) || ($this->isRoundTrip($row) && $this->roundTripNeedsAdvance($row)) || ($this->isAirport($row) && $this->airportNeedsAdvance($row)) || ($this->isRailway($row) && $this->railwayNeedsAdvance($row)) || ($this->isMultiStop($row) && $this->multiStopNeedsAdvance($row)) || ($this->isRental($row) && $this->rentalNeedsAdvance($row))) {
             return ['cancel'];
         }
@@ -3077,6 +3090,37 @@ class BookingService
             BookingStatus::LEGACY_ASSIGNED,
             'DRIVER_ARRIVING',
         ], true);
+    }
+
+    private function parcelDeliveryPinFor(Booking $row, ?User $actor, bool $isCustomer, ?User $driverUser): ?string
+    {
+        if (! $this->isParcel($row) || trim((string) ($row->end_otp ?? '')) === '') {
+            return null;
+        }
+        $status = (string) $row->status;
+        $afterPickup = in_array($status, [BookingStatus::OTP_VERIFIED, BookingStatus::TRIP_STARTED, BookingStatus::LEGACY_STARTED, 'ONGOING', 'STARTED', BookingStatus::COMPLETED], true);
+        if ($isCustomer && $afterPickup) {
+            return (string) $row->end_otp;
+        }
+        $assignedDriver = $actor && $actor->role === 'DRIVER' && $driverUser && (int) $driverUser->id === (int) $actor->id;
+        $onJob = in_array($status, [
+            BookingStatus::DRIVER_ACCEPTED,
+            BookingStatus::LEGACY_ASSIGNED,
+            'DRIVER_ASSIGNED',
+            'DRIVER_ARRIVING',
+            BookingStatus::DRIVER_ARRIVED,
+            BookingStatus::OTP_VERIFIED,
+            BookingStatus::TRIP_STARTED,
+            BookingStatus::LEGACY_STARTED,
+            'ONGOING',
+            'STARTED',
+            BookingStatus::COMPLETED,
+        ], true);
+        if ($assignedDriver && $onJob) {
+            return (string) $row->end_otp;
+        }
+
+        return null;
     }
 
     private function parcelPickupOtpVisible(Booking $row): bool
@@ -4026,11 +4070,11 @@ class BookingService
             return [];
         }
         if ($actor->role === 'CUSTOMER' && (int) $row->customer_id === (int) $actor->id && ! BookingStatus::isTerminal($status) && $status !== BookingStatus::COMPLETED) {
-            if (! $this->isOneWay($row) && ! $this->isRoundTrip($row) && ! $this->isAirport($row) && ! $this->isRailway($row) && ! $this->isMultiStop($row) && $this->commissionLocksDriver($row) && ! $this->isCityRide($row) && $this->isScheduledTrip($row)
+            if (! $this->isParcel($row) && ! $this->isOneWay($row) && ! $this->isRoundTrip($row) && ! $this->isAirport($row) && ! $this->isRailway($row) && ! $this->isMultiStop($row) && $this->commissionLocksDriver($row) && ! $this->isCityRide($row) && $this->isScheduledTrip($row)
                 && in_array($status, ['SCHEDULED', BookingStatus::DRIVER_ACCEPTED, BookingStatus::LEGACY_ASSIGNED, BookingStatus::DRIVER_ARRIVED, 'DRIVER_ARRIVING'], true)) {
                 return [];
             }
-            if (in_array($status, [
+            $customerCanCancel = [
                 BookingStatus::SEARCHING,
                 BookingStatus::LEGACY_REQUESTED,
                 BookingStatus::PENDING,
@@ -4041,7 +4085,17 @@ class BookingService
                 'DRIVER_SEARCHING',
                 'CONFIRMED',
                 'SCHEDULED',
-            ], true)) {
+            ];
+            if ($this->isParcel($row)) {
+                $customerCanCancel = array_merge($customerCanCancel, [
+                    BookingStatus::OTP_VERIFIED,
+                    BookingStatus::TRIP_STARTED,
+                    BookingStatus::LEGACY_STARTED,
+                    'ONGOING',
+                    'STARTED',
+                ]);
+            }
+            if (in_array($status, $customerCanCancel, true)) {
                 return ['cancel'];
             }
         }
