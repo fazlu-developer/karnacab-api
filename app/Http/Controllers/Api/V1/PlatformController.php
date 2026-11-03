@@ -595,6 +595,7 @@ class PlatformController extends Controller
             'lng' => 'required|numeric',
             'heading' => 'nullable|numeric',
             'speed' => 'nullable|numeric',
+            'accuracy' => 'nullable|numeric',
             'bookingId' => 'nullable|string',
         ]);
 
@@ -605,6 +606,7 @@ class PlatformController extends Controller
             isset($data['heading']) ? (float) $data['heading'] : null,
             $data['bookingId'] ?? null,
             isset($data['speed']) ? (float) $data['speed'] : null,
+            isset($data['accuracy']) ? (float) $data['accuracy'] : null,
         );
     }
 

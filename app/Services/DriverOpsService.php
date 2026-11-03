@@ -747,13 +747,15 @@ class DriverOpsService
         return $this->me($actor);
     }
 
-    public function pingLocation(User $actor, float $lat, float $lng, ?float $heading = null, ?string $bookingId = null, ?float $speed = null): array
+    public function pingLocation(User $actor, float $lat, float $lng, ?float $heading = null, ?string $bookingId = null, ?float $speed = null, ?float $accuracy = null): array
     {
         abort_unless($lat >= -90 && $lat <= 90 && $lng >= -180 && $lng <= 180, 422, 'Unable to update driver location.');
-        if ($actor->last_lat !== null && $actor->last_lng !== null && $actor->location_updated_at) {
-            $seconds = abs(now()->diffInSeconds($actor->location_updated_at));
+        $trusted = $accuracy !== null && $accuracy > 0 && $accuracy <= 65;
+        if (! $trusted && $actor->last_lat !== null && $actor->last_lng !== null && $actor->location_updated_at) {
+            $seconds = max(1, (int) abs(now()->diffInSeconds($actor->location_updated_at)));
             $jumpKm = \App\Support\Geo::haversineKm((float) $actor->last_lat, (float) $actor->last_lng, $lat, $lng);
-            if ($seconds < 20 && $jumpKm > 2) {
+            $kmh = ($jumpKm / $seconds) * 3600;
+            if ($seconds < 8 && $jumpKm > 1 && $kmh > 200) {
                 return [
                     'ok' => true,
                     'lat' => (float) $actor->last_lat,
