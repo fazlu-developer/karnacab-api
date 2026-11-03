@@ -1332,6 +1332,12 @@ class BookingService
         if ($rentalReturn && (string) $booking->status === BookingStatus::COMPLETED) {
             return $this->present($booking, $actor);
         }
+        if ($this->isAmbulance($booking) && (string) $booking->status === BookingStatus::COMPLETED) {
+            $pending = is_array($booking->quote_snapshot) ? $booking->quote_snapshot : [];
+            if (! empty($pending['manualFarePending'])) {
+                return $this->present($booking, $actor);
+            }
+        }
         if ($rentalReturn) {
             abort_unless((string) $booking->status === BookingStatus::RENTAL_IN_USE, 422, 'Hand the cab over before the customer can return it.');
             $pin = preg_replace('/\D+/', '', (string) $otp) ?? '';
@@ -1530,7 +1536,14 @@ class BookingService
             Log::warning('booking.incentive_failed', ['bookingId' => (string) $booking->id, 'error' => $e->getMessage()]);
         }
         $fresh = $booking->fresh();
-        $invoiceRef = $this->writeInvoice($fresh, $totalPaise);
+        $invoiceRef = null;
+        if (! $ambulanceFareLater) {
+            try {
+                $invoiceRef = $this->writeInvoice($fresh, $totalPaise);
+            } catch (\Throwable $e) {
+                Log::warning('booking.invoice_failed', ['bookingId' => (string) $booking->id, 'error' => $e->getMessage()]);
+            }
+        }
         $presented = $this->present($fresh, $actor);
         $customerId = (int) $booking->customer_id;
         $driverUserId = (int) $driver->user_id;
@@ -1663,8 +1676,14 @@ class BookingService
             'payment_mode' => $method,
             'quote_snapshot' => $snapshot,
         ]));
+        $saved = $booking->fresh() ?? $booking;
+        try {
+            $this->writeInvoice($saved, $paise);
+        } catch (\Throwable $e) {
+            Log::warning('booking.ambulance_invoice_failed', ['bookingId' => (string) $booking->id, 'error' => $e->getMessage()]);
+        }
 
-        return $this->present($booking->fresh(), $actor);
+        return $this->present($saved, $actor);
     }
 
     public function present(Booking $row, ?User $actor = null): array
